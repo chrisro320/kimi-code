@@ -396,7 +396,7 @@ function renderBlockKey(block: AssistantRenderBlock, index: number): string {
       <!-- User turn → right-aligned soft-blue bubble (undo affordance lives
            outside the bubble with an inline confirm step). -->
       <template v-if="turn.role === 'user'">
-        <div class="u-bub">
+        <div class="u-bub turn-anchor" :data-turn-id="turn.id">
           <!-- Image attachments -->
           <div v-if="turn.images && turn.images.length > 0" class="u-imgs">
             <img
@@ -455,7 +455,7 @@ function renderBlockKey(block: AssistantRenderBlock, index: number): string {
 
       <!-- Compaction divider — prior turns stay untouched; summary opens in
            the right-side panel on click. -->
-      <div v-else-if="turn.role === 'compaction'" class="compact-divider" role="separator">
+      <div v-else-if="turn.role === 'compaction'" class="compact-divider turn-anchor" :data-turn-id="turn.id" role="separator">
         <span class="cd-line" aria-hidden="true" />
         <button
           v-if="turn.text"
@@ -471,7 +471,7 @@ function renderBlockKey(block: AssistantRenderBlock, index: number): string {
       </div>
 
       <!-- Assistant turn → left-aligned, no name/role label. -->
-      <div v-else class="a-msg">
+      <div v-else class="a-msg turn-anchor" :data-turn-id="turn.id">
         <template v-for="(blk, bi) in assistantRenderBlocks(turn)" :key="renderBlockKey(blk, bi)">
           <ThinkingBlock v-if="blk.kind === 'thinking'" :text="blk.thinking" :mobile="childBubble" :streaming="isStreamingRenderBlock(turn, blk)" @open="emit('openThinking', { turnId: turn.id, blockIndex: blk.sourceIndex })" />
           <div v-else-if="blk.kind === 'text' && blk.text" class="msg"><Markdown :text="blk.text" :streaming="isStreamingRenderBlock(turn, blk)" :open-file="(target) => emit('openFile', target)" /></div>
@@ -538,7 +538,7 @@ function renderBlockKey(block: AssistantRenderBlock, index: number): string {
 
     <template v-for="(turn, ti) in turns" :key="turn.id">
       <!-- Compaction divider — full-width separator, no gutter number. -->
-      <div v-if="turn.role === 'compaction'" class="compact-divider" role="separator">
+      <div v-if="turn.role === 'compaction'" class="compact-divider turn-anchor" :data-turn-id="turn.id" role="separator">
         <span class="cd-line" aria-hidden="true" />
         <button
           v-if="turn.text"
@@ -553,7 +553,7 @@ function renderBlockKey(block: AssistantRenderBlock, index: number): string {
         <span class="cd-line" aria-hidden="true" />
       </div>
 
-      <div v-else class="ln" :class="turn.role === 'user' ? 'userline' : 'ai'">
+      <div v-else class="ln turn-anchor" :data-turn-id="turn.id" :class="turn.role === 'user' ? 'userline' : 'ai'">
         <!-- Line-number gutter -->
         <span class="no">{{ turn.no }}</span>
 

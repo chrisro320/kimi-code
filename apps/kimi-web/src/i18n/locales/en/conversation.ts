@@ -1,5 +1,6 @@
 export default {
   jumpToLatestAria: 'Jump to latest message',
+  toc: 'Conversation outline',
   newMessages: 'Latest messages',
   loading: 'Loading…',
   emptyWorkspaceHint: 'Send in {name}',

@@ -267,6 +267,52 @@ const bubble = computed(() => props.mobile === true || props.modern === true);
 const runningTasks = computed(() => props.tasks.filter((t) => t.state === 'run').length);
 const changesCount = computed(() => (props.gitInfo ? props.changes?.length ?? 0 : 0));
 
+interface ConversationTocItem {
+  id: string;
+  role: ChatTurn['role'];
+  no: number;
+  title: string;
+}
+
+function tocTitle(turn: ChatTurn): string {
+  if (turn.role === 'compaction') return t('conversation.compactedPlain');
+  if (turn.role === 'user') {
+    if (turn.skillActivation) return `/${turn.skillActivation.name}`;
+    const text = turn.text.trim().replace(/\s+/g, ' ');
+    return text.length > 0 ? text : 'user';
+  }
+  const text = (turn.text || turn.thinking || '').trim().replace(/\s+/g, ' ');
+  if (text.length > 0) return text;
+  if ((turn.tools?.length ?? 0) > 0) return `${turn.tools!.length} tools`;
+  return 'kimi';
+}
+
+const conversationTocItems = computed<ConversationTocItem[]>(() =>
+  props.turns.map((turn, index) => ({
+    id: turn.id,
+    role: turn.role,
+    no: turn.no || index + 1,
+    title: tocTitle(turn),
+  })),
+);
+
+// Desktop renders chat per split-group (`group.active`), not via the top-level
+// `active` ref (which only tracks the mobile single-pane tab). Drive the TOC off
+// "is a chat pane actually visible in the layout" so splitting another group to
+// files/terminal doesn't wrongly hide the whole outline.
+function layoutHasChatGroup(node: PaneLayout): boolean {
+  return node.type === 'group'
+    ? node.active === 'chat'
+    : node.children.some(layoutHasChatGroup);
+}
+
+const showConversationToc = computed(() =>
+  !props.mobile &&
+  layoutHasChatGroup(paneLayout.layout.value) &&
+  !props.sessionLoading &&
+  conversationTocItems.value.length > 1,
+);
+
 // The first pending question (if any)
 const pendingQuestion = computed<UIQuestion | undefined>(() =>
   props.questions && props.questions.length > 0 ? props.questions[0] : undefined,
@@ -486,6 +532,21 @@ function scrollToBottom(smooth = false): void {
   lastScrollTop = el.scrollTop;
   following.value = true;
   showPill.value = false;
+}
+
+function attrEscape(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+function scrollToTurn(turnId: string): void {
+  const el = panesRef.value;
+  if (!el) return;
+  const target = el.querySelector<HTMLElement>(`.turn-anchor[data-turn-id="${attrEscape(turnId)}"]`);
+  if (!target) return;
+  following.value = false;
+  showPill.value = distanceFromBottom() > BOTTOM_THRESHOLD;
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function currentLayoutKey(): string {
@@ -807,6 +868,24 @@ onUnmounted(() => {
       @fork-session="(id) => emit('forkSession', id)"
       @archive-session="(id) => emit('archiveSession', id)"
     />
+
+    <nav
+      v-if="showConversationToc"
+      class="conversation-toc"
+      :aria-label="t('conversation.toc')"
+    >
+      <button
+        v-for="item in conversationTocItems"
+        :key="item.id"
+        type="button"
+        class="toc-bubble"
+        :class="item.role"
+        :title="item.title"
+        @click="scrollToTurn(item.id)"
+      >
+        <span class="toc-no">{{ item.no }}</span>
+      </button>
+    </nav>
 
     <TabBar
       v-if="mobile && !(turns.length === 0 && !sessionLoading)"
@@ -1308,6 +1387,81 @@ onUnmounted(() => {
 .content-wrap.align-left { margin-left: 0; margin-right: auto; }
 /* Mobile: bubbles span the full pane width; no reading-column constraint. */
 .content-wrap.align-mobile { max-width: none; }
+.conversation-toc {
+  position: absolute;
+  top: 58px;
+  bottom: 130px;
+  left: 12px;
+  z-index: 8;
+  width: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  padding: 5px 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.conversation-toc::-webkit-scrollbar {
+  display: none;
+}
+.toc-bubble {
+  appearance: none;
+  position: relative;
+  border: 0;
+  padding: 0;
+  width: 26px;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.68;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.toc-bubble:hover,
+.toc-bubble:focus-visible {
+  opacity: 1;
+  transform: translateX(1px);
+  outline: none;
+}
+.toc-bubble::before {
+  content: '';
+  display: block;
+  width: 18px;
+  height: 12px;
+  border-radius: 8px;
+  background: var(--line2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.toc-bubble.user::before {
+  margin-left: auto;
+  background: var(--blue);
+  box-shadow: none;
+}
+.toc-bubble.assistant::before {
+  margin-right: auto;
+}
+.toc-bubble.compaction::before {
+  width: 22px;
+  height: 3px;
+  margin: 6px auto 0;
+  border-radius: 999px;
+  background: var(--faint);
+  box-shadow: none;
+}
+.toc-no {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (max-width: 1180px) {
+  .conversation-toc {
+    display: none;
+  }
+}
 .swarm-stack {
   padding: 0 18px 16px;
 }
