@@ -8,6 +8,7 @@ import { getKimiWebApi } from '../api';
 import { isDaemonApiError, isDaemonNetworkError } from '../api/errors';
 import type {
   AppApprovalRequest,
+  AppConfig,
   AppGoal,
   AppNotice,
   AppNoticeDetail,
@@ -76,6 +77,7 @@ const UI_FONT_SIZE_DEFAULT = 15;
 const UI_FONT_SIZE_MIN = 12;
 const UI_FONT_SIZE_MAX = 20;
 const SESSION_NOT_FOUND_CODE = 40401;
+const PROMPT_NOT_FOUND_CODE = 40402;
 const ONBOARDED_STORAGE_KEY = 'kimi-web.onboarded';
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -403,6 +405,8 @@ interface ExtendedState extends KimiClientState {
   hiddenWorkspaceRoots: string[];
   /** Installed external apps that can be used with "Open in app". */
   availableOpenInApps: string[];
+  /** Global daemon configuration (secrets redacted). */
+  config: AppConfig | null;
 }
 
 const rawState: ExtendedState = reactive({
@@ -432,6 +436,7 @@ const rawState: ExtendedState = reactive({
   recentRoots: [],
   hiddenWorkspaceRoots: loadHiddenWorkspacesFromStorage(),
   availableOpenInApps: [],
+  config: null,
 });
 
 // Models + Providers reactive state (lazy-loaded, cached)
@@ -848,6 +853,23 @@ function connectEventsIfNeeded(): void {
       // persistent divider marker in the reducer (TUI parity: the scrollback
       // is kept, only a marker line records the compaction).
       applyEvent(appEvent, meta.sessionId, meta.seq);
+
+      // The daemon's prompt.submitted event is projected as a user messageCreated
+      // carrying the real prompt_id. When the HTTP submit response is lost
+      // (timeout / network error) this is the fallback that lets Stop work.
+      if (
+        appEvent.type === 'messageCreated' &&
+        appEvent.message.role === 'user' &&
+        appEvent.message.promptId !== undefined
+      ) {
+        const sid = appEvent.message.sessionId;
+        if (rawState.promptIdBySession[sid] !== appEvent.message.promptId) {
+          rawState.promptIdBySession = {
+            ...rawState.promptIdBySession,
+            [sid]: appEvent.message.promptId,
+          };
+        }
+      }
 
       if (appEvent.type === 'assistantDelta' && meta.sessionId === rawState.activeSessionId) {
         recordMoonDelta((appEvent.delta.text?.length ?? 0) + (appEvent.delta.thinking?.length ?? 0));
@@ -2035,6 +2057,7 @@ const sessionCost = computed<number>(() => {
 const authReady = computed<boolean>(() => rawState.authReady);
 const defaultModel = computed<string | null>(() => rawState.defaultModel);
 const managedProviderStatus = computed<string | null>(() => rawState.managedProviderStatus);
+const config = computed<AppConfig | null>(() => rawState.config);
 
 /** path → status map for quick badge lookup in the file tree */
 const changesByPath = computed<Record<string, string>>(() => {
@@ -2278,6 +2301,13 @@ function onSessionIdle(sid: string): void {
   // The turn finished — this session no longer has a prompt in flight.
   inFlightPromptSessions.delete(sid);
   rawState.sendingBySession = { ...rawState.sendingBySession, [sid]: false };
+  // Drop any cached prompt_id so a later skill activation (which has no
+  // prompt_id) doesn't accidentally reuse this stale id for :abort.
+  if (rawState.promptIdBySession[sid] !== undefined) {
+    const next = { ...rawState.promptIdBySession };
+    delete next[sid];
+    rawState.promptIdBySession = next;
+  }
 
   // For the session on screen, refresh git status (edits the agent just made)
   // and runtime status (model/context usage may have changed this turn).
@@ -2383,6 +2413,22 @@ async function checkAuth(): Promise<void> {
   }
 }
 
+/** Fetch global config from GET /api/v1/config. Defensive — never throws. */
+async function loadConfig(): Promise<void> {
+  try {
+    const api = getKimiWebApi();
+    rawState.config = await api.getConfig();
+  } catch {
+    // Daemon may not have this endpoint yet; leave null
+  }
+}
+
+/** Update global config via POST /api/v1/config. */
+async function updateConfig(patch: Partial<AppConfig>): Promise<void> {
+  const api = getKimiWebApi();
+  rawState.config = await api.setConfig(patch);
+}
+
 // False until the very first load() settles (success OR failure). Gates the
 // global connecting-splash so a page refresh doesn't flash a half-empty app.
 const initialized = ref(false);
@@ -2402,8 +2448,9 @@ async function load(): Promise<void> {
       loadModels(),
     ]);
 
-    // Check auth readiness (separate call — defensive)
+    // Check auth readiness and global config (separate calls — defensive)
     await checkAuth();
+    await loadConfig();
 
     rawState.sessions = sessionsPage.items;
 
@@ -3085,13 +3132,41 @@ async function abortCurrentPrompt(): Promise<void> {
   const sid = rawState.activeSessionId;
   if (!sid) return;
   const session = rawState.sessions.find((s) => s.id === sid);
-  // Prefer the authoritative prompt_id captured at submit time; fall back to the
-  // projector-derived one only if we never recorded a submit (e.g. resumed turn).
-  const promptId = rawState.promptIdBySession[sid] ?? session?.currentPromptId;
-  if (!promptId) return;
+
+  // 1. Authoritative id captured at submit time.
+  let promptId = rawState.promptIdBySession[sid];
+
+  // 2. Fallback to projector-derived id only when it is a real daemon prompt_id
+  //    (synthetic `pr_...` ids are rejected by the daemon).
+  if (promptId === undefined) {
+    const candidate = session?.currentPromptId;
+    if (candidate?.startsWith('prompt_')) {
+      promptId = candidate;
+    }
+  }
+
+  const api = getKimiWebApi();
+
+  // 3. If we have a real id, try the per-prompt abort first. On 40402 fall back
+  //    to session-level abort (the daemon may have restarted or the id is stale).
+  if (promptId !== undefined) {
+    try {
+      await api.abortPrompt(sid, promptId);
+      return;
+    } catch (err) {
+      if (isDaemonApiError(err) && err.code === PROMPT_NOT_FOUND_CODE) {
+        // Stale id — try the session-level fallback below.
+      } else {
+        pushOperationFailure('abortCurrentPrompt', err, { sessionId: sid });
+        return;
+      }
+    }
+  }
+
+  // 4. No real id, or the prompt id is no longer recognized: cancel whatever
+  //    is running in the session (including skill activations).
   try {
-    const api = getKimiWebApi();
-    await api.abortPrompt(sid, promptId);
+    await api.abortSession(sid);
   } catch (err) {
     pushOperationFailure('abortCurrentPrompt', err, { sessionId: sid });
   }
@@ -4012,6 +4087,10 @@ export function useKimiWebClient() {
     authReady,
     defaultModel,
     managedProviderStatus,
+
+    // Config state + actions
+    config,
+    updateConfig,
 
     // Auth actions
     checkAuth,

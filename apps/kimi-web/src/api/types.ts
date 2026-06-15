@@ -405,6 +405,7 @@ export type AppEvent =
   | { type: 'taskProgress'; sessionId: string; taskId: string; outputChunk: string; stream: 'stdout' | 'stderr' }
   | { type: 'taskCompleted'; sessionId: string; taskId: string; status: AppTaskStatus; outputPreview?: string; outputBytes?: number }
   | { type: 'goalUpdated'; sessionId: string; goal: AppGoal | null }
+  | { type: 'configChanged'; changedFields: string[]; config: AppConfig }
   | { type: 'unknown'; raw: unknown };
 
 // ---------------------------------------------------------------------------
@@ -431,6 +432,8 @@ export interface AppInFlightTurn {
   assistantText: string;
   thinkingText: string;
   runningTools: AppInFlightToolCall[];
+  /** Authoritative daemon prompt_id for the active prompt, if known. */
+  promptId?: string;
 }
 
 /**
@@ -532,6 +535,36 @@ export interface ProviderRefreshResult {
   failed: Array<{ provider: string; reason: string }>;
 }
 
+export interface AppConfigProvider {
+  type: string;
+  baseUrl?: string;
+  defaultModel?: string;
+  hasApiKey: boolean;
+}
+
+export interface AppConfig {
+  providers: Record<string, AppConfigProvider>;
+  defaultProvider?: string;
+  defaultModel?: string;
+  models?: Record<string, unknown>;
+  thinking?: unknown;
+  planMode?: boolean;
+  yolo?: boolean;
+  defaultThinking?: boolean;
+  defaultPermissionMode?: string;
+  defaultPlanMode?: boolean;
+  permission?: unknown;
+  hooks?: unknown[];
+  services?: unknown;
+  mergeAllAvailableSkills?: boolean;
+  extraSkillDirs?: string[];
+  loopControl?: unknown;
+  background?: unknown;
+  experimental?: Record<string, boolean>;
+  telemetry?: boolean;
+  raw?: Record<string, unknown>;
+}
+
 /** A session-scoped skill the user can invoke from the slash menu. */
 export interface AppSkill {
   name: string;
@@ -561,6 +594,8 @@ export interface KimiWebApi {
   /** Steer daemon-queued prompts into the active turn (TUI ctrl+s). */
   steerPrompts(sessionId: string, promptIds: string[]): Promise<{ steered: boolean; promptIds: string[] }>;
   abortPrompt(sessionId: string, promptId: string): Promise<{ aborted: boolean; atSeq?: number }>;
+  /** Cancel whatever is running in the session, including skill activations. */
+  abortSession(sessionId: string): Promise<{ aborted: boolean }>;
   compactSession(sessionId: string, instruction?: string): Promise<void>;
   undoSession(sessionId: string, count?: number): Promise<void>;
   forkSession(sessionId: string, input?: { title?: string }): Promise<AppSession>;
@@ -612,6 +647,10 @@ export interface KimiWebApi {
   // File upload / download
   uploadFile(input: { file: Blob; name?: string }): Promise<{ id: string; name: string; mediaType: string; size: number }>;
   getFileUrl(fileId: string): string;
+
+  // Config — REAL endpoints
+  getConfig(): Promise<AppConfig>;
+  setConfig(patch: Partial<AppConfig>): Promise<AppConfig>;
 
   // Auth — REAL endpoints
   getAuth(): Promise<{

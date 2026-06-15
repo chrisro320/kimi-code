@@ -142,7 +142,13 @@ export interface IPromptService {
   steer(sid: string, promptIds: readonly string[]): Promise<PromptSteerResult>;
 
   /**
-   * `POST /v1/sessions/{sid}/prompts/{pid}:abort` — cancel an in-flight prompt.
+   * `POST /v1/sessions/{sid}/prompts/{pid}:abort` — cancel an in-flight or
+   * queued prompt.
+   *
+   * For an active prompt, this issues `core.rpc.cancel` and synthesizes a
+   * `prompt.aborted` event. For a queued prompt, it removes the prompt from
+   * the queue and synthesizes `prompt.aborted` without dispatching to
+   * agent-core.
    *
    * Per REST.md §3.5: aborting an already-completed prompt returns
    * `PromptAlreadyCompletedError` (→ 40903 with `data.aborted: false`).
@@ -150,9 +156,33 @@ export interface IPromptService {
    * RPC + subsequent calls return 40903.
    *
    * Throws `SessionNotFoundError` (→ 40401) for unknown `sid`.
-   * Throws `PromptNotFoundError`  (→ 40402) when `pid` is unknown for `sid`.
+   * Throws `PromptNotFoundError`  (→ 40402) when `pid` is neither active nor
+   * queued for `sid`.
    */
   abort(sid: string, pid: string): Promise<PromptAbortResult>;
+
+  /**
+   * `POST /v1/sessions/{sid}:abort` — cancel whatever is currently running in
+   * the session without requiring a prompt_id.
+   *
+   * If `IPromptService` has an active prompt, this delegates to `abort()` so
+   * the normal synthetic `prompt.aborted` event is emitted. Otherwise it calls
+   * `core.rpc.cancel({ sessionId, agentId: 'main' })` without a `turnId`, which
+   * cancels any active agent-core turn (including skill activations).
+   *
+   * Returns `{ aborted: true }` when a cancel RPC was issued, `{ aborted: false }`
+   * when the session was idle. Throws `SessionNotFoundError` (→ 40401) for
+   * unknown `sid`.
+   */
+  abortBySession(sid: string): Promise<PromptAbortResult>;
+
+  /**
+   * Return the daemon prompt_id currently active for a session, if any.
+   * Returns `undefined` when the session is idle or the active prompt has
+   * already completed/aborted. Used by the snapshot route to expose the
+   * authoritative id for reconnecting clients.
+   */
+  getCurrentPromptId(sid: string): string | undefined;
 
   /**
    * Apply a partial runtime-controls patch to a session's shadow,

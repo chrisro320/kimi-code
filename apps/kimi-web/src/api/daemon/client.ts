@@ -4,6 +4,7 @@
 import type { KimiApiConfig } from '../config';
 import { buildRestUrl, buildWsUrl } from '../config';
 import type {
+  AppConfig,
   AppMessage,
   AppMessageRole,
   AppModel,
@@ -35,6 +36,7 @@ import { createAgentProjector } from './agentEventProjector';
 import { DaemonHttpClient } from './http';
 import {
   toAppApprovalRequest,
+  toAppConfig,
   toAppEvent,
   toAppFsEntry,
   toAppMessage,
@@ -54,6 +56,7 @@ import {
 import type {
   WireAuthResult,
   WireBackgroundTask,
+  WireConfig,
   WireEvent,
   WireFileMeta,
   WireFsBrowseResult,
@@ -70,6 +73,7 @@ import type {
   WireProvider,
   WireProviderRefreshResult,
   WireSession,
+  WireSessionAbortResult,
   WireSessionRuntimeStatus,
   WireSessionSnapshot,
   WireWorkspace,
@@ -443,6 +447,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
                 description: t.description,
                 lastProgress: t.last_progress,
               })),
+              promptId: data.in_flight_turn.current_prompt_id,
             },
       pendingApprovals: data.pending_approvals.map(toAppApprovalRequest),
       pendingQuestions: data.pending_questions.map(toAppQuestionRequest),
@@ -494,6 +499,16 @@ export class DaemonKimiWebApi implements KimiWebApi {
     );
     // data.aborted is false when 40903 (prompt already completed) — that's correct
     return { aborted: data.aborted, atSeq: data.at_seq };
+  }
+
+  // POST /sessions/{id}:abort — cancel whatever is running in the session,
+  // including skill activations that bypass IPromptService.
+  async abortSession(sessionId: string): Promise<{ aborted: boolean }> {
+    const data = await this.http.post<WireSessionAbortResult>(
+      `/sessions/${encodeURIComponent(sessionId)}:abort`,
+      {},
+    );
+    return { aborted: data.aborted };
   }
 
   // POST /sessions/{id}:compact — request history compaction. Returns {};
@@ -1036,6 +1051,49 @@ export class DaemonKimiWebApi implements KimiWebApi {
       unchanged: data.unchanged,
       failed: data.failed,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Config — REAL endpoints
+  // -------------------------------------------------------------------------
+
+  async getConfig(): Promise<AppConfig> {
+    const data = await this.http.get<WireConfig>('/config');
+    return toAppConfig(data);
+  }
+
+  async setConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
+    const wirePatch: Record<string, unknown> = {};
+    const keyMap: Record<keyof AppConfig, string> = {
+      providers: 'providers',
+      defaultProvider: 'default_provider',
+      defaultModel: 'default_model',
+      models: 'models',
+      thinking: 'thinking',
+      planMode: 'plan_mode',
+      yolo: 'yolo',
+      defaultThinking: 'default_thinking',
+      defaultPermissionMode: 'default_permission_mode',
+      defaultPlanMode: 'default_plan_mode',
+      permission: 'permission',
+      hooks: 'hooks',
+      services: 'services',
+      mergeAllAvailableSkills: 'merge_all_available_skills',
+      extraSkillDirs: 'extra_skill_dirs',
+      loopControl: 'loop_control',
+      background: 'background',
+      experimental: 'experimental',
+      telemetry: 'telemetry',
+      raw: 'raw',
+    };
+    for (const [key, value] of Object.entries(patch)) {
+      const wireKey = keyMap[key as keyof AppConfig];
+      if (wireKey !== undefined) {
+        wirePatch[wireKey] = value;
+      }
+    }
+    const data = await this.http.post<WireConfig>('/config', wirePatch);
+    return toAppConfig(data);
   }
 
   // -------------------------------------------------------------------------
