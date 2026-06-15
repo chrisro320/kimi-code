@@ -16,5 +16,4 @@ export default {
   undoNotImplemented: 'daemon 尚未支持 /undo',
   status: { desc: '查看会话状态' },
   undo: { desc: '撤销上一条消息' },
-  tasks: { desc: '切换到任务面板' },
 };

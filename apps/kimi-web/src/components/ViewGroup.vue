@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import type { PaneKey, TodoView } from '../types';
+import type { PaneKey } from '../types';
 import TabBar from './TabBar.vue';
 
 defineProps<{
   active: PaneKey;
-  runningTasks: number;
   changesCount?: number;
-  todos?: TodoView[];
   canClose?: boolean;
   /** This group currently hosts a preview pane → show its 'preview' tab. */
   hasPreview?: boolean;
@@ -24,9 +22,7 @@ const emit = defineEmits<{
     <div class="view-tabs">
       <TabBar
         :active="active"
-        :running-tasks="runningTasks"
         :changes-count="changesCount"
-        :todos="todos ?? []"
         :has-preview="hasPreview"
         @select="emit('select', $event)"
       />

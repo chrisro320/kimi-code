@@ -268,7 +268,6 @@ watch(
 // Bubble chat layout: always on mobile, and on desktop under Modern/Kimi.
 const bubble = computed(() => props.mobile === true || props.modern === true);
 
-const runningTasks = computed(() => props.tasks.filter((t) => t.state === 'run').length);
 const bashTasks = computed(() => props.tasks.filter((t) => t.kind !== 'subagent'));
 const subagentTasks = computed(() => props.tasks.filter((t) => t.kind === 'subagent'));
 const bashRunning = computed(() => bashTasks.value.filter((t) => t.state === 'run').length);
@@ -1028,9 +1027,7 @@ onUnmounted(() => {
     <TabBar
       v-if="mobile && !(turns.length === 0 && !sessionLoading)"
       :active="active"
-      :running-tasks="runningTasks"
       :changes-count="changesCount"
-      :todos="todos ?? []"
       :mobile="mobile"
       @select="active = $event"
     />
@@ -1044,9 +1041,7 @@ onUnmounted(() => {
       <template #group="{ group }">
         <ViewGroup
           :active="group.active"
-          :running-tasks="runningTasks"
           :changes-count="changesCount"
-          :todos="todos ?? []"
           :can-close="paneLayout.layout.value.type !== 'group'"
           :has-preview="group.views.includes('preview')"
           @select="selectGroupPane(group, $event)"

@@ -22,7 +22,7 @@ const STORAGE_KEY = 'kimi-web.layout';
 // Default tab set for a group. 'preview' is intentionally NOT here — it's a
 // transient view added to a group only while a file/media preview is open, so
 // groups don't show an empty "Preview" tab the rest of the time.
-const ALL_VIEWS: PaneKey[] = ['chat', 'files', 'tasks', 'todo'];
+const ALL_VIEWS: PaneKey[] = ['chat', 'files'];
 
 function nextId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -40,6 +40,10 @@ function isPaneKey(value: unknown): value is PaneKey {
     value === 'todo' ||
     value === 'preview'
   );
+}
+
+function isTabView(value: PaneKey): value is 'chat' | 'files' {
+  return value === 'chat' || value === 'files';
 }
 
 /** First group id in the tree (depth-first), or null for an empty tree. */
@@ -66,10 +70,10 @@ function normalizeLayout(raw: unknown): PaneLayout | null {
     // so a restored preview pane would be empty. A preview-only group collapses
     // away entirely (return null) so the split that hosted it folds back.
     const rawViews = Array.isArray(node['views']) ? node['views'].filter(isPaneKey) : ALL_VIEWS;
-    const views = rawViews.filter((v) => v !== 'preview');
+    const views = rawViews.filter(isTabView);
     if (rawViews.length > 0 && views.length === 0) return null;
     const rawActive = isPaneKey(node['active']) ? node['active'] : 'chat';
-    const active = rawActive === 'preview' ? 'chat' : rawActive;
+    const active = isTabView(rawActive) ? rawActive : 'chat';
     return {
       type: 'group',
       id: typeof node['id'] === 'string' ? node['id'] : nextId('group'),

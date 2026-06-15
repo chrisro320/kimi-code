@@ -487,9 +487,6 @@ function handleCommand(cmd: string): void {
       // No popover anchor from a slash command — step to the next level.
       client.setThinking(nextThinkingLevel(client.thinking.value));
       break;
-    case '/tasks':
-      conversationPaneRef.value?.switchTab('tasks');
-      break;
     case '/help':
       client.dismissWarning(-1);
       break;

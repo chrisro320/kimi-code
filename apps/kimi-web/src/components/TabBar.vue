@@ -2,9 +2,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { PaneKey, TodoView } from '../types';
+import type { PaneKey } from '../types';
 
-const props = defineProps<{ active: PaneKey; runningTasks: number; changesCount?: number; todos?: TodoView[]; mobile?: boolean; hasPreview?: boolean }>();
+const props = defineProps<{ active: PaneKey; changesCount?: number; mobile?: boolean; hasPreview?: boolean }>();
 const emit = defineEmits<{ select: [pane: PaneKey] }>();
 
 const { t } = useI18n();
@@ -12,8 +12,6 @@ const { t } = useI18n();
 const BASE_TABS: { key: PaneKey; labelKey: string }[] = [
   { key: 'chat', labelKey: 'sidebar.tabChat' },
   { key: 'files', labelKey: 'sidebar.tabFiles' },
-  { key: 'tasks', labelKey: 'sidebar.tabTasks' },
-  { key: 'todo', labelKey: 'sidebar.tabTodo' },
 ];
 
 // 'preview' is a transient tab — shown only while this group hosts a preview.
@@ -36,8 +34,6 @@ const tabs = computed(() =>
       >
         {{ t(tab.labelKey) }}
         <span v-if="tab.key === 'files' && (changesCount ?? 0) > 0" class="d"></span>
-        <span v-if="tab.key === 'tasks' && runningTasks > 0" class="cnt">{{ runningTasks }}</span>
-        <span v-if="tab.key === 'todo' && (todos?.length ?? 0) > 0" class="cnt">{{ (todos?.filter((t) => t.status === 'done').length ?? 0) }}/{{ todos!.length }}</span>
       </div>
     </div>
   </div>
@@ -81,15 +77,6 @@ const tabs = computed(() =>
   border-radius: 50%;
   background: var(--warn);
 }
-.cnt {
-  background: var(--soft);
-  color: var(--blue2);
-  border-radius: 8px;
-  padding: 0 6px;
-  font-size: max(9px, calc(var(--ui-font-size) - 4px));
-  font-weight: 600;
-}
-
 /* ---- Mobile swap-strip: full-width mono tabs, 46px tall (≥44px tap) ---- */
 .tabs.mobile {
   height: 46px;
@@ -114,20 +101,6 @@ const tabs = computed(() =>
 .tabs.mobile .tb.on {
   background: var(--bg);
   color: var(--blue);
-  font-weight: 600;
-}
-/* Tasks → solid blue count pill (prototype .bdg). */
-.tabs.mobile .cnt {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--blue);
-  color: var(--bg); /* on-accent text — readable in dark + mono-dark */
-  border-radius: 9px;
-  font-size: var(--ui-font-size-xs);
   font-weight: 600;
 }
 /* Diff → small warn dot (prototype .dt). */

@@ -16,5 +16,4 @@ export default {
   undoNotImplemented: '/undo isn\'t supported by the daemon yet',
   status: { desc: 'View session status' },
   undo: { desc: 'Undo the last message' },
-  tasks: { desc: 'Switch to the tasks panel' },
 } as const;

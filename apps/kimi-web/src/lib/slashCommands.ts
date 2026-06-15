@@ -33,7 +33,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/undo',       desc: 'commands.undo.desc' },
   { name: '/fork',       desc: 'commands.fork.desc' },
   { name: '/status',     desc: 'commands.status.desc' },
-  { name: '/tasks',      desc: 'commands.tasks.desc' },
 ];
 
 /**
