@@ -298,6 +298,8 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown));
   padding: 6px 10px;
   white-space: pre-wrap;
   word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .shell-dollar { color: var(--blue2); font-weight: 700; margin-right: 6px; }
 .shell-cwd { font-size: calc(var(--ui-font-size) - 3px); color: var(--muted); margin-top: 5px; font-family: var(--mono); }

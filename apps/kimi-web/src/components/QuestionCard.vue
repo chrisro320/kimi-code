@@ -395,7 +395,7 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown));
 
 .qopt {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   padding: 6px 10px;
   border: 1px solid var(--line);
@@ -414,9 +414,8 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown));
   width: 12px;
   flex: none;
   text-align: center;
-  padding-top: 2px;
 }
-.qopt-glyph { color: var(--blue2); font-size: var(--ui-font-size-sm); flex: none; padding-top: 1px; }
+.qopt-glyph { color: var(--blue2); font-size: var(--ui-font-size-sm); flex: none; }
 /* Label + description stack vertically (top-to-bottom) so a long description
    never squeezes the label sideways into a thin, many-line column. */
 .qopt-text {

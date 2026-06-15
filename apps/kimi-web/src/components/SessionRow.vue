@@ -172,22 +172,22 @@ defineExpose({ closeMenu, cancelDelete });
           class="tag tag-ask"
           :title="t('workspace.awaitingAnswerTitle')"
         >
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M6 6a2 2 0 1 1 2.6 1.9c-.4.15-.6.5-.6.95V10" stroke-linecap="round" />
             <circle cx="8" cy="12.5" r="0.7" fill="currentColor" stroke="none" />
           </svg>
-          {{ t('workspace.awaitingAnswer') }}
+          <span class="tag-text">{{ t('workspace.awaitingAnswer') }}</span>
         </span>
         <span
           v-if="!renaming && approvalCount > 0"
           class="tag tag-approve"
           :title="t('workspace.awaitingPermissionTitle')"
         >
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="3.5" y="7" width="9" height="6" rx="1.2" />
             <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" stroke-linecap="round" />
           </svg>
-          {{ t('workspace.awaitingPermission') }}
+          <span class="tag-text">{{ t('workspace.awaitingPermission') }}</span>
         </span>
 
         <!-- Kebab button (visible on hover) -->
@@ -287,21 +287,28 @@ defineExpose({ closeMenu, cancelDelete });
 .se:hover .ts { display: none; }
 
 /* Pending tags — small coloured pills, one per kind. "Ask" reuses the Kimi-blue
-   accent; "Approve" uses the warn tone so the two read as distinct at a glance. */
+   accent; "Approve" uses the warn tone so the two read as distinct at a glance.
+   Fixed height + matching line-height keeps the text truly vertically centred
+   and prevents the pill from visually out-growing the session title. */
 .tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  gap: 3px;
   flex: none;
+  box-sizing: border-box;
+  height: 18px;
   border: 1px solid transparent;
-  border-radius: 10px;
-  font-size: var(--ui-font-size);
-  line-height: 1;
-  padding: 2px 8px 2px 7px;
+  border-radius: 9px;
+  font-size: var(--ui-font-size-xs);
+  line-height: 18px;
+  padding: 0 6px 0 5px;
   font-family: var(--mono);
   white-space: nowrap;
+  vertical-align: middle;
 }
-.tag svg { flex: none; }
+.tag svg { flex: none; display: block; }
+.tag-text { display: inline-flex; align-items: center; }
 .tag-ask {
   background: var(--soft);
   color: var(--blue2);
