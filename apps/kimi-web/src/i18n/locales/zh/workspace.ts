@@ -38,4 +38,9 @@ export default {
   browseHint: '点击文件夹进入，再点"打开此文件夹"将其添加为工作区。',
   // Attention marker
   attentionTitle: '{count} 项待处理',
+  // Per-session pending tags (sidebar)
+  awaitingAnswer: '待回答',
+  awaitingAnswerTitle: '有提问等待你回答',
+  awaitingPermission: '待授权',
+  awaitingPermissionTitle: '有操作等待你授权',
 };

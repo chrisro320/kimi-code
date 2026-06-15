@@ -2051,6 +2051,23 @@ const attentionBySession = computed<Record<string, number>>(() => {
   return out;
 });
 
+/**
+ * Per-session pending counts split by KIND, so the sidebar can show distinct
+ * coloured tags: one for "awaiting your answer" (askUserQuestion) and one for
+ * "awaiting your approval" (permission request). The merged count above stays
+ * for the workspace rail / dialogs that only need a single number.
+ */
+const pendingBySession = computed<Record<string, { approvals: number; questions: number }>>(() => {
+  const out: Record<string, { approvals: number; questions: number }> = {};
+  for (const [sid, list] of Object.entries(rawState.approvalsBySession)) {
+    if (list.length > 0) (out[sid] ??= { approvals: 0, questions: 0 }).approvals = list.length;
+  }
+  for (const [sid, list] of Object.entries(rawState.questionsBySession)) {
+    if (list.length > 0) (out[sid] ??= { approvals: 0, questions: 0 }).questions = list.length;
+  }
+  return out;
+});
+
 /** Per-session unread flag (a background turn finished, not yet opened). */
 const unreadBySession = computed<Record<string, boolean>>(() => {
   const out: Record<string, boolean> = {};
@@ -3687,6 +3704,7 @@ export function useKimiWebClient() {
     sessionsForView,
     workspaceGroups,
     attentionBySession,
+    pendingBySession,
     attentionByWorkspace,
     unreadBySession,
     recentRoots,

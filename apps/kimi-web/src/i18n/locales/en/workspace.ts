@@ -38,4 +38,9 @@ export default {
   browseHint: 'Click a folder to enter it, then "Open this folder" to add it as a workspace.',
   // Attention marker
   attentionTitle: '{count} item needs your attention | {count} items need your attention',
+  // Per-session pending tags (sidebar)
+  awaitingAnswer: 'Answer',
+  awaitingAnswerTitle: 'A question is waiting for your answer',
+  awaitingPermission: 'Approve',
+  awaitingPermissionTitle: 'An action is waiting for your approval',
 } as const;
