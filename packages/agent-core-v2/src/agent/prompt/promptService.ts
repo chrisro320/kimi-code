@@ -166,7 +166,7 @@ export class AgentPromptService implements IAgentPromptService {
   }
 
   clear(): void {
-    for (const item of [...this.pending]) this.abort(item.id);
+    for (const item of this.pending.slice()) this.abort(item.id);
     if (this.active !== undefined) this.abort(this.active.id);
     this.context.clear();
   }

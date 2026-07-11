@@ -244,6 +244,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       errors: {
         [ErrorCode.VALIDATION_FAILED]: { detailsSchema },
         [ErrorCode.WORKSPACE_NOT_FOUND]: {},
+        [ErrorCode.FS_PATH_NOT_FOUND]: {},
       },
       description: 'Create a new session',
       tags: ['sessions'],
@@ -297,25 +298,29 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
       // Ensure the workspace is registered so `metadata.cwd` is resolvable on
       // read (gap G3 — v2 does not store workDir on the session).
-      const touched = await registry.createOrTouch(workDir);
+      try {
+        const touched = await registry.createOrTouch(workDir);
 
-      const handle = await core.accessor.get(ISessionLifecycleService).create({
-        workDir,
-      });
-      if (typeof body.title === 'string') {
-        await handle.accessor.get(ISessionMetadata).setTitle(body.title);
+        const handle = await core.accessor.get(ISessionLifecycleService).create({
+          workDir,
+        });
+        if (typeof body.title === 'string') {
+          await handle.accessor.get(ISessionMetadata).setTitle(body.title);
+        }
+        const meta = await handle.accessor.get(ISessionMetadata).read();
+        const session = toWireSession(
+          { ...meta, workspaceId: touched.id },
+          touched.root,
+          handle.accessor.get(ISessionActivity).status(),
+        );
+        core.accessor.get(IEventService).publish({
+          type: 'event.session.created',
+          payload: { agentId: 'main', sessionId: session.id, session },
+        });
+        reply.send(okEnvelope(session, req.id));
+      } catch (error) {
+        sendMappedError(reply, req.id, error);
       }
-      const meta = await handle.accessor.get(ISessionMetadata).read();
-      const session = toWireSession(
-        { ...meta, workspaceId: touched.id },
-        touched.root,
-        handle.accessor.get(ISessionActivity).status(),
-      );
-      core.accessor.get(IEventService).publish({
-        type: 'event.session.created',
-        payload: { agentId: 'main', sessionId: session.id, session },
-      });
-      reply.send(okEnvelope(session, req.id));
     },
   );
   app.post(
@@ -1155,6 +1160,9 @@ function sendMappedError(
         reply.send(
           errEnvelope(ErrorCode.GOAL_OBJECTIVE_TOO_LONG, err.message, requestId, err.stack),
         );
+        return;
+      case ErrorCodes.FS_PATH_NOT_FOUND:
+        reply.send(errEnvelope(ErrorCode.FS_PATH_NOT_FOUND, err.message, requestId, err.stack));
         return;
       case 'request.invalid':
       case 'validation.failed':

@@ -86,8 +86,8 @@ async function main(): Promise<void> {
   console.log(`      session id = ${sid}`);
 
   console.log('[2/3] binding model on main agent (setModel) ...');
-  const setModel = client.session(sid).agent('main').service(IAgentProfileService).setModel;
-  const setModelResult = await setModel(model);
+  const profile = client.session(sid).agent('main').service(IAgentProfileService);
+  const setModelResult = await profile.setModel(model);
   console.log('      setModel ->', setModelResult);
 
   console.log('[3/3] calling ISessionInitService.generateAgentsMd() ...');

@@ -8,11 +8,13 @@
  * (`task.started` / `task.terminated` Ops into `TaskModel`, plus the matching
  * signals), restores ghosts through a single `wire.onRestored` handler (wire
  * replay -> disk load -> reconcile, in that order), delivers live terminal
- * notifications by enqueueing `TaskNotificationStepRequest`s onto `loop`
- * (drained in queue order by the next turn — mid-turn ones fold into the
- * following step, idle ones ride the next launched turn), silently appends
- * restored notifications through `contextMemory`, and re-surfaces active
- * tasks through `contextInjector` after compaction. Bound at Agent scope.
+ * notifications by enqueueing `TaskNotificationStepRequest`s onto `loop` with
+ * `activeOrNewTurn` admission (mid-turn ones fold into the active turn's
+ * following step; idle ones launch a fresh turn themselves, matching v1's
+ * `turn.steer`, so the model consumes the notification without waiting for
+ * the user), silently appends restored notifications through `contextMemory`,
+ * and re-surfaces active tasks through `contextInjector` after compaction.
+ * Bound at Agent scope.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -191,7 +193,12 @@ declare module '#/app/event/eventBus' {
 
 export class TaskNotificationStepRequest extends MessageStepRequest {
   constructor(message: ContextMessage) {
-    super(message, { kind: 'task_notification', mergeable: true, turnScoped: false });
+    super(message, {
+      kind: 'task_notification',
+      mergeable: true,
+      turnScoped: false,
+      admission: 'activeOrNewTurn',
+    });
   }
 }
 

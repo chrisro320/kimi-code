@@ -8,8 +8,9 @@
  *
  *    task terminal → notifyAgentTask → loop.enqueue(TaskNotificationStepRequest)
  *      → (busy) the mergeable request folds into the active turn's next step
- *      → (idle / race) the agent-scoped request survives and rides the next
- *        launched turn — no turn is auto-launched for a notification
+ *      → (idle / race) `activeOrNewTurn` admission launches a fresh turn for
+ *        the notification — matching v1's `turn.steer`, the model consumes it
+ *        without waiting for the user
  *
  * Delivery is queue-ordered and the message only materializes when the loop
  * pops the request. If a scenario fails to inject the notification into an
@@ -77,36 +78,29 @@ describe('task notification → main agent (real Agent instance)', () => {
       }
     });
 
-    it('IDLE: completed bg agent notification is queued and rides the next turn', async () => {
+    it('IDLE: completed bg agent notification auto-launches a turn that consumes it', async () => {
       expect(loop.status().activeTurnId).toBeUndefined();
       expect(ctx.llmCalls.length).toBe(0);
 
+      // `activeOrNewTurn` admission: with no active turn the notification
+      // launches a fresh turn on its own — no user prompt needed.
+      ctx.mockNextResponse({ type: 'text', text: 'ack from main agent' });
+      const turnEnd = ctx.untilTurnEnd();
       const taskId = background.registerTask(agentTask(
         Promise.resolve({ result: 'background agent finished its job' }),
         'idle-state repro',
       ));
       await background.wait(taskId);
 
-      // Enqueue-only delivery: the notification lands on the loop queue
-      // (announced via `task.notified`) but no turn is auto-launched for it.
       await vi.waitFor(
         () => {
           expect(notifiedCount(ctx)).toBe(1);
         },
         { timeout: 2000 },
       );
-      expect(ctx.llmCalls.length).toBe(0);
-      expect(loop.status().activeTurnId).toBeUndefined();
+      await turnEnd;
 
-      // The next launched turn drains the queue: the mergeable notification
-      // folds into the prompt's batch, so the turn's first LLM call carries
-      // the notification XML.
-      ctx.mockNextResponse({ type: 'text', text: 'ack from main agent' });
-      await ctx.rpc.prompt({
-        input: [{ type: 'text', text: 'user follow-up' }],
-      });
-      await ctx.untilTurnEnd();
-
+      expect(ctx.llmCalls.length).toBe(1);
       const lastCall = ctx.llmCalls.at(-1)!;
       const flatHistoryText = JSON.stringify(lastCall.history);
       expect(flatHistoryText).toContain('<notification');
@@ -120,9 +114,9 @@ describe('task notification → main agent (real Agent instance)', () => {
     it('BUSY: completed bg agent during an active turn is flushed into an LLM call', async () => {
       // The notification is enqueued (mergeable, agent-scoped) while the
       // user-prompted turn runs. Depending on delivery timing it either
-      // folds into that turn's next step or survives into a follow-up turn
-      // that drains it — in every case it must reach an LLM call. Three
-      // scripted responses cover both branches plus the drain prompt.
+      // folds into that turn's next step or launches its own follow-up turn
+      // once the first one ends — in every case it must reach an LLM call.
+      // Three scripted responses cover both branches plus the drain prompt.
       ctx.mockNextResponse({ type: 'text', text: 'first turn ack' });
       ctx.mockNextResponse({ type: 'text', text: 'notification ack' });
       ctx.mockNextResponse({ type: 'text', text: 'drain turn ack' });
@@ -171,9 +165,15 @@ describe('task notification → main agent (real Agent instance)', () => {
       expect(flatContext).not.toContain('busy-state bg result');
     });
 
-    it('IDLE × N: a GROUP of bg agents completes — all notifications reach the LLM in one turn', async () => {
-      // Every idle delivery lands on the loop queue without launching a
-      // turn; the next prompt drains them all in a single merged batch.
+    it('IDLE × N: a GROUP of bg agents completes — the first notification launches one turn, the rest fold in', async () => {
+      // The first idle delivery launches a turn; later notifications fold
+      // into it as mergeable requests (or launch a follow-up if they land
+      // after it ends). Three scripted responses cover the worst case of
+      // one LLM call per notification.
+      ctx.mockNextResponse({ type: 'text', text: 'ack group 1' });
+      ctx.mockNextResponse({ type: 'text', text: 'ack group 2' });
+      ctx.mockNextResponse({ type: 'text', text: 'ack group 3' });
+      const turnEnd = ctx.untilTurnEnd();
       const taskIds = [
         background.registerTask(agentTask(
           Promise.resolve({ result: 'bg #1 result' }),
@@ -193,24 +193,24 @@ describe('task notification → main agent (real Agent instance)', () => {
         await background.wait(id);
       }
 
-      // ⚠️ All 3 notifications queued, still no turn launched.
       await vi.waitFor(
         () => {
           expect(notifiedCount(ctx)).toBe(3);
         },
         { timeout: 2000 },
       );
-      expect(ctx.llmCalls.length).toBe(0);
+      await turnEnd;
+      await vi.waitFor(
+        () => {
+          expect(loop.status().state).toBe('idle');
+          expect(loop.status().hasPendingRequests).toBe(false);
+        },
+        { timeout: 2000 },
+      );
 
-      ctx.mockNextResponse({ type: 'text', text: 'ack group' });
-      await ctx.rpc.prompt({
-        input: [{ type: 'text', text: 'user follow-up' }],
-      });
-      await ctx.untilTurnEnd();
-
-      // The single prompt turn's first LLM call carries every notification.
-      const lastCall = ctx.llmCalls.at(-1)!;
-      const flatHistoryText = JSON.stringify(lastCall.history);
+      // Every notification reached an LLM call — either merged into the
+      // auto-launched turn's first batch or carried by a follow-up step.
+      const flatHistoryText = JSON.stringify(ctx.llmCalls.map((call) => call.history));
       for (const id of taskIds) {
         expect(flatHistoryText).toContain(id);
       }
@@ -223,7 +223,7 @@ describe('task notification → main agent (real Agent instance)', () => {
       expect(flatHistoryText).not.toContain('bg #3 result');
     });
 
-    it('RACE: bg completion right after turn end is queued, not launched, and drains on the next prompt', async () => {
+    it('RACE: bg completion right after turn end launches its own turn', async () => {
       // 1st turn: prompted by user — produces text and ends.
       ctx.mockNextResponse({ type: 'text', text: 'first user-prompted ack' });
       await ctx.rpc.prompt({
@@ -232,8 +232,10 @@ describe('task notification → main agent (real Agent instance)', () => {
       await ctx.untilTurnEnd();
       expect(ctx.llmCalls.length).toBe(1);
 
-      // Fire the bg completion while the agent is idle. The notification is
-      // enqueued (agent-scoped) but NO turn is auto-launched.
+      // Fire the bg completion while the agent is idle: `activeOrNewTurn`
+      // admission launches a fresh turn for the notification.
+      ctx.mockNextResponse({ type: 'text', text: 'ack from bg notification' });
+      const turnEnd = ctx.untilTurnEnd();
       const taskId = background.registerTask(agentTask(
         Promise.resolve({ result: 'post-turn bg result' }),
         'race-after-turn',
@@ -245,16 +247,9 @@ describe('task notification → main agent (real Agent instance)', () => {
         },
         { timeout: 2000 },
       );
-      expect(ctx.llmCalls.length).toBe(1);
-      expect(loop.status().activeTurnId).toBeUndefined();
+      await turnEnd;
 
-      // The next user prompt drains the queued notification.
-      ctx.mockNextResponse({ type: 'text', text: 'ack from bg notification' });
-      await ctx.rpc.prompt({
-        input: [{ type: 'text', text: 'user follow-up' }],
-      });
-      await ctx.untilTurnEnd();
-
+      expect(ctx.llmCalls.length).toBe(2);
       const lastCall = ctx.llmCalls.at(-1)!;
       const flatHistoryText = JSON.stringify(lastCall.history);
       expect(flatHistoryText).toContain('<notification');

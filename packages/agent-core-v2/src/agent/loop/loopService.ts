@@ -140,7 +140,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     if (this.disposing) return;
     this.disposing = true;
     const reason = abortError('Agent loop disposed');
-    for (const job of [...this.pendingTurns]) this.cancel(job.turn.id, reason);
+    for (const job of this.pendingTurns.slice()) this.cancel(job.turn.id, reason);
     this.activeTurnJob?.turn.cancel(reason);
     for (const request of this.standaloneStepQueue.drain()) {
       request.abort();

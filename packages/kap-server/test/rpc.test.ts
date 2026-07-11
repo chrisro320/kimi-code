@@ -165,6 +165,16 @@ describe('server-v2 /api/v2 RPC', () => {
     expect(got.body.data.root).toBe(cwd);
   });
 
+  it('rejects createOrTouch for a missing root directory (40409)', async () => {
+    const missing = join(home as string, 'never-created');
+    const { body } = await call<null>(
+      'POST',
+      rpc('core', IWorkspaceRegistry, 'createOrTouch'),
+      missing,
+    );
+    expect(body.code).toBe(40409);
+  });
+
   it('renames a workspace via update', async () => {
     const cwd = home as string;
     const created = await call<{ id: string; name: string }>(

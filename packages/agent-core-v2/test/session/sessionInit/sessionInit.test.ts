@@ -158,7 +158,7 @@ describe('SessionInitService', () => {
   });
 
   it('wraps a subagent failure in SESSION_INIT_FAILED', async () => {
-    run.mockImplementationOnce(async (agentId: string) => ({
+    run.mockImplementationOnce((agentId: string) => ({
       agentId,
       turn: {},
       completion: Promise.reject(new Error('coder exploded')),

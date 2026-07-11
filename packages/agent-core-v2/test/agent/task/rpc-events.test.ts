@@ -260,17 +260,18 @@ function notifiedCount(ctx: TestAgentContext): number {
 }
 
 /**
- * Live terminal notifications are enqueued onto the loop and only materialize
- * into context when a turn drains the queue. Drive one prompt turn to pop
- * every queued notification (they fold into the prompt's batch).
+ * Live terminal notifications auto-launch their own turn when the loop is
+ * idle (`activeOrNewTurn` admission) and materialize into context when that
+ * turn pops them. Queue one response in case the turn's LLM request has not
+ * fired yet, then wait for every notification turn to drain.
  */
 async function drainNotifications(ctx: TestAgentContext): Promise<void> {
-  if (!ctx.get(IAgentLoopService).hasPendingRequests()) return;
   ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
-  await ctx.rpc.prompt({
-    input: [{ type: 'text', text: 'drain notifications' }],
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
   });
-  await ctx.untilTurnEnd();
 }
 
 /** The notification message materialized into context for `taskId` (post-drain). */
@@ -404,9 +405,10 @@ describe('AgentTaskService — event emission', () => {
 
     await manager.stop(taskId, 'user');
 
-    // The terminal notification's `task.notified` may land in the same
-    // window; the lifecycle assertion is about `task.terminated` alone.
-    expect(agent.emittedEvents.filter((e) => e.type !== 'task.notified')).toEqual([
+    // The terminal notification auto-launches its own turn (`activeOrNewTurn`),
+    // which publishes turn / context events in the same window; the lifecycle
+    // assertion is about `task.terminated` alone.
+    expect(agent.emittedEvents.filter((e) => e.type === 'task.terminated')).toEqual([
       {
         type: 'task.terminated',
         info: expect.objectContaining({
@@ -452,8 +454,10 @@ describe('AgentTaskService — event emission', () => {
 });
 
 describe('AgentTaskService — notification delivery', () => {
-  it('enqueues completed agent task notifications into the turn flow', async () => {
+  it('delivers completed agent task notifications through an auto-launched turn', async () => {
     const { agent, ctx, manager } = createAgentTaskService();
+    ctx.mockNextResponse({ type: 'text', text: 'notification ack' });
+    const turnEnd = ctx.untilTurnEnd();
     const taskId = manager.registerTask(
       agentTask(
         Promise.resolve({ result: 'final subagent summary' }),
@@ -463,14 +467,12 @@ describe('AgentTaskService — notification delivery', () => {
 
     await manager.wait(taskId);
 
-    // Enqueue-only delivery: the notification waits on the loop queue until
-    // a turn drains it; nothing is appended before then.
+    // Idle completion launches a fresh turn (`activeOrNewTurn`) — the
+    // notification materializes when that turn pops it, no prompt needed.
     await vi.waitFor(() => {
       expect(notifiedCount(ctx)).toBe(1);
     });
-    expect(agent.context.appendUserMessage).not.toHaveBeenCalled();
-
-    await drainNotifications(ctx);
+    await turnEnd;
 
     const message = notificationMessageFor(agent, taskId);
     expect(message.origin).toEqual({
@@ -816,7 +818,7 @@ describe('AgentTaskService — notification delivery', () => {
     });
 
     // Delivery itself completed despite the hook failure: the notification
-    // drains into context on the next turn.
+    // materializes through its auto-launched turn.
     await drainNotifications(ctx);
     expect(notificationMessageFor(agent, taskId).content[0]!.text).toContain(
       'inspect repository completed.',

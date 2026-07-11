@@ -32,7 +32,8 @@ for (const agentId of ['main', ...agentIds.filter((id) => id !== 'main')]) {
   const agent = client.session(sid).agent(agentId);
   try {
     const mode = await agent.service(IAgentPermissionModeService).mode();
-    const context = await agent.service(IAgentContextMemoryService).get();
+    // `get()` is sync in the shared interface but async over the wire.
+    const context = await Promise.resolve(agent.service(IAgentContextMemoryService).get());
     console.log(`\n== agent ${agentId} == mode=${mode} messages=${context.length}`);
     for (const last of context.slice(-2)) {
       const text = last.content
@@ -45,6 +46,6 @@ for (const agentId of ['main', ...agentIds.filter((id) => id !== 'main')]) {
       );
     }
   } catch (error) {
-    console.log(`\n== agent ${agentId} == not reachable (${error instanceof Error ? error.message : error})`);
+    console.log(`\n== agent ${agentId} == not reachable (${error instanceof Error ? error.message : String(error)})`);
   }
 }

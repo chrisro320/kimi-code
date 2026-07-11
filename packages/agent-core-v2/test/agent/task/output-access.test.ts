@@ -81,20 +81,20 @@ async function waitForTaskNotifications(
   );
   if (tasks.length === 0) return;
 
-  // Enqueue-only delivery: live notifications wait on the loop queue until a
-  // turn drains them. Wait for every enqueue, then drive one drain turn so
-  // they materialize into context in queue order.
+  // Live notifications auto-launch their own turn when the loop is idle
+  // (`activeOrNewTurn` admission) and materialize when that turn pops them.
+  // Queue one response in case the turn's LLM request has not fired yet,
+  // then wait for every enqueue and for the notification turns to drain.
+  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
   await vi.waitFor(() => {
     const delivered = ctx.allEvents.filter((e) => e.event === 'task.notified').length;
     expect(delivered).toBeGreaterThanOrEqual(tasks.length);
   });
-  if (ctx.get(IAgentLoopService).hasPendingRequests()) {
-    ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
-    await ctx.rpc.prompt({
-      input: [{ type: 'text', text: 'drain notifications' }],
-    });
-    await ctx.untilTurnEnd();
-  }
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
+  });
 
   const origins = ctx.context.get().map((message) => message.origin);
   for (const task of tasks) {

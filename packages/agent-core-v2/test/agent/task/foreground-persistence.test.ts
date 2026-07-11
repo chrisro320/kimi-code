@@ -91,9 +91,12 @@ function registerForeground(
 
 /**
  * Detached tasks that reached a terminal state enqueue a notification onto
- * the loop. Resume-compare requires it materialized in the live context (the
- * replayed side re-derives it from the persisted record), so drain the queue
- * with one turn before `expectResumeMatches`.
+ * the loop, which auto-launches its own turn when idle (`activeOrNewTurn`).
+ * Resume-compare requires the notification materialized in the live context
+ * (the replayed side re-derives it from the persisted record) and the loop
+ * settled, so queue one response in case the turn's LLM request has not
+ * fired yet and wait for the notification turn to drain before
+ * `expectResumeMatches`.
  */
 async function drainPendingNotifications(
   ctx: TestAgentContext,
@@ -108,16 +111,16 @@ async function drainPendingNotifications(
         task.terminalNotificationSuppressed !== true,
     );
   if (!expectsNotification) return;
+  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
   await vi.waitFor(() => {
     const delivered = ctx.allEvents.filter((e) => e.event === 'task.notified').length;
     expect(delivered).toBeGreaterThanOrEqual(1);
   });
-  if (!ctx.get(IAgentLoopService).hasPendingRequests()) return;
-  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
-  await ctx.rpc.prompt({
-    input: [{ type: 'text', text: 'drain notifications' }],
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
   });
-  await ctx.untilTurnEnd();
 }
 
 describe('AgentTaskService — foreground persistence', () => {
