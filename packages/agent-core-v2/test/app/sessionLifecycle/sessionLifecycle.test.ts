@@ -1,3 +1,13 @@
+/**
+ * `sessionLifecycle` domain (L6) — App-to-Session scope lifecycle scenarios.
+ *
+ * Covers public create, resume, close, archive, fork, and failed-initialization
+ * recovery contracts through the real scoped host. Persistence, host, config,
+ * and agent boundaries are controlled through their service interfaces.
+ *
+ * Run: pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run test/app/sessionLifecycle/sessionLifecycle.test.ts
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -356,6 +366,20 @@ function agentLifecycleCapturingPlanSpy(opts: { mainPreexists?: boolean } = {}):
     create,
   };
   return { lifecycle, enter, create };
+}
+
+function deferred<T = void>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function tick(): Promise<void> {
@@ -770,6 +794,145 @@ describe('SessionLifecycleService', () => {
     expect(settled).toBe(true);
   });
 
+  it('allows a same-id create retry after MCP initialization fails', async () => {
+    const firstMcpStarted = deferred();
+    const firstMcp = deferred();
+    const failure = new Error('MCP initialization failed');
+    let attempts = 0;
+    const svc = build([
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleStub(),
+        ensureMcpReady: () => {
+          attempts += 1;
+          if (attempts === 1) {
+            firstMcpStarted.resolve();
+            return firstMcp.promise;
+          }
+          return Promise.resolve();
+        },
+      }),
+    ]);
+
+    const firstCreate = svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    await firstMcpStarted.promise;
+    const failedHandle = svc.get('s1');
+    const rejected = expect(firstCreate).rejects.toBe(failure);
+    firstMcp.reject(failure);
+    await rejected;
+
+    expect(svc.get('s1')).toBeUndefined();
+    expect(() => failedHandle?.accessor.get(ISessionContext)).toThrow(/disposed/);
+
+    const retried = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    expect(svc.get('s1')).toBe(retried);
+  });
+
+  it('allows a same-id resume retry after its creation hook fails', async () => {
+    const failure = new Error('session creation hook failed');
+    let attempts = 0;
+    const svc = build([
+      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
+      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
+    ]);
+    const hook = svc.hooks.onDidCreateSession.register('fail-once', async (_event, next) => {
+      attempts += 1;
+      if (attempts === 1) throw failure;
+      await next();
+    });
+
+    await expect(svc.resume('s1')).rejects.toBe(failure);
+    expect(svc.get('s1')).toBeUndefined();
+
+    const retried = await svc.resume('s1');
+    expect(svc.get('s1')).toBe(retried);
+    hook.dispose();
+  });
+
+  it('preserves a concurrent replacement when an older materialization fails', async () => {
+    const firstMcpStarted = deferred();
+    const firstMcp = deferred();
+    const failure = new Error('older MCP initialization failed');
+    let attempts = 0;
+    const svc = build([
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleStub(),
+        ensureMcpReady: () => {
+          attempts += 1;
+          if (attempts === 1) {
+            firstMcpStarted.resolve();
+            return firstMcp.promise;
+          }
+          return Promise.resolve();
+        },
+      }),
+    ]);
+
+    const firstCreate = svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    await firstMcpStarted.promise;
+    const failedHandle = svc.get('s1');
+    const replacement = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    const rejected = expect(firstCreate).rejects.toBe(failure);
+    firstMcp.reject(failure);
+    await rejected;
+
+    expect(svc.get('s1')).toBe(replacement);
+    expect(svc.list()).toEqual([replacement]);
+    expect(() => failedHandle?.accessor.get(ISessionContext)).toThrow(/disposed/);
+  });
+
+  it('allows a same-id create retry when failed-session agent cleanup rejects', async () => {
+    const flushStarted = deferred();
+    const flush = deferred();
+    const initializationFailure = new Error('session index flush failed');
+    const removed: string[] = [];
+    let flushAttempts = 0;
+    const agentHandle = (id: string) =>
+      ({
+        id,
+        kind: LifecycleScope.Agent,
+        accessor: { get: () => ({}) },
+        dispose: () => {},
+      }) as unknown as IAgentScopeHandle;
+    const svc = build([
+      stubPair(IAppendLogStore, {
+        ...appendLogStoreStub(),
+        flush: () => {
+          flushAttempts += 1;
+          if (flushAttempts === 1) {
+            flushStarted.resolve();
+            return flush.promise;
+          }
+          return Promise.resolve();
+        },
+      }),
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleStub(),
+        list: () => [agentHandle('main'), agentHandle('subagent')],
+        remove: (id: string) => {
+          removed.push(id);
+          return id === 'main'
+            ? Promise.reject(new Error('agent removal failed'))
+            : Promise.resolve();
+        },
+      }),
+    ]);
+
+    const creation = svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    await flushStarted.promise;
+    const failedHandle = svc.get('s1');
+    const rejected = expect(creation).rejects.toBe(initializationFailure);
+    flush.reject(initializationFailure);
+    await rejected;
+
+    expect(removed).toHaveLength(2);
+    expect(removed).toEqual(expect.arrayContaining(['main', 'subagent']));
+    expect(svc.get('s1')).toBeUndefined();
+    expect(() => failedHandle?.accessor.get(ISessionContext)).toThrow(/disposed/);
+
+    const retried = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    expect(svc.get('s1')).toBe(retried);
+  });
+
   it('hides a session from get/list until its resume finishes', async () => {
     let resolveMcpReady: (() => void) | undefined;
     const mcpReady = new Promise<void>((resolve) => {
@@ -1085,6 +1248,73 @@ describe('SessionLifecycleService', () => {
       await expect(svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' })).rejects.toThrow(
         'not implemented',
       );
+    });
+
+    it('delays a same-id replacement until failed fork directory rollback finishes', async () => {
+      const root = await makeTmpRoot();
+      const srcDir = join(root, 'sessions', 'wd_stub', 'src');
+      const cleanupStarted = deferred();
+      const releaseCleanup = deferred();
+      const replacementReachedRegistration = deferred();
+      const cleanupAgent = {
+        id: 'main',
+        kind: LifecycleScope.Agent,
+        accessor: { get: () => ({}) },
+        dispose: () => {},
+      } as unknown as IAgentScopeHandle;
+      const svc = build([
+        stubPair(IBootstrapService, tmpBootstrapStub(root)),
+        workspaceGetStub(),
+        stubPair(ISessionMetadata, {
+          ...metadataStub(),
+          read: () =>
+            Promise.resolve({
+              agents: { main: { homedir: join(srcDir, 'agents', 'main') } },
+            } as never),
+        }),
+        stubPair(IAgentLifecycleService, {
+          ...agentLifecycleStub(),
+          list: () => [cleanupAgent],
+          remove: () => {
+            cleanupStarted.resolve();
+            return releaseCleanup.promise;
+          },
+        }),
+        stubPair(ISessionWorkspaceContext, {
+          _serviceBrand: undefined,
+          workDir: '/tmp/proj',
+          additionalDirs: [],
+          setWorkDir: () => {},
+          setAdditionalDirs: () => {
+            replacementReachedRegistration.resolve();
+          },
+          resolve: (path: string) => path,
+          isWithin: () => true,
+          assertAllowed: (path: string) => path,
+          addAdditionalDir: () => {},
+          removeAdditionalDir: () => {},
+        }),
+      ]);
+      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+      await mkdir(join(srcDir, 'agents', 'main', 'plans'), { recursive: true });
+      await writeFile(join(srcDir, 'agents', 'main', 'plans', 'p1.md'), '# plan');
+
+      const forked = svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
+      await cleanupStarted.promise;
+      const forkRejected = expect(forked).rejects.toThrow('not implemented');
+      const replacement = svc.create({
+        sessionId: 'dst',
+        workDir: '/tmp/proj',
+        additionalDirs: ['/tmp/extra'],
+      });
+      await replacementReachedRegistration.promise;
+
+      expect(svc.get('dst')).toBeUndefined();
+
+      releaseCleanup.resolve();
+      await forkRejected;
+      const replacementHandle = await replacement;
+      expect(svc.get('dst')).toBe(replacementHandle);
     });
 
     it('duplicates the source session cron tasks for the fork', async () => {
