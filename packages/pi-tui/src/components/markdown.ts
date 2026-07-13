@@ -1,21 +1,276 @@
-import { Marked, type Token, Tokenizer, type Tokens } from "marked";
+import { type Links, Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
+const DISPLAY_MATH_OPEN_LINE_REGEX = /^ {0,3}\$\$(?!\$)/;
+const DISPLAY_MATH_OPEN_LINE_SEARCH_REGEX = /\n {0,3}\$\$(?!\$)/;
 
-class StrictStrikethroughTokenizer extends Tokenizer {
-	override del(src: string): Tokens.Del | undefined {
-		const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
+// Marked does not recognize TeX dollar delimiters, so Markdown markers inside
+// math must be tokenized as opaque text before the built-in tokenizers see them.
+// Ambiguous dollar-delimited text is also kept literal: source preservation
+// takes priority over applying Markdown styles inside a possible formula.
+interface LiteralMathToken extends Tokens.Generic {
+	type: "math_block" | "math_inline";
+	raw: string;
+	text: string;
+}
+
+function isLiteralMathToken(token: Token): token is LiteralMathToken {
+	return (
+		(token.type === "math_block" || token.type === "math_inline") &&
+		typeof token.raw === "string" &&
+		"text" in token &&
+		typeof token["text"] === "string"
+	);
+}
+
+function isEscapedAt(text: string, index: number): boolean {
+	let backslashCount = 0;
+	for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) {
+		backslashCount++;
+	}
+	return backslashCount % 2 === 1;
+}
+
+function getDollarRunLength(text: string, index: number): number {
+	let end = index;
+	while (text[end] === "$") {
+		end++;
+	}
+	return end - index;
+}
+
+function findInlineMathEnd(src: string, start: number): number | undefined {
+	const delimiterLength = getDollarRunLength(src, start);
+	if (delimiterLength !== 1 && delimiterLength !== 2) {
+		return undefined;
+	}
+
+	for (let i = start + delimiterLength; i < src.length; i++) {
+		if (delimiterLength === 1 && src[i] === "\n") {
+			return i;
+		}
+		if (src[i] !== "$" || isEscapedAt(src, i)) {
+			continue;
+		}
+
+		const closingRunLength = getDollarRunLength(src, i);
+		if (closingRunLength === delimiterLength) {
+			return i + delimiterLength;
+		}
+
+		// An unescaped dollar run of another length starts a new candidate.
+		// Treat the current span as incomplete instead of scanning past it.
+		return i;
+	}
+
+	// Preservation takes priority over Markdown styling while a delimiter is
+	// incomplete (including during streaming), so keep the rest opaque.
+	return src.length;
+}
+
+function readInlineMath(src: string): string | undefined {
+	const end = findInlineMathEnd(src, 0);
+	return end === undefined ? undefined : src.slice(0, end);
+}
+
+function hasIncompleteMathSpan(src: string): boolean {
+	let searchStart = 0;
+	while (searchStart < src.length) {
+		const mathStart = src.indexOf("$", searchStart);
+		if (mathStart === -1) {
+			return false;
+		}
+		if (isEscapedAt(src, mathStart)) {
+			searchStart = mathStart + 1;
+			continue;
+		}
+
+		const delimiterLength = getDollarRunLength(src, mathStart);
+		const mathEnd = findInlineMathEnd(src, mathStart);
+		if (mathEnd === undefined) {
+			searchStart = mathStart + delimiterLength;
+			continue;
+		}
+		const closingStart = mathEnd - delimiterLength;
+		if (
+			mathEnd - mathStart < delimiterLength * 2 ||
+			getDollarRunLength(src, closingStart) !== delimiterLength ||
+			isEscapedAt(src, closingStart)
+		) {
+			return true;
+		}
+		searchStart = mathEnd;
+	}
+	return false;
+}
+
+function findClosingDollarRun(src: string, start: number, delimiterLength: number): number | undefined {
+	for (let i = start; i < src.length; i++) {
+		if (src[i] !== "$" || isEscapedAt(src, i)) {
+			continue;
+		}
+		const runLength = getDollarRunLength(src, i);
+		if (runLength === delimiterLength) {
+			return i;
+		}
+		i += runLength - 1;
+	}
+	return undefined;
+}
+
+function readDisplayMath(src: string): LiteralMathToken | undefined {
+	const opening = DISPLAY_MATH_OPEN_LINE_REGEX.exec(src);
+	if (!opening) {
+		return undefined;
+	}
+
+	const openingDelimiterEnd = opening[0].length;
+	const closingStart = findClosingDollarRun(src, openingDelimiterEnd, 2);
+	const openingLineEnd = src.indexOf("\n", openingDelimiterEnd);
+	if (closingStart !== undefined && (openingLineEnd === -1 || closingStart < openingLineEnd)) {
+		// A same-line $$...$$ span belongs to the inline tokenizer.
+		return undefined;
+	}
+
+	let rawEnd = closingStart === undefined ? src.length : closingStart + 2;
+	if (closingStart !== undefined) {
+		const closingLineEnd = src.indexOf("\n", rawEnd);
+		const restOfClosingLine = src.slice(rawEnd, closingLineEnd === -1 ? src.length : closingLineEnd);
+		if (/^[\t ]*$/.test(restOfClosingLine) && closingLineEnd !== -1) {
+			rawEnd = closingLineEnd + 1;
+		}
+	}
+
+	const raw = src.slice(0, rawEnd);
+	return {
+		type: "math_block",
+		raw,
+		text: raw.endsWith("\n") ? raw.slice(0, -1) : raw,
+	};
+}
+
+function maskInlineMath(src: string): string {
+	const parts: string[] = [];
+	let cursor = 0;
+	let searchStart = 0;
+
+	while (searchStart < src.length) {
+		const mathStart = src.indexOf("$", searchStart);
+		if (mathStart === -1) {
+			break;
+		}
+		if (isEscapedAt(src, mathStart)) {
+			searchStart = mathStart + 1;
+			continue;
+		}
+
+		const mathEnd = findInlineMathEnd(src, mathStart);
+		if (mathEnd === undefined) {
+			searchStart = mathStart + getDollarRunLength(src, mathStart);
+			continue;
+		}
+
+		parts.push(src.slice(cursor, mathStart));
+		parts.push(src.slice(mathStart, mathEnd).replace(/[^\n]/g, "a"));
+		cursor = mathEnd;
+		searchStart = mathEnd;
+	}
+
+	if (parts.length === 0) {
+		return src;
+	}
+	parts.push(src.slice(cursor));
+	return parts.join("");
+}
+
+function mathSpanContainsTableDelimiter(src: string): boolean {
+	let searchStart = 0;
+	while (searchStart < src.length) {
+		const mathStart = src.indexOf("$", searchStart);
+		if (mathStart === -1) {
+			return false;
+		}
+		if (isEscapedAt(src, mathStart)) {
+			searchStart = mathStart + 1;
+			continue;
+		}
+
+		const mathEnd = findInlineMathEnd(src, mathStart);
+		if (mathEnd === undefined) {
+			searchStart = mathStart + getDollarRunLength(src, mathStart);
+			continue;
+		}
+		if (src.slice(mathStart, mathEnd).includes("|")) {
+			return true;
+		}
+		searchStart = mathEnd;
+	}
+	return false;
+}
+
+const literalMathBlockExtension: TokenizerExtension = {
+	name: "math_block",
+	level: "block",
+	start(src): number | undefined {
+		const match = DISPLAY_MATH_OPEN_LINE_SEARCH_REGEX.exec(src);
+		return match === null ? undefined : match.index + 1;
+	},
+	tokenizer(src): LiteralMathToken | undefined {
+		return readDisplayMath(src);
+	},
+};
+
+const literalMathInlineExtension: TokenizerExtension = {
+	name: "math_inline",
+	level: "inline",
+	start(src): number | undefined {
+		const index = src.indexOf("$");
+		return index === -1 ? undefined : index;
+	},
+	tokenizer(src): LiteralMathToken | undefined {
+		const raw = readInlineMath(src);
+		if (raw === undefined) {
+			return undefined;
+		}
+		return {
+			type: "math_inline",
+			raw,
+			text: raw,
+		};
+	},
+};
+
+class LiteralMathTokenizer extends Tokenizer {
+	override link(src: string): Tokens.Link | Tokens.Image | undefined {
+		const token = super.link(src);
+		// Link labels are parsed before inline extensions. Falling back lets the
+		// math tokenizer preserve brackets and parentheses inside the formula.
+		return token && hasIncompleteMathSpan(token.raw) ? undefined : token;
+	}
+
+	override reflink(src: string, links: Links): Tokens.Link | Tokens.Image | Tokens.Text | undefined {
+		const token = super.reflink(src, links);
+		if ((token?.type === "link" || token?.type === "image") && hasIncompleteMathSpan(token.raw)) {
+			return { type: "text", raw: src[0]!, text: src[0]! };
+		}
+		return token;
+	}
+
+	override del(src: string, maskedSrc: string): Tokens.Del | undefined {
+		const match = STRICT_STRIKETHROUGH_REGEX.exec(maskedSrc.slice(-src.length));
 		if (!match) {
 			return undefined;
 		}
 
-		const text = match[2]!;
+		const raw = src.slice(0, match[0].length);
+		const delimiterLength = match[1]!.length;
+		const text = raw.slice(delimiterLength, -delimiterLength);
 		return {
 			type: "del",
-			raw: match[0],
+			raw,
 			text,
 			tokens: this.lexer.inlineTokens(text),
 		};
@@ -49,7 +304,13 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 
 const markdownParser = new Marked();
 markdownParser.setOptions({
-	tokenizer: new StrictStrikethroughTokenizer(),
+	tokenizer: new LiteralMathTokenizer(),
+});
+markdownParser.use({
+	extensions: [literalMathBlockExtension, literalMathInlineExtension],
+	hooks: {
+		emStrongMask: maskInlineMath,
+	},
 });
 
 /**
@@ -333,6 +594,14 @@ export class Markdown implements Component {
 		const lines: string[] = [];
 
 		switch (token.type) {
+			case "math_block":
+				if (isLiteralMathToken(token)) {
+					const text = token.raw.endsWith("\n") ? token.raw.slice(0, -1) : token.raw;
+					const applyText = styleContext?.applyText ?? ((line: string) => this.applyDefaultStyle(line));
+					lines.push(...text.split("\n").map(applyText));
+				}
+				break;
+
 			case "heading": {
 				const headingLevel = token.depth;
 				const headingPrefix = `${"#".repeat(headingLevel)} `;
@@ -406,7 +675,19 @@ export class Markdown implements Component {
 			}
 
 			case "table": {
-				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext);
+				const tableToken = token as Tokens.Table;
+				if (mathSpanContainsTableDelimiter(tableToken.raw)) {
+					// The block table tokenizer splits on pipes before inline math is
+					// tokenized, so fall back to the raw table when a pipe belongs to math.
+					const text = tableToken.raw.endsWith("\n") ? tableToken.raw.slice(0, -1) : tableToken.raw;
+					const applyText = styleContext?.applyText ?? ((line: string) => this.applyDefaultStyle(line));
+					lines.push(...text.split("\n").map(applyText));
+					if (nextTokenType && nextTokenType !== "space") {
+						lines.push("");
+					}
+					break;
+				}
+				const tableLines = this.renderTable(tableToken, width, nextTokenType, styleContext);
 				lines.push(...tableLines);
 				break;
 			}
@@ -500,6 +781,12 @@ export class Markdown implements Component {
 
 		for (const token of tokens) {
 			switch (token.type) {
+				case "math_inline":
+					if (isLiteralMathToken(token)) {
+						result += applyTextWithNewlines(token.raw);
+					}
+					break;
+
 				case "escape":
 					result += applyTextWithNewlines(this.options.preserveBackslashEscapes ? token.raw : token.text);
 					break;

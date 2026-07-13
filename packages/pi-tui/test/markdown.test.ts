@@ -674,6 +674,220 @@ describe("Markdown component", () => {
 		});
 	});
 
+	describe("Math source preservation", () => {
+		it("preserves every character when repeated inline math contains asterisks", () => {
+			const source = String.raw`定义三个参考点：$\theta_{\text{true}}$（生成分布）、$\theta^*_A$（假设类内最优）、$\hat\theta_D$（给无限算力在 $D$ 上学到的）、$\hat\theta_O$（实际 SGD 输出）。对 $-\log p(E\mid\hat\theta_O)$ 在 $\theta^*_A$ 附近做二阶展开，得到可加分解：`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(500).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("keeps italic Markdown outside protected inline math", () => {
+			const markdown = new Markdown(
+				String.raw`模型：$\theta^*_A$，*仍然使用 Markdown*。`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const [rendered] = markdown.render(80);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), String.raw`模型：$\theta^*_A$，仍然使用 Markdown。`);
+			assert.ok(rendered.includes(chalk.italic("仍然使用 Markdown")));
+		});
+
+		it("preserves ambiguous paired dollar text verbatim", () => {
+			const source = "Cost $5 *discount* $10.";
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(100);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), source);
+		});
+
+		it("keeps environment variables in normal Markdown text", () => {
+			const source = "Use $PATH/$HOME and *italic*.";
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(100);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), "Use $PATH/$HOME and italic.");
+			assert.ok(rendered.includes(chalk.italic("italic")));
+		});
+
+		it("preserves escaped dollars inside inline math", () => {
+			const source = String.raw`$\text{cost}=\$5^*_A$`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("preserves Markdown-like syntax inside inline math", () => {
+			const source = String.raw`$x^{**}+\text{[a](b)}+y~~z$`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("preserves inline math with delimiter-adjacent whitespace", () => {
+			const source = String.raw`$ x^*_A $ and $ y^*_B $`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("preserves inline math followed immediately by prose", () => {
+			const source = String.raw`$x^*_A$foo and $y^*_B$bar`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("preserves math markers inside surrounding emphasis", () => {
+			const source = String.raw`*lead $x*y$ tail*`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(80);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), String.raw`lead $x*y$ tail`);
+		});
+
+		it("preserves math markers inside surrounding strikethrough", () => {
+			const source = String.raw`~~lead $x~~y$ tail~~`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(80);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), String.raw`lead $x~~y$ tail`);
+		});
+
+		it("preserves math syntax that overlaps a Markdown link label", () => {
+			const source = String.raw`[lead $\text{a](b)}$ tail](https://example.com)`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(100);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), source);
+		});
+
+		it("keeps link formatting when math does not overlap link syntax", () => {
+			const source = String.raw`[value $x^*_A$](https://example.com)`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(100);
+
+			assert.ok(rendered);
+			assert.strictEqual(
+				stripAnsi(rendered).trimEnd(),
+				String.raw`value $x^*_A$ (https://example.com)`,
+			);
+		});
+
+		it("preserves incomplete inline math during streaming", () => {
+			const source = String.raw`open $x^*_A + [y](z) + q~~r`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [source]);
+		});
+
+		it("preserves display math as literal lines", () => {
+			const source = String.raw`$$
+# \theta^*_A
++ \phi^*_B
+$$`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, ["$$", String.raw`# \theta^*_A`, String.raw`+ \phi^*_B`, "$$"]);
+		});
+
+		it("preserves incomplete display math during streaming", () => {
+			const source = String.raw`$$
+# \theta^*_A
++ \phi^*_B`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, ["$$", String.raw`# \theta^*_A`, String.raw`+ \phi^*_B`]);
+		});
+
+		it("preserves multiline display math whose opener contains content", () => {
+			const source = String.raw`$$ \theta^*_A
+\phi^*_B
+$$`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [String.raw`$$ \theta^*_A`, String.raw`\phi^*_B`, "$$"]);
+		});
+
+		it("does not treat mid-line double dollars as a display block", () => {
+			const source = "prefix a$$\n# heading";
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, ["prefix a$$", "", "heading"]);
+		});
+
+		it("preserves tables literally when math contains a table delimiter", () => {
+			const source = String.raw`| Formula | Meaning |
+| --- | --- |
+| $p(A|B)^*$ | conditional |`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(100).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, source.split("\n"));
+		});
+
+		it("keeps math-like text inside inline code", () => {
+			const markdown = new Markdown("Use `$\\theta^*_A$` literally.", 0, 0, defaultMarkdownTheme);
+
+			const [rendered] = markdown.render(80);
+
+			assert.ok(rendered);
+			assert.strictEqual(stripAnsi(rendered).trimEnd(), String.raw`Use $\theta^*_A$ literally.`);
+			assert.ok(rendered.includes(defaultMarkdownTheme.code(String.raw`$\theta^*_A$`)));
+		});
+
+		it("keeps delimiter-only display math inside fenced code", () => {
+			const source = ["```tex", "$$", String.raw`# \theta^*_A + \phi^*_B`, "$$", "```"].join("\n");
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(lines, [
+				"```tex",
+				"  $$",
+				String.raw`  # \theta^*_A + \phi^*_B`,
+				"  $$",
+				"```",
+			]);
+		});
+	});
+
 	describe("Pre-styled text (thinking traces)", () => {
 		it("should preserve gray italic styling after inline code", () => {
 			// This replicates how thinking content is rendered in assistant-message.ts
