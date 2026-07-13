@@ -367,6 +367,10 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     configValues['thinking'] = { effort: 'low', forcedEffort: ' max ' };
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
+    expect(host.svc.data().thinkingLevel).toBe('high');
+    expect(modelOf(host.wire).thinkingLevel).toBe('high');
+    expect(host.svc.resolveModelContext().thinkingLevel).toBe('max');
+
     const model = host.svc.resolveModel();
 
     expect(model?.thinkingEffort).toBe('max');
@@ -375,6 +379,34 @@ describe('AgentProfileService (wire-backed config.update)', () => {
       { prompt_cache_key: 'session-test' },
       { extra_body: { thinking: { type: 'enabled', effort: 'max', keep: 'all' } } },
     ]);
+  });
+
+  it('does not leak a forced Kimi effort when switching to a non-Kimi model', () => {
+    const kimiThinkingEfforts: ThinkingEffort[] = [];
+    const otherThinkingEfforts: ThinkingEffort[] = [];
+    modelResolver = {
+      _serviceBrand: undefined,
+      resolve: (alias) =>
+        alias === 'kimi-code'
+          ? createRecordingModel([], kimiThinkingEfforts)
+          : createRecordingModel([], otherThinkingEfforts, [], 'anthropic'),
+      findByName: () => [],
+    };
+    const host = buildHost('profile-thinking-effort-force-switch');
+    host.svc.configure({ emitStatusUpdated: () => undefined });
+    configValues['thinking'] = { forcedEffort: 'max' };
+
+    host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
+    expect(host.svc.data().thinkingLevel).toBe('high');
+    expect(host.svc.resolveModelContext().thinkingLevel).toBe('max');
+    expect(host.svc.resolveModel()?.thinkingEffort).toBe('max');
+
+    host.svc.update({ modelAlias: 'other-code' });
+    expect(host.svc.data().thinkingLevel).toBe('high');
+    expect(host.svc.resolveModelContext().thinkingLevel).toBe('high');
+    expect(host.svc.resolveModel()?.thinkingEffort).toBe('high');
+    expect(kimiThinkingEfforts).toEqual(['max']);
+    expect(otherThinkingEfforts).toEqual(['high']);
   });
 
   it('applies thinking.keep model override on the Anthropic path', () => {
@@ -516,9 +548,11 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     };
     const host = buildHost('profile-thinking-keep-off');
     host.svc.configure({ emitStatusUpdated: () => undefined });
+    configValues['thinking'] = { forcedEffort: 'max' };
     configValues['modelOverrides'] = { temperature: 0.3, thinkingKeep: 'all' };
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'off' });
+    expect(host.svc.resolveModelContext().thinkingLevel).toBe('off');
     host.svc.resolveModel();
 
     expect(thinkingEfforts).toEqual(['off']);

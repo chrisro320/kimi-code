@@ -4,9 +4,9 @@
  * Owns the active agent's model alias, thinking level, system prompt, and
  * active-tool set; resolves the runnable god-object Model through the App-
  * scope `IModelResolver`, persists the persistent config slice (`cwd` /
- * `modelAlias` / `profileName` / resolved `thinkingLevel` / `systemPrompt`) in
- * the `wire` `ProfileModel` through the `config.update` Op and the persisted
- * active-tool set in the `wire` `ActiveToolsModel` through the
+ * `modelAlias` / `profileName` / resolved base `thinkingLevel` /
+ * `systemPrompt`) in the `wire` `ProfileModel` through the `config.update` Op
+ * and the persisted active-tool set in the `wire` `ActiveToolsModel` through the
  * `tools.set_active_tools` Op (`wire.dispatch`), and reads both through
  * `wire.getModel`. The effective active-tool set read by consumers is the
  * persisted base (`ActiveToolsModel`, rebuilt by `wire.replay`) overlaid with
@@ -283,7 +283,7 @@ export class AgentProfileService implements IAgentProfileService {
       modelCapabilities: model.capabilities,
       maxOutputSize: model.maxOutputSize,
       alwaysThinking: model.alwaysThinking || undefined,
-      thinkingLevel: this.thinkingLevel,
+      thinkingLevel: this.resolveThinkingState(model).effective,
       reservedContextSize: loopControl?.reservedContextSize,
       compactionTriggerRatio: loopControl?.compactionTriggerRatio,
     };
@@ -304,13 +304,8 @@ export class AgentProfileService implements IAgentProfileService {
   resolveModel(): Model | undefined {
     if (this.modelAlias === undefined) return undefined;
     let model: Model = this.modelFactory.resolve(this.modelAlias);
-    const thinkingLevel = this.thinkingLevel;
+    const thinking = this.resolveThinkingState(model);
     const thinkingConfig = this.config.get<ThinkingConfig>(THINKING_SECTION);
-    const forcedKimiThinkingEffort = resolveKimiThinkingEffortOverride(
-      thinkingConfig?.forcedEffort,
-      thinkingLevel,
-      model.providerType === 'kimi',
-    );
     const kwargs: GenerationKwargs = {};
     if (model.protocol === 'kimi') {
       kwargs.prompt_cache_key = this.sessionContext.sessionId;
@@ -327,24 +322,24 @@ export class AgentProfileService implements IAgentProfileService {
     const keep = resolveThinkingKeep(
       overrides?.thinkingKeep,
       thinkingConfig?.keep,
-      thinkingLevel,
+      thinking.effective,
     );
     if (keep !== undefined) {
-      if (model.protocol === 'kimi' && forcedKimiThinkingEffort === undefined) {
+      if (model.protocol === 'kimi' && thinking.forced === undefined) {
         kwargs.extra_body = { thinking: { keep } };
       } else if (model.protocol === 'anthropic') {
         model = model.withThinkingKeep(keep);
       }
     }
     if (Object.keys(kwargs).length > 0) model = model.withGenerationKwargs(kwargs);
-    model = model.withThinking(forcedKimiThinkingEffort ?? thinkingLevel);
-    if (model.protocol === 'kimi' && forcedKimiThinkingEffort !== undefined) {
-      const thinking: { type: 'enabled'; effort: string; keep?: string } = {
+    model = model.withThinking(thinking.effective);
+    if (model.protocol === 'kimi' && thinking.forced !== undefined) {
+      const requestThinking: { type: 'enabled'; effort: string; keep?: string } = {
         type: 'enabled',
-        effort: forcedKimiThinkingEffort,
+        effort: thinking.forced,
       };
-      if (keep !== undefined) thinking.keep = keep;
-      model = model.withGenerationKwargs({ extra_body: { thinking } });
+      if (keep !== undefined) requestThinking.keep = keep;
+      model = model.withGenerationKwargs({ extra_body: { thinking: requestThinking } });
     }
     return model;
   }
@@ -456,7 +451,9 @@ export class AgentProfileService implements IAgentProfileService {
     this.eventBus.publish({
       type: 'agent.status.updated',
       model: this.modelAlias,
-      thinkingEffort: includeThinkingEffort ? this.thinkingLevel : undefined,
+      thinkingEffort: includeThinkingEffort
+        ? this.resolveThinkingState(this.tryResolveRawModel()).effective
+        : undefined,
       maxContextTokens: this.getModelCapabilities().max_context_tokens,
     });
   }
@@ -501,6 +498,19 @@ export class AgentProfileService implements IAgentProfileService {
       );
     }
     return stored;
+  }
+
+  private resolveThinkingState(model: Model | undefined): {
+    readonly effective: ThinkingEffort;
+    readonly forced: ThinkingEffort | undefined;
+  } {
+    const base = this.thinkingLevel;
+    const forced = resolveKimiThinkingEffortOverride(
+      this.config.get<ThinkingConfig>(THINKING_SECTION)?.forcedEffort,
+      base,
+      model?.providerType === 'kimi',
+    );
+    return { effective: forced ?? base, forced };
   }
 
   private get alwaysThinkingModel(): boolean {

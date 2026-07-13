@@ -23,7 +23,7 @@ export class ProfileError extends Error2 {
 
 /**
  * Data required to configure an agent: active model id, its capability
- * matrix, profile, thinking level, system prompt, and working directory.
+ * matrix, profile, base thinking level, system prompt, and working directory.
  * Owned by `profile` (which assembles it); consumed by `replayBuilder` and
  * `rpc` as a wire DTO. The runnable `Model` god-object is resolved on demand
  * via `resolveModel()`; it does not travel through this DTO.
@@ -164,7 +164,9 @@ export interface IAgentProfileService {
    * `undefined` when no oversized content has been observed.
    */
   getAgentsMdWarning(): string | undefined;
+  /** Persistent profile data; `thinkingLevel` excludes runtime-only env forcing. */
   data(): ProfileData;
+  /** Runtime model context; `thinkingLevel` matches the effort sent to the provider. */
   resolveModelContext(): ProfileModelContext;
   /**
    * Return the runnable god-object `Model` for the currently-active model.

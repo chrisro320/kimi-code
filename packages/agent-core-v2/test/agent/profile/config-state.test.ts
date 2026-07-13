@@ -502,6 +502,18 @@ describe('ConfigState.provider applies global KIMI_MODEL_* request config', () =
     createAgentWithEnv();
 
     profile.update({ modelAlias: 'kimi-code-anthropic', thinkingLevel: 'high' });
+    expect(profile.data().thinkingLevel).toBe('high');
+    expect(profile.resolveModelContext().thinkingLevel).toBe('max');
+    const statusEvent = ctx?.allEvents.findLast(
+      (event) =>
+        event.event === 'agent.status.updated' &&
+        (event.args as { thinkingEffort?: unknown } | undefined)?.thinkingEffort !== undefined,
+    );
+    expect(statusEvent?.args).toMatchObject({
+      model: 'kimi-code-anthropic',
+      thinkingEffort: 'max',
+    });
+
     await requester.request({}, undefined, new AbortController().signal);
 
     expect(capturedProvider).toMatchObject({

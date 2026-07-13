@@ -528,6 +528,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     const originalHistory = [...this.context.get()];
     const tokensBefore = estimateTokensForMessages(originalHistory);
     let retryCount = 0;
+    let thinkingEffort = this.profile.data().thinkingLevel;
 
     try {
       const signal = active.abortController.signal;
@@ -536,6 +537,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       await this.hooks.onWillCompact.run(active);
 
       const resolvedModel = this.profile.resolveModelContext();
+      thinkingEffort = resolvedModel.thinkingLevel;
       const maxContextTokens = resolvedModel.modelCapabilities.max_context_tokens;
       const defaultCompactionCap =
         maxContextTokens > 0
@@ -654,7 +656,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         dropped_count: result.droppedCount,
         retry_count: retryCount,
         round: 1,
-        thinking_effort: this.profile.data().thinkingLevel,
+        thinking_effort: thinkingEffort,
         ...usageTelemetry(attempt.usage),
       };
       this.telemetry.track2('compaction_finished', properties);
@@ -667,7 +669,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         duration_ms: Date.now() - startedAt,
         round: 1,
         retry_count: retryCount,
-        thinking_effort: this.profile.data().thinkingLevel,
+        thinking_effort: thinkingEffort,
         error_type: error instanceof Error ? error.name : 'Unknown',
       });
       if (isError2(error) && error.code === ErrorCodes.AUTH_LOGIN_REQUIRED) throw error;

@@ -201,11 +201,13 @@ export class SessionLegacyService implements ISessionLegacyService {
     // `measured` stays 0 until the first LLM response lands.
     const tokens = contextSize.get().size;
     const planData = await plan.status();
+    const thinkingLevel =
+      model === '' ? profileData.thinkingLevel : profile.resolveModelContext().thinkingLevel;
 
     return {
       status: session?.accessor.get(ISessionActivity).status() ?? 'idle',
       model: model === '' ? undefined : model,
-      thinking_level: profileData.thinkingLevel,
+      thinking_level: thinkingLevel,
       permission: permission.mode,
       plan_mode: planData !== null,
       swarm_mode: swarm.isActive,
