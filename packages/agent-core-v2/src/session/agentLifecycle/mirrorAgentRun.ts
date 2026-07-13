@@ -19,10 +19,16 @@
  * completed / failed` and telemetry still tracks `subagent_created` so existing
  * session recordings and dashboards stay valid. Rename lives on a separate
  * wire-cleanup PR.
+ * Explicit cancellation remains observable as `subagent.failed` with the
+ * optional cancellation marker even when retry-related failures are hidden.
  */
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
-import { userCancellationReason } from '#/_base/utils/abort';
+import {
+  isAbortError,
+  isUserCancellation,
+  userCancellationReason,
+} from '#/_base/utils/abort';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { isProviderRateLimitError } from '#/app/llmProtocol/errors';
 import { type TokenUsage } from '#/app/llmProtocol/usage';
@@ -34,7 +40,6 @@ import type {
   SubagentStartedEvent,
 } from '@moonshot-ai/protocol';
 import { IEventBus } from '#/app/event/eventBus';
-import { isAbortError } from '#/_base/utils/abort';
 
 import { type AgentRunHandle, IAgentLifecycleService } from './agentLifecycle';
 
@@ -65,7 +70,6 @@ export interface MirrorAgentRunOptions {
    * retry turns, which skip the hook.
    */
   readonly prompt?: string;
-  /** Skip the requester-side `subagent.failed` record for provider-rate-limit / aborted failures. */
   readonly suppressRateLimitFailureEvent?: boolean;
   /** The requester's cancellation signal (passed through to the start hook slot). */
   readonly signal: AbortSignal;
@@ -150,7 +154,19 @@ export async function mirrorAgentRun(
     });
     return result;
   } catch (error) {
-    if (!isAbortError(error) && !shouldSuppressFailure(options, error)) {
+    const cancellationReason = isUserCancellation(error)
+      ? error
+      : isUserCancellation(options.signal.reason)
+        ? options.signal.reason
+        : undefined;
+    if (cancellationReason !== undefined) {
+      eventBus?.publish({
+        type: 'subagent.failed',
+        subagentId: run.agentId,
+        error: errorMessage(cancellationReason),
+        cancelled: true,
+      });
+    } else if (!isAbortError(error) && !shouldSuppressFailure(options, error)) {
       eventBus?.publish({
         type: 'subagent.failed',
         subagentId: run.agentId,

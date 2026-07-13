@@ -650,6 +650,50 @@ describe('Agent tool execution contract', () => {
     });
   });
 
+  it('mirrors explicit user cancellation as a cancelled subagent failure', async () => {
+    const lifecycle = createAgentLifecycleStub();
+    const events: DomainEvent[] = [];
+    const eventBus = {
+      _serviceBrand: undefined,
+      publish: vi.fn((event: DomainEvent) => events.push(event)),
+      subscribe: vi.fn(() => noopDisposable()),
+    } as IEventBus;
+    const requester = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: {
+        get: ((serviceId: unknown) => {
+          if (serviceId === IEventBus) return eventBus;
+          if (serviceId === IAgentLifecycleService) return lifecycle;
+          return undefined;
+        }) as IAgentScopeHandle['accessor']['get'],
+      },
+      dispose: () => {},
+    } satisfies IAgentScopeHandle;
+    const controller = new AbortController();
+    const reason = userCancellationReason();
+    controller.abort(reason);
+
+    const mirrored = mirrorAgentRun(
+      requester,
+      {
+        agentId: 'agent-child',
+        turn: {} as AgentRunHandle['turn'],
+        completion: Promise.reject(reason),
+      },
+      {
+        profileName: 'explore',
+        signal: controller.signal,
+      },
+    );
+
+    await expect(mirrored).rejects.toBe(reason);
+    expect(events.find((event) => event.type === 'subagent.failed')).toMatchObject({
+      subagentId: 'agent-child',
+      cancelled: true,
+    });
+  });
+
   it('inherits parent user tools when spawning a subagent', async () => {
     const lookupTool: UserToolRegistration = {
       name: 'Lookup',
@@ -1409,6 +1453,7 @@ describe('AgentSwarm tool execution contract', () => {
       _serviceBrand: undefined,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
+      stopAgent: ({ agentId }) => ({ kind: 'not_found', agentId }),
       cancel: () => {},
     };
     ctx = createTestAgent(swarmServices(swarmService));
@@ -1490,6 +1535,7 @@ describe('AgentSwarm tool execution contract', () => {
       _serviceBrand: undefined,
       getSwarmItem,
       run: runSwarm as ISessionSwarmService['run'],
+      stopAgent: ({ agentId }) => ({ kind: 'not_found', agentId }),
       cancel: () => {},
     };
     ctx = createTestAgent(swarmServices(swarmService));
@@ -1615,6 +1661,7 @@ describe('AgentSwarm tool execution contract', () => {
       _serviceBrand: undefined,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
+      stopAgent: ({ agentId }) => ({ kind: 'not_found', agentId }),
       cancel: () => {},
     };
     ctx = createTestAgent(swarmServices(swarmService));
@@ -1662,6 +1709,7 @@ describe('AgentSwarm tool execution contract', () => {
       _serviceBrand: undefined,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
+      stopAgent: ({ agentId }) => ({ kind: 'not_found', agentId }),
       cancel: () => {},
     };
     ctx = createTestAgent(swarmServices(swarmService));
@@ -1718,6 +1766,7 @@ describe('AgentSwarm tool execution contract', () => {
       _serviceBrand: undefined,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
+      stopAgent: ({ agentId }) => ({ kind: 'not_found', agentId }),
       cancel: () => {},
     };
     ctx = createTestAgent(swarmServices(swarmService));
