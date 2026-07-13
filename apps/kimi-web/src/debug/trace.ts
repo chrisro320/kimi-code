@@ -5,8 +5,8 @@
 // Full diagnostics are opt-in via `?debug=1` or
 // `localStorage["kimi-web.debug"]="1"`; key lifecycle metadata is always on.
 // Recording NEVER changes request/WS behavior: callers pass data in, errors
-// here must not propagate. The shared store is bounded by count and UTF-8 size
-// so it can be included in a session export without retaining app data.
+// here must not propagate. Session exports use a separate metadata-only ring;
+// full REST/WS/console diagnostics never enter the archive.
 
 import { ref, shallowRef } from 'vue';
 import { safeGetString, STORAGE_KEYS } from '../lib/storage';
@@ -43,8 +43,58 @@ export interface TraceEntry {
   detail?: unknown;
 }
 
+const EXPORT_TRACE_EVENTS = [
+  'app:load:start',
+  'app:load:complete',
+  'export:start',
+  'export:accepted',
+  'export:failed',
+  'prompt:start',
+  'prompt:accepted',
+  'prompt:failed',
+  'session:snapshot:start',
+  'session:snapshot:accepted',
+  'session:snapshot:failed',
+  'window:error',
+  'window:unhandled-rejection',
+  'ws:connection',
+  'ws:error',
+  'ws:resync',
+  'ws:stale-reconnect',
+] as const;
+
+type ExportTraceEvent = (typeof EXPORT_TRACE_EVENTS)[number];
+
+export interface ExportTraceMetadata {
+  sessionId?: string;
+  status?: string;
+  seq?: number;
+  durationMs?: number;
+  messageCount?: number;
+  contentCount?: number;
+  mediaCount?: number;
+  sessionCount?: number;
+  workspaceCount?: number;
+  promptId?: string;
+  zipBytes?: number;
+  errorName?: string;
+  errorCode?: number;
+  requestId?: string;
+  phase?: string;
+  httpStatus?: number;
+  fatal?: boolean;
+  line?: number;
+  col?: number;
+}
+
+interface ExportTraceEntry extends ExportTraceMetadata {
+  ts: number;
+  event: ExportTraceEvent;
+}
+
 const MAX_ENTRIES = 500;
 const MAX_TOTAL_UTF8_BYTES = 256 * 1024;
+const MAX_EXPORT_STRING = 200;
 /** A single entry's detail JSON is capped so one giant frame (e.g. a snapshot
     with full scrollback) can't dominate the buffer's memory. */
 const MAX_DETAIL_JSON_CHARS = 16_384;
@@ -89,8 +139,11 @@ export function isTraceEnabled(): boolean {
 const entries: TraceEntry[] = [];
 const entryJson: string[] = [];
 let totalUtf8Bytes = 0;
+const exportEntryJson: string[] = [];
+let exportTotalUtf8Bytes = 0;
 let nextId = 1;
 const utf8 = new TextEncoder();
+const exportTraceEvents = new Set<string>(EXPORT_TRACE_EVENTS);
 
 /** Bumped on every push; the panel re-reads the buffer when it changes. */
 export const traceVersion = ref(0);
@@ -105,6 +158,8 @@ export function clearTrace(): void {
   entries.length = 0;
   entryJson.length = 0;
   totalUtf8Bytes = 0;
+  exportEntryJson.length = 0;
+  exportTotalUtf8Bytes = 0;
   traceVersion.value++;
 }
 
@@ -132,8 +187,8 @@ function push(entry: Omit<TraceEntry, 'id' | 'ts'>): void {
     };
     const json = JSON.stringify(safeEntry);
     const bytes = utf8.encode(json).byteLength;
-    // A single impossible-to-fit entry carries no useful export signal and
-    // must not make traceToJsonl exceed the server's request limit.
+    // A single impossible-to-fit entry carries no useful debug signal and
+    // must not crowd the bounded panel buffer.
     if (bytes > MAX_TOTAL_UTF8_BYTES) return;
     entries.push(safeEntry);
     entryJson.push(json);
@@ -152,6 +207,61 @@ function push(entry: Omit<TraceEntry, 'id' | 'ts'>): void {
     return;
   }
   traceVersion.value++;
+}
+
+function exportString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.length <= MAX_EXPORT_STRING ? value : value.slice(0, MAX_EXPORT_STRING);
+}
+
+function exportNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function pushExportTrace(event: string, info?: ExportTraceMetadata): void {
+  if (!exportTraceEvents.has(event)) return;
+  try {
+    const entry: ExportTraceEntry = {
+      ts: Date.now(),
+      event: event as ExportTraceEvent,
+      sessionId: exportString(info?.sessionId),
+      status: exportString(info?.status),
+      seq: exportNumber(info?.seq),
+      durationMs: exportNumber(info?.durationMs),
+      messageCount: exportNumber(info?.messageCount),
+      contentCount: exportNumber(info?.contentCount),
+      mediaCount: exportNumber(info?.mediaCount),
+      sessionCount: exportNumber(info?.sessionCount),
+      workspaceCount: exportNumber(info?.workspaceCount),
+      promptId: exportString(info?.promptId),
+      zipBytes: exportNumber(info?.zipBytes),
+      errorName: exportString(info?.errorName),
+      errorCode: exportNumber(info?.errorCode),
+      requestId: exportString(info?.requestId),
+      phase: exportString(info?.phase),
+      httpStatus: exportNumber(info?.httpStatus),
+      fatal: typeof info?.fatal === 'boolean' ? info.fatal : undefined,
+      line: exportNumber(info?.line),
+      col: exportNumber(info?.col),
+    };
+    const json = JSON.stringify(entry);
+    const bytes = utf8.encode(json).byteLength;
+    if (bytes > MAX_TOTAL_UTF8_BYTES) return;
+    exportEntryJson.push(json);
+    exportTotalUtf8Bytes += bytes + (exportEntryJson.length > 1 ? 1 : 0);
+    while (
+      exportEntryJson.length > MAX_ENTRIES ||
+      exportTotalUtf8Bytes > MAX_TOTAL_UTF8_BYTES
+    ) {
+      const removed = exportEntryJson.shift();
+      if (removed !== undefined) {
+        exportTotalUtf8Bytes -= utf8.encode(removed).byteLength;
+        if (exportEntryJson.length > 0) exportTotalUtf8Bytes -= 1;
+      }
+    }
+  } catch {
+    return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,12 +457,10 @@ export function traceWsIn(frame: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// Client-side log capture — so the exported troubleshooting log includes the
-// front-end console (uncaught exceptions, rejected promises, and every console
-// level: error/warn/log/info/debug) that explains a broken page, not just
-// network traffic. Install-once, opt-in (only when tracing is enabled), and
-// never alters runtime behavior: the original console methods and default error
-// handling still run.
+// Client-side log capture for the opt-in debug panel. Console arguments may
+// contain user content, so these entries intentionally stay out of session
+// exports. Install-once and never alter runtime behavior: original console
+// methods and default error handling still run.
 // ---------------------------------------------------------------------------
 
 type ClientLogLevel = 'error' | 'warn' | 'log' | 'info' | 'debug';
@@ -379,7 +487,7 @@ function traceClientLog(level: ClientLogLevel, label: string, detail?: unknown):
     as audio playback) into the troubleshooting log. No-op unless tracing is
     enabled (?debug=1 or the debug localStorage flag), so production use pays
     only a boolean check. Prefer this over raw console.* for diagnostics that
-    should surface in the exported log. */
+    should surface in the debug panel. */
 export function traceClientEvent(label: string, detail?: unknown): void {
   if (!isTraceEnabled()) return;
   push({
@@ -390,16 +498,14 @@ export function traceClientEvent(label: string, detail?: unknown): void {
   });
 }
 
-/** Always-on, low-frequency product-path event. Callers must pass metadata
- * only (ids, statuses, cursors, durations and counts), never user content. */
-export function traceKeyEvent(
-  label: string,
-  info?: Record<string, string | number | boolean | null | undefined>,
-): void {
+/** Always-on, low-frequency product-path event. Only the explicitly selected
+ * fields are copied into the independent session-export ring. */
+export function traceKeyEvent(event: ExportTraceEvent, info?: ExportTraceMetadata): void {
+  pushExportTrace(event, info);
   push({
     source: 'client',
     kind: 'client:key',
-    label,
+    label: event,
     sessionId: typeof info?.['sessionId'] === 'string' ? info['sessionId'] : undefined,
     seq: typeof info?.['seq'] === 'number' ? info['seq'] : undefined,
     durationMs: typeof info?.['durationMs'] === 'number' ? info['durationMs'] : undefined,
@@ -411,8 +517,8 @@ let clientCaptureInstalled = false;
 let uninstallClientCapture: (() => void) | null = null;
 
 /** Wire up always-on window failures and debug-only console capture. */
-export function installClientErrorCapture(): void {
-  if (clientCaptureInstalled) return;
+export function installClientErrorCapture(): () => void {
+  if (clientCaptureInstalled) return () => uninstallClientCapture?.();
   clientCaptureInstalled = true;
 
   const cleanup: Array<() => void> = [];
@@ -466,11 +572,14 @@ export function installClientErrorCapture(): void {
     }
   }
 
-  uninstallClientCapture = (): void => {
-    for (const dispose of cleanup.toReversed()) dispose();
+  const dispose = (): void => {
+    if (uninstallClientCapture !== dispose) return;
+    for (const cleanupFunction of cleanup.toReversed()) cleanupFunction();
     uninstallClientCapture = null;
     clientCaptureInstalled = false;
   };
+  uninstallClientCapture = dispose;
+  return dispose;
 }
 
 if (import.meta.hot) {
@@ -491,8 +600,7 @@ function stringifyArg(a: unknown): string {
 // Export
 // ---------------------------------------------------------------------------
 
-/** Download the captured trace as a JSONL file. Reusable so the debug panel and
-    any "Export log" UI action share one implementation. */
+/** Download the opt-in debug-panel trace as a JSONL file. */
 export function downloadTraceLog(list: readonly TraceEntry[] = entries): void {
   if (typeof document === 'undefined') return;
   const blob = new Blob([traceToJsonl(list)], { type: 'application/x-ndjson' });
@@ -520,4 +628,9 @@ export function downloadTraceLog(list: readonly TraceEntry[] = entries): void {
 export function traceToJsonl(list: readonly TraceEntry[] = entries): string {
   if (list === entries) return entryJson.join('\n');
   return list.map((e) => JSON.stringify(e)).join('\n');
+}
+
+/** Serialize only the metadata-only ring accepted by session exports. */
+export function sessionExportTraceToJsonl(): string {
+  return exportEntryJson.join('\n');
 }

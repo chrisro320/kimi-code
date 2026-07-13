@@ -1,5 +1,6 @@
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { Readable } from 'node:stream';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { join } from 'pathe';
@@ -16,11 +17,16 @@ import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiati
 import { ILogService, type ILogService as LogService } from '#/_base/log/log';
 import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { ISessionExportService } from '#/app/sessionExport/sessionExport';
+import { openZipSource, type ZipSource } from '#/app/sessionExport/file-source';
+import {
+  type ExportSessionManifest,
+  ISessionExportService,
+} from '#/app/sessionExport/sessionExport';
 import {
   exportSessionDirectory,
   SessionExportService,
 } from '#/app/sessionExport/sessionExportService';
+import { writeExportZip } from '#/app/sessionExport/zip';
 import { ISessionIndex, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
 import {
   ISessionLifecycleService,
@@ -109,13 +115,12 @@ describe('sessionExport', () => {
     });
   });
 
-  it('omits the optional global log when the configured path cannot be read', async () => {
+  it('omits the optional global log when the configured file is missing', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
     const sessionDir = join(tmp, 'sessions', 'ws_demo', 'ses_unreadable_global');
     await mkdir(sessionDir, { recursive: true });
     await writeFile(join(sessionDir, 'state.json'), '{}\n', 'utf-8');
     const globalLogPath = join(tmp, 'logs', 'kimi-code.log');
-    await mkdir(globalLogPath, { recursive: true });
 
     const outputPath = join(tmp, 'unreadable-global.zip');
     const result = await exportSessionDirectory({
@@ -136,6 +141,28 @@ describe('sessionExport', () => {
     await expect(stat(outputPath)).resolves.toMatchObject({ size: expect.any(Number) });
     expect(result.manifest.globalLogPath).toBeUndefined();
     expect(result.entries).not.toContain('logs/global/kimi-code.log');
+  });
+
+  it('archives more than 300 session files without exhausting file handles', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
+    const sessionFiles: string[] = [];
+    for (let index = 0; index < 320; index += 1) {
+      const path = join(tmp, `entry-${index.toString().padStart(3, '0')}.txt`);
+      await writeFile(path, `${index}\n`, 'utf8');
+      sessionFiles.push(path);
+    }
+
+    const entries = await writeExportZip({
+      outputPath: join(tmp, 'many-files.zip'),
+      manifest: testManifest('ses_many_files'),
+      sessionDir: tmp,
+      sessionFiles,
+    });
+
+    expect(entries).toHaveLength(321);
+    await expect(readZipEntry(join(tmp, 'many-files.zip'), 'entry-319.txt')).resolves.toEqual(
+      Buffer.from('319\n', 'utf8'),
+    );
   });
 
   it('includes a bounded Web log in the exported archive', async () => {
@@ -167,6 +194,112 @@ describe('sessionExport', () => {
     await expect(readZipEntry(outputPath, 'logs/kimi-web.jsonl')).resolves.toEqual(
       Buffer.from(webLog, 'utf8'),
     );
+  });
+
+  it('rejects when a collected file disappears before it can be archived', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
+    const removedPath = join(tmp, 'removed-state.json');
+    await writeFile(removedPath, 'remove me\n', 'utf8');
+    await unlink(removedPath);
+
+    await expect(
+      writeExportZip({
+        outputPath: join(tmp, 'missing-file.zip'),
+        manifest: testManifest('ses_missing_file'),
+        sessionDir: tmp,
+        sessionFiles: [removedPath],
+      }),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('archives the opened file size when the source is appended during compression', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
+    const livePath = join(tmp, 'live.log');
+    const outputPath = join(tmp, 'append.zip');
+    const initialContent = Buffer.from('before\n', 'utf8');
+    await writeFile(livePath, initialContent);
+    const source = await openZipSource(livePath);
+    await appendFile(livePath, 'after\n', 'utf8');
+
+    await expect(
+      writeExportZip({
+        outputPath,
+        manifest: testManifest('ses_append'),
+        sessionDir: tmp,
+        sessionFiles: [],
+        extraEntries: [{ source, target: 'live.log' }],
+      }),
+    ).resolves.toContain('live.log');
+
+    await expect(readZipEntry(outputPath, 'live.log')).resolves.toEqual(initialContent);
+  });
+
+  it('destroys and closes the active source when compression is aborted', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
+    const outputPath = join(tmp, 'aborted.zip');
+    const abort = new AbortController();
+    const readStarted = deferred();
+    const allowRead = deferred();
+    let reading = false;
+    const stream = new Readable({
+      read() {
+        if (reading) return;
+        reading = true;
+        readStarted.resolve();
+        void allowRead.promise.then(() => {
+          if (this.destroyed) return;
+          this.push(Buffer.from('payload', 'utf8'));
+          this.push(null);
+        });
+      },
+    });
+    let closeCalls = 0;
+    let closed = false;
+    const source: ZipSource = {
+      stream,
+      size: 7,
+      mtime: new Date(0),
+      mode: 0o600,
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        closeCalls += 1;
+        stream.destroy();
+      },
+    };
+
+    const writing = writeExportZip({
+      outputPath,
+      manifest: testManifest('ses_abort'),
+      sessionDir: tmp,
+      sessionFiles: [],
+      extraEntries: [{ source, target: 'controlled.bin' }],
+      signal: abort.signal,
+    });
+    await readStarted.promise;
+    abort.abort(new DOMException('test abort', 'AbortError'));
+
+    await expect(writing).rejects.toMatchObject({ name: 'AbortError' });
+    expect(stream.destroyed).toBe(true);
+    expect(closeCalls).toBe(1);
+    allowRead.resolve();
+  });
+
+  it('rejects with a coded error when compressed output exceeds the configured limit', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'session-export-test-'));
+
+    await expect(
+      writeExportZip({
+        outputPath: join(tmp, 'too-large.zip'),
+        manifest: testManifest('ses_too_large'),
+        sessionDir: tmp,
+        sessionFiles: [],
+        maxArchiveBytes: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: 'session.export_too_large',
+      details: { maxArchiveBytes: 1 },
+    });
   });
 
   it('throws a coded error when the session is unknown', async () => {
@@ -474,6 +607,28 @@ function stubAgentWire(flush: () => Promise<void> = async () => {}): IAgentWireR
     flush,
     close: async () => {},
   };
+}
+
+function testManifest(sessionId: string): ExportSessionManifest {
+  return {
+    sessionId,
+    exportedAt: '2026-01-01T00:00:00.000Z',
+    kimiCodeVersion: '1.0.0-test',
+    wireProtocolVersion: '1',
+    os: 'test',
+    nodejsVersion: 'test',
+  };
+}
+
+function deferred(): {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 function readZipEntry(path: string, target: string): Promise<Buffer> {

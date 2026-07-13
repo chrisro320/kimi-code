@@ -8,6 +8,8 @@
 
 import { open, readdir, type FileHandle } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
+import { Readable } from 'node:stream';
+import { finished } from 'node:stream/promises';
 
 import { join } from 'pathe';
 
@@ -20,15 +22,20 @@ export interface SessionWireScan {
   readonly firstUserInput?: string | undefined;
 }
 
-export async function scanSessionWire(sessionDir: string): Promise<SessionWireScan> {
-  const wireFiles = await collectWireFiles(sessionDir);
+export async function scanSessionWire(
+  sessionDir: string,
+  signal?: AbortSignal,
+): Promise<SessionWireScan> {
+  signal?.throwIfAborted();
+  const wireFiles = await collectWireFiles(sessionDir, signal);
   let firstActivityMs: number | undefined;
   let lastActivityMs: number | undefined;
   let lastUserMessageMs: number | undefined;
   let firstUserInput: string | undefined;
 
   for (const file of wireFiles) {
-    const scan = await scanWireFile(file);
+    signal?.throwIfAborted();
+    const scan = await scanWireFile(file, signal);
     firstActivityMs = minDefined(firstActivityMs, scan.firstActivityMs);
     lastActivityMs = maxDefined(lastActivityMs, scan.lastActivityMs);
     lastUserMessageMs = maxDefined(lastUserMessageMs, scan.lastUserMessageMs);
@@ -43,12 +50,16 @@ export async function scanSessionWire(sessionDir: string): Promise<SessionWireSc
   };
 }
 
-async function collectWireFiles(sessionDir: string): Promise<readonly string[]> {
+async function collectWireFiles(
+  sessionDir: string,
+  signal?: AbortSignal,
+): Promise<readonly string[]> {
   const files = [join(sessionDir, WIRE_FILENAME)];
   const agentsDir = join(sessionDir, 'agents');
   try {
     const entries = await readdir(agentsDir, { recursive: true, withFileTypes: true });
     for (const entry of entries) {
+      signal?.throwIfAborted();
       if (!entry.isFile() || entry.name !== WIRE_FILENAME) continue;
       files.push(join(entry.parentPath, entry.name));
     }
@@ -58,7 +69,7 @@ async function collectWireFiles(sessionDir: string): Promise<readonly string[]> 
   return files;
 }
 
-async function scanWireFile(path: string): Promise<SessionWireScan> {
+async function scanWireFile(path: string, signal?: AbortSignal): Promise<SessionWireScan> {
   let file: FileHandle;
   try {
     file = await open(path, 'r');
@@ -67,8 +78,7 @@ async function scanWireFile(path: string): Promise<SessionWireScan> {
     return {};
   }
 
-  const input = file.createReadStream({ encoding: 'utf8', autoClose: false });
-  const lines = createInterface({ input, crlfDelay: Infinity });
+  let input: Readable | undefined;
 
   let firstActivityMs: number | undefined;
   let lastActivityMs: number | undefined;
@@ -76,6 +86,19 @@ async function scanWireFile(path: string): Promise<SessionWireScan> {
   let firstUserInput: string | undefined;
 
   try {
+    signal?.throwIfAborted();
+    const size = (await file.stat()).size;
+    signal?.throwIfAborted();
+    input =
+      size === 0
+        ? Readable.from([])
+        : file.createReadStream({
+            encoding: 'utf8',
+            autoClose: false,
+            end: size - 1,
+            signal,
+          });
+    const lines = createInterface({ input, crlfDelay: Infinity });
     for await (const line of lines) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
@@ -111,8 +134,8 @@ async function scanWireFile(path: string): Promise<SessionWireScan> {
       }
     }
   } finally {
-    lines.close();
-    input.destroy();
+    input?.destroy();
+    if (input !== undefined) await finished(input, { cleanup: true }).catch(() => {});
     await file.close();
   }
 

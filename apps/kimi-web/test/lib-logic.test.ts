@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   collectFilePathAliases,
   findFilePathLinks,
@@ -34,15 +34,19 @@ import GenericTool from '../src/components/chat/tool-calls/GenericTool.vue';
 import type { ToolCall } from '../src/types';
 import {
   clearTrace,
+  installClientErrorCapture,
   sanitizeForTrace,
+  sessionExportTraceToJsonl,
   traceEntries,
   traceKeyEvent,
   tracePaused,
+  traceRestRequest,
   traceToJsonl,
+  traceWsIn,
 } from '../src/debug/trace';
 
 // The trace tests exercise its exported recording/serialization contract:
-// always-on key events are cloned, redacted, and bounded before export.
+// session exports receive only bounded, explicitly selected metadata.
 
 describe('bounded Web trace', () => {
   beforeEach(() => {
@@ -52,23 +56,42 @@ describe('bounded Web trace', () => {
 
   afterEach(() => {
     clearTrace();
+    vi.unstubAllGlobals();
   });
 
-  it('records key-path metadata without debug mode and does not retain input references', () => {
+  it('copies only allowlisted key-path metadata into the independent export ring', () => {
+    const secret = 'PROMPT_TEXT_MUST_NOT_BE_EXPORTED';
     const metadata = {
       sessionId: 'sess_1',
-      nested: { marker: 'before' },
-      apiKey: 'must-not-leak',
+      contentCount: 2,
+      mediaCount: 1,
+      text: secret,
+      apiKey: secret,
     };
-    traceKeyEvent('session:test', metadata as unknown as Record<string, string>);
+    traceKeyEvent('prompt:start', metadata);
 
-    metadata.nested.marker = 'after';
+    metadata.sessionId = 'changed_after_recording';
 
     expect(traceEntries()).toHaveLength(1);
-    expect(traceEntries()[0]?.detail).toMatchObject({
+    expect(JSON.parse(sessionExportTraceToJsonl())).toEqual({
+      ts: expect.any(Number),
+      event: 'prompt:start',
       sessionId: 'sess_1',
-      nested: { marker: 'before' },
-      apiKey: '[redacted]',
+      contentCount: 2,
+      mediaCount: 1,
+    });
+    expect(sessionExportTraceToJsonl()).not.toContain(secret);
+  });
+
+  it('records export metadata even while the full debug panel is paused', () => {
+    tracePaused.value = true;
+
+    traceKeyEvent('ws:connection', { status: 'connected' });
+
+    expect(traceEntries()).toHaveLength(0);
+    expect(JSON.parse(sessionExportTraceToJsonl())).toMatchObject({
+      event: 'ws:connection',
+      status: 'connected',
     });
   });
 
@@ -81,24 +104,89 @@ describe('bounded Web trace', () => {
     expect(Object.keys(result)).toHaveLength(51);
   });
 
-  it('keeps at most 500 of the newest entries', () => {
+  it('keeps at most 500 of the newest export entries', () => {
     for (let index = 0; index < 501; index++) {
-      traceKeyEvent('budget:event', { marker: index });
+      traceKeyEvent('ws:connection', { status: String(index) });
     }
 
-    expect(traceEntries()).toHaveLength(500);
-    expect(traceEntries()[0]?.detail).toMatchObject({ marker: 1 });
-    expect(traceEntries().at(-1)?.detail).toMatchObject({ marker: 500 });
+    const exported = sessionExportTraceToJsonl().split('\n').map((line) => JSON.parse(line));
+    expect(exported).toHaveLength(500);
+    expect(exported[0]).toMatchObject({ status: '1' });
+    expect(exported.at(-1)).toMatchObject({ status: '500' });
   });
 
-  it('keeps serialized JSONL within the 256 KiB UTF-8 budget including newlines', () => {
+  it('keeps export JSONL within the 256 KiB UTF-8 budget including newlines', () => {
     for (let index = 0; index < 500; index++) {
-      traceKeyEvent('budget:utf8', { marker: index, detail: '😀'.repeat(400) });
+      traceKeyEvent('export:failed', {
+        sessionId: `sess-${index}-${'😀'.repeat(200)}`,
+        status: '😀'.repeat(200),
+        promptId: '😀'.repeat(200),
+        errorName: '😀'.repeat(200),
+        requestId: '😀'.repeat(200),
+        phase: '😀'.repeat(200),
+      });
     }
 
-    const jsonl = traceToJsonl();
+    const jsonl = sessionExportTraceToJsonl();
     expect(new TextEncoder().encode(jsonl).byteLength).toBeLessThanOrEqual(256 * 1024);
-    expect(traceEntries().at(-1)?.detail).toMatchObject({ marker: 499 });
+    expect(JSON.parse(jsonl.split('\n').at(-1)!)).toMatchObject({
+      sessionId: expect.stringMatching(/^sess-499-/),
+    });
+  });
+
+  it('never copies prompt, WebSocket, or console content from the full debug trace', () => {
+    vi.stubGlobal('location', { search: '?debug=1' });
+    const promptSecret = 'PROMPT_SECRET_9fdb1a';
+    const wsSecret = 'WS_PAYLOAD_SECRET_b84c7e';
+    const consoleSecret = 'CONSOLE_SECRET_a2d693';
+
+    traceRestRequest({
+      method: 'POST',
+      path: '/sessions/sess_1/prompts',
+      url: 'http://daemon.test/api/v1/sessions/sess_1/prompts',
+      requestId: 'req_1',
+      body: { prompt: promptSecret },
+    });
+    traceWsIn({
+      type: 'event',
+      session_id: 'sess_1',
+      seq: 4,
+      payload: { text: wsSecret },
+    });
+
+    const originalLog = console.log;
+    console.log = vi.fn();
+    const dispose = installClientErrorCapture();
+    try {
+      console.log(consoleSecret, { value: consoleSecret });
+    } finally {
+      dispose();
+      console.log = originalLog;
+    }
+
+    traceKeyEvent('prompt:start', {
+      sessionId: 'sess_1',
+      contentCount: 1,
+      mediaCount: 0,
+      text: promptSecret,
+    });
+
+    const fullDebugTrace = traceToJsonl();
+    expect(fullDebugTrace).toContain(promptSecret);
+    expect(fullDebugTrace).toContain(wsSecret);
+    expect(fullDebugTrace).toContain(consoleSecret);
+
+    const sessionExportTrace = sessionExportTraceToJsonl();
+    expect(sessionExportTrace).not.toContain(promptSecret);
+    expect(sessionExportTrace).not.toContain(wsSecret);
+    expect(sessionExportTrace).not.toContain(consoleSecret);
+    expect(JSON.parse(sessionExportTrace)).toEqual({
+      ts: expect.any(Number),
+      event: 'prompt:start',
+      sessionId: 'sess_1',
+      contentCount: 1,
+      mediaCount: 0,
+    });
   });
 });
 

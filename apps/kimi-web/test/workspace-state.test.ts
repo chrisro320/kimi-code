@@ -7,6 +7,7 @@ import { mergeWorkspaces } from '../src/lib/mergeWorkspaces';
 import { loadWorkspaceNameOverrides, saveWorkspaceNameOverrides } from '../src/lib/storage';
 import { useWorkspaceState, type UseWorkspaceStateDeps } from '../src/composables/client/useWorkspaceState';
 import type { ExtendedState } from '../src/composables/useKimiWebClient';
+import { clearTrace, traceKeyEvent } from '../src/debug/trace';
 
 const apiMock = vi.hoisted(() => ({
   abortPrompt: vi.fn(),
@@ -290,7 +291,9 @@ describe('useWorkspaceState — exportSession', () => {
   let revokeObjectURL: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     apiMock.exportSession.mockReset();
+    clearTrace();
     anchor = { href: '', download: '', click: vi.fn(), remove: vi.fn() };
     append = vi.fn();
     createObjectURL = vi.fn(() => 'blob:session-export');
@@ -303,18 +306,32 @@ describe('useWorkspaceState — exportSession', () => {
   });
 
   afterEach(() => {
+    clearTrace();
+    vi.clearAllTimers();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it('downloads the returned ZIP and reclaims its temporary browser resources', async () => {
+    const secret = 'PROMPT_TEXT_MUST_NOT_ENTER_EXPORT_REQUEST';
+    const metadata = {
+      sessionId: 'sess_1',
+      contentCount: 1,
+      mediaCount: 0,
+      text: secret,
+    };
+    traceKeyEvent('prompt:start', metadata);
     const blob = new Blob(['zip']);
     apiMock.exportSession.mockResolvedValue({ blob, fileName: 'sess_1.zip' });
     const workspace = useWorkspaceState(createState(), createDeps());
 
     await workspace.exportSession();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.runAllTimers();
 
-    expect(apiMock.exportSession).toHaveBeenCalledWith('sess_1', expect.any(String));
+    const webLog = apiMock.exportSession.mock.calls[0]?.[1] as string;
+    expect(webLog).toContain('prompt:start');
+    expect(webLog).toContain('contentCount');
+    expect(webLog).not.toContain(secret);
     expect(createObjectURL).toHaveBeenCalledWith(blob);
     expect(anchor).toMatchObject({ href: 'blob:session-export', download: 'sess_1.zip' });
     expect(append).toHaveBeenCalledWith(anchor);
@@ -338,7 +355,6 @@ describe('useWorkspaceState — exportSession', () => {
     const second = workspace.exportSession();
     resolveExport({ blob: new Blob(['zip']), fileName: 'sess_1.zip' });
     await Promise.all([first, second]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(apiMock.exportSession).toHaveBeenCalledTimes(1);
     expect(apiMock.exportSession).toHaveBeenCalledWith('sess_1', expect.any(String));
@@ -353,7 +369,7 @@ describe('useWorkspaceState — exportSession', () => {
     const workspace = useWorkspaceState(createState(), deps);
 
     await workspace.exportSession();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.runAllTimers();
 
     expect(anchor.remove).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:session-export');

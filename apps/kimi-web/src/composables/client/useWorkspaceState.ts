@@ -35,7 +35,7 @@ import {
 } from '../../lib/storage';
 import { parseDiff } from '../../lib/parseDiff';
 import { coerceThinkingForModel } from '../../lib/modelThinking';
-import { traceKeyEvent, traceToJsonl } from '../../debug/trace';
+import { sessionExportTraceToJsonl, traceKeyEvent } from '../../debug/trace';
 import { readSessionIdFromLocation, sessionUrl } from '../../lib/sessionRoute';
 import type { SessionUrlMode } from '../../lib/sessionRoute';
 import type {
@@ -2159,7 +2159,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     const startedAt = Date.now();
     traceKeyEvent('export:start', { sessionId });
     try {
-      const webLog = traceToJsonl();
+      const webLog = sessionExportTraceToJsonl();
       const { blob, fileName } = await getKimiWebApi().exportSession(sessionId, webLog);
       if (typeof document === 'undefined') throw new Error('Document is unavailable');
       const url = URL.createObjectURL(blob);

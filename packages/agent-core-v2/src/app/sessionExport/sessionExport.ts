@@ -63,6 +63,8 @@ export interface ExportSessionResult {
 
 export interface ExportSessionOptions {
   readonly webLog?: string;
+  readonly signal?: AbortSignal;
+  readonly maxArchiveBytes?: number;
 }
 
 export interface ISessionExportService {

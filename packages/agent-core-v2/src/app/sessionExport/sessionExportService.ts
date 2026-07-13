@@ -6,8 +6,6 @@
  * packages diagnostic files through the local zip writer. Bound at App scope.
  */
 
-import { readFile } from 'node:fs/promises';
-
 import { resolve } from 'pathe';
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -36,6 +34,7 @@ import {
   collectFilesRecursive,
   writeExportZip,
 } from './zip';
+import { openZipSource, type ZipSource } from './file-source';
 
 const SESSION_LOG_REL = 'logs/kimi-code.log';
 const GLOBAL_LOG_REL = 'logs/global/kimi-code.log';
@@ -56,6 +55,7 @@ export class SessionExportService implements ISessionExportService {
     input: ExportSessionPayload,
     options: ExportSessionOptions = {},
   ): Promise<ExportSessionResult> {
+    options.signal?.throwIfAborted();
     if (input.version.trim().length === 0) {
       throw new Error2(
         ErrorCodes.SESSION_EXPORT_MISSING_VERSION,
@@ -74,6 +74,7 @@ export class SessionExportService implements ISessionExportService {
     }
 
     const liveSummary = await this.flushLiveSession(summary);
+    options.signal?.throwIfAborted();
     if (input.includeGlobalLog === true) {
       await this.warnIfFails('export global log flush failed', () => this.log.flush(), {
         retry: true,
@@ -85,6 +86,8 @@ export class SessionExportService implements ISessionExportService {
       summary: liveSummary,
       globalLogPath: resolveGlobalLogPath(this.bootstrap.homeDir),
       webLog: options.webLog,
+      signal: options.signal,
+      maxArchiveBytes: options.maxArchiveBytes,
     });
   }
 
@@ -156,7 +159,10 @@ export async function exportSessionDirectory(input: {
   readonly summary: ExportSessionDirectorySummary;
   readonly globalLogPath?: string | undefined;
   readonly webLog?: string;
+  readonly signal?: AbortSignal;
+  readonly maxArchiveBytes?: number;
 }): Promise<ExportSessionResult> {
+  input.signal?.throwIfAborted();
   const sessionDir = input.summary.sessionDir;
   const sessionFiles = await collectFilesRecursive(sessionDir);
   if (sessionFiles.length === 0) {
@@ -167,62 +173,79 @@ export async function exportSessionDirectory(input: {
     );
   }
 
-  const sessionScan = await scanSessionWire(sessionDir);
+  const sessionScan = await scanSessionWire(sessionDir, input.signal);
   const hasSessionLog = sessionFiles.some((f) =>
     f.endsWith(`/${SESSION_LOG_REL}`) || f.endsWith(`\\${SESSION_LOG_REL.replaceAll('/', '\\')}`),
   );
 
-  const extras: ExtraZipEntry[] = [];
-  let bundledGlobal = false;
-  if (input.request.includeGlobalLog === true && input.globalLogPath !== undefined) {
-    const data = await readOptionalFile(input.globalLogPath);
-    if (data !== undefined) {
-      extras.push({ data, target: GLOBAL_LOG_REL });
-      bundledGlobal = true;
-    }
-  }
   const bundledWebLog = input.webLog !== undefined;
-  if (input.webLog !== undefined) {
-    extras.push({ data: Buffer.from(input.webLog, 'utf8'), target: WEB_LOG_REL });
-  }
-
-  const manifest = buildExportManifest({
+  const baseManifest = buildExportManifest({
     summary: input.summary,
     now: new Date(),
     version: input.request.version,
     sessionScan,
     sessionLogPath: hasSessionLog ? SESSION_LOG_REL : undefined,
-    globalLogPath: bundledGlobal ? GLOBAL_LOG_REL : undefined,
     webLogPath: bundledWebLog ? WEB_LOG_REL : undefined,
     installSource: input.request.installSource,
     shellEnv: input.request.shellEnv,
   });
-
   const outputPath =
     input.request.outputPath !== undefined
       ? resolve(input.request.outputPath)
       : resolve(`${input.summary.id}.zip`);
 
-  const entries = await writeExportZip({
-    outputPath,
-    manifest,
-    sessionDir,
-    sessionFiles,
-    extraEntries: extras,
-  });
+  const extras: ExtraZipEntry[] = [];
+  if (input.webLog !== undefined) {
+    extras.push({ data: Buffer.from(input.webLog, 'utf8'), target: WEB_LOG_REL });
+  }
+  let globalSource: ZipSource | undefined;
+  let globalSourceTransferred = false;
 
-  return {
-    zipPath: outputPath,
-    entries,
-    sessionDir,
-    manifest,
-  };
+  try {
+    if (input.request.includeGlobalLog === true && input.globalLogPath !== undefined) {
+      globalSource = await openOptionalZipSource(input.globalLogPath, input.signal);
+      if (globalSource !== undefined) {
+        extras.push({ source: globalSource, target: GLOBAL_LOG_REL });
+      }
+    }
+    const manifest =
+      globalSource === undefined
+        ? baseManifest
+        : { ...baseManifest, globalLogPath: GLOBAL_LOG_REL };
+
+    const writing = writeExportZip({
+      outputPath,
+      manifest,
+      sessionDir,
+      sessionFiles,
+      extraEntries: extras,
+      signal: input.signal,
+      maxArchiveBytes: input.maxArchiveBytes,
+    });
+    globalSourceTransferred = globalSource !== undefined;
+    const entries = await writing;
+
+    return {
+      zipPath: outputPath,
+      entries,
+      sessionDir,
+      manifest,
+    };
+  } finally {
+    if (globalSource !== undefined && !globalSourceTransferred) {
+      await globalSource.close().catch(() => {});
+    }
+  }
 }
 
-async function readOptionalFile(path: string): Promise<Buffer | undefined> {
+async function openOptionalZipSource(
+  path: string,
+  signal: AbortSignal | undefined,
+): Promise<ZipSource | undefined> {
   try {
-    return await readFile(path);
+    return await openZipSource(path, signal);
   } catch {
+    signal?.throwIfAborted();
     return undefined;
   }
 }
