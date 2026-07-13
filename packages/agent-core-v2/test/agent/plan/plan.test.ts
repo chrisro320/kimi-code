@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { reduceContextTranscript } from '#/agent/contextMemory/contextTranscript';
 import { IAgentPlanService, type PlanData } from '#/agent/plan/plan';
 import { IAgentPermissionRulesService } from '#/agent/permissionRules/permissionRules';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -14,6 +15,7 @@ import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { ISessionProcessRunner } from '#/session/process/processRunner';
+import type { WireRecord } from '#/wire/record';
 import { createFakeHostFs, createFakeProcessRunner } from '../../tools/fixtures/fake-exec';
 import {
   createCommandRunner,
@@ -163,6 +165,12 @@ describe('Plan service', () => {
 
   async function expectPlanActive(active: boolean): Promise<void> {
     expect((await planStatus()) !== null).toBe(active);
+  }
+
+  async function replayedToolCall(toolCallId: string) {
+    return reduceContextTranscript(await ctx.persistedRecords())
+      .entries.flatMap((message) => message.toolCalls)
+      .find((call) => call.id === toolCallId);
   }
 
   describe('manual plan entry', () => {
@@ -336,12 +344,33 @@ describe('Plan service', () => {
       await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Show the plan' }] });
 
       const approval = await ctx.takeApprovalRequest();
+      expect(await replayedToolCall('call_exit_reject')).toMatchObject({
+        display: {
+          kind: 'plan_review',
+          plan: '# Plan\n\n- Inspect\n- Change\n- Verify',
+          path: planPath,
+        },
+      });
+      expect(
+        ctx.allEvents.filter(
+          (event) => event.type === '[rpc]' && event.event === 'tool.call.started',
+        ),
+      ).toEqual([]);
       approval.respond({ decision: 'rejected', selectedLabel: 'Reject' });
 
       await ctx.untilTurnEnd();
       await expectPlanActive(true);
       expect(ctx.llmCalls).toHaveLength(1);
       expect(toolResultText(context.get())).toContain('Plan rejected by user');
+      expect(await replayedToolCall('call_exit_reject')).toMatchObject({
+        display: { plan: '# Plan\n\n- Inspect\n- Change\n- Verify' },
+        approvalResult: { decision: 'rejected', selectedLabel: 'Reject' },
+      });
+      expect(
+        ctx.allEvents.filter(
+          (event) => event.type === '[rpc]' && event.event === 'tool.call.started',
+        ),
+      ).toHaveLength(1);
     });
 
     it('does not execute later tool calls in the same batch after plan rejection', async () => {
@@ -466,6 +495,14 @@ describe('Plan service', () => {
 
       approval.respond({ decision: 'approved', selectedLabel: 'Approach A' });
       await ctx.untilTurnEnd();
+      expect(await replayedToolCall('call_exit_options')).toMatchObject({
+        display: {
+          kind: 'plan_review',
+          plan: '# Plan\n\n- Inspect\n- Change\n- Verify',
+          path: planPath,
+        },
+        approvalResult: { decision: 'approved', selectedLabel: 'Approach A' },
+      });
     });
   });
 
@@ -598,9 +635,9 @@ describe('Plan service', () => {
         [emit] agent.status.updated        { "usage": { "byModel": { "mock-model": { "inputOther": 565, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 565, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 565, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
         [emit] agent.status.updated        { "contextTokens": 588 }
         [wire] context.append_loop_event   { "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I will inspect safely." } }, "time": "<time>" }
+        [wire] context.append_loop_event   { "event": { "type": "tool.call", "uuid": "<uuid-3>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "toolCallId": "call_bash", "name": "Bash", "args": { "command": "printf plan-safe", "timeout": 60 }, "display": { "kind": "command", "command": "printf plan-safe", "cwd": "<cwd>", "language": "bash" } }, "time": "<time>" }
         [emit] tool.call.started           { "turnId": 0, "toolCallId": "call_bash", "name": "Bash", "args": { "command": "printf plan-safe", "timeout": 60 }, "description": "Running: printf plan-safe", "display": { "kind": "command", "command": "printf plan-safe", "cwd": "<cwd>", "language": "bash" } }
         [emit] agent.activity.updated      { "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "tool_call", "step": 1, "ending": false, "pendingApprovals": [], "activeToolCalls": [ { "toolCallId": "call_bash", "name": "Bash", "since": "<time>" } ], "since": "<time>" }, "background": [] }
-        [wire] context.append_loop_event   { "event": { "type": "tool.call", "uuid": "<uuid-3>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "toolCallId": "call_bash", "name": "Bash", "args": { "command": "printf plan-safe", "timeout": 60 } }, "time": "<time>" }
         [emit] tool.progress               { "turnId": 0, "toolCallId": "call_bash", "update": { "kind": "stdout", "text": "plan-safe" } }
         [emit] tool.result                 { "turnId": 0, "toolCallId": "call_bash", "output": "plan-safe" }
         [emit] agent.activity.updated      { "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "running", "step": 1, "ending": false, "pendingApprovals": [], "activeToolCalls": [], "since": "<time>" }, "background": [] }
@@ -674,9 +711,9 @@ describe('Plan service', () => {
         [emit] agent.status.updated        { "usage": { "byModel": { "mock-model": { "inputOther": 562, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 562, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 562, "output": 23, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
         [emit] agent.status.updated        { "contextTokens": 585 }
         [wire] context.append_loop_event   { "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I will mutate a file." } }, "time": "<time>" }
+        [wire] context.append_loop_event   { "event": { "type": "tool.call", "uuid": "<uuid-3>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "toolCallId": "call_bash", "name": "Bash", "args": { "command": "rm forbidden.txt", "timeout": 60 }, "display": { "kind": "command", "command": "rm forbidden.txt", "cwd": "<cwd>", "language": "bash" } }, "time": "<time>" }
         [emit] tool.call.started           { "turnId": 0, "toolCallId": "call_bash", "name": "Bash", "args": { "command": "rm forbidden.txt", "timeout": 60 }, "description": "Running: rm forbidden.txt", "display": { "kind": "command", "command": "rm forbidden.txt", "cwd": "<cwd>", "language": "bash" } }
         [emit] agent.activity.updated      { "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "tool_call", "step": 1, "ending": false, "pendingApprovals": [], "activeToolCalls": [ { "toolCallId": "call_bash", "name": "Bash", "since": "<time>" } ], "since": "<time>" }, "background": [] }
-        [wire] context.append_loop_event   { "event": { "type": "tool.call", "uuid": "<uuid-3>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "toolCallId": "call_bash", "name": "Bash", "args": { "command": "rm forbidden.txt", "timeout": 60 } }, "time": "<time>" }
         [emit] tool.progress               { "turnId": 0, "toolCallId": "call_bash", "update": { "kind": "stdout", "text": "removed" } }
         [emit] tool.result                 { "turnId": 0, "toolCallId": "call_bash", "output": "removed" }
         [emit] agent.activity.updated      { "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "running", "step": 1, "ending": false, "pendingApprovals": [], "activeToolCalls": [], "since": "<time>" }, "background": [] }
