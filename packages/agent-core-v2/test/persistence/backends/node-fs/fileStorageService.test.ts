@@ -4,7 +4,7 @@
  */
 
 import { constants } from 'node:fs';
-import { mkdtemp, mkdir, open, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { join } from 'pathe';
@@ -223,6 +223,37 @@ describe('FileStorageService — durable directory entries', () => {
     expect((fallbackFlags as number) & constants.O_CREAT).toBe(0);
     expect(fsBoundary.open.mock.calls[2]?.[1]).toBe('ax');
     expect(fsBoundary.syncDir).toHaveBeenCalledOnce();
+  });
+
+  it('appends when another writer creates the key after a non-creating open misses', async () => {
+    const filePath = join(dir, 'scope', 'wire.jsonl');
+    fsBoundary.open
+      .mockRejectedValueOnce(fsError('EEXIST'))
+      .mockImplementationOnce(async () => {
+        await mkdir(join(dir, 'scope'), { recursive: true });
+        await writeFile(filePath, 'other\n');
+        throw fsError('ENOENT');
+      });
+
+    await service.append('scope', 'wire.jsonl', encoder.encode('first\n'));
+
+    expect(new TextDecoder().decode(await service.read('scope', 'wire.jsonl'))).toBe(
+      'other\nfirst\n',
+    );
+    expect(fsBoundary.syncDir).toHaveBeenCalledOnce();
+  });
+
+  it.skipIf(isWin)('rejects append when the key is a dangling symlink', async () => {
+    await mkdir(join(dir, 'scope'), { recursive: true });
+    await symlink('missing-target', join(dir, 'scope', 'wire.jsonl'));
+
+    await expect(
+      service.append('scope', 'wire.jsonl', encoder.encode('first\n')),
+    ).rejects.toMatchObject({
+      code: 'storage.io_failed',
+      details: { errno: 'ENOENT', op: 'append' },
+    });
+    expect(fsBoundary.syncDir).not.toHaveBeenCalled();
   });
 
   it('does not resync the directory for durable appends to an existing log', async () => {

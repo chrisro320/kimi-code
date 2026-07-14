@@ -6,7 +6,7 @@
  */
 
 import { constants, createReadStream, mkdirSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
 import { FSWatcher } from 'chokidar';
 import { dirname, join, normalize } from 'pathe';
 
@@ -144,6 +144,14 @@ export class FileStorageService implements IFileSystemStorageService {
           break;
         } catch (error) {
           if (!isEnoent(error)) throw error;
+          let entry: Awaited<ReturnType<typeof lstat>>;
+          try {
+            entry = await lstat(filePath);
+          } catch (inspectError) {
+            if (isEnoent(inspectError)) continue;
+            throw inspectError;
+          }
+          if (entry.isSymbolicLink()) throw error;
         }
       }
       let identity: FileIdentity | undefined;
