@@ -4673,6 +4673,89 @@ command = "vim"
     expect(renderTranscript(driver)).toContain('Switched to kimi-turbo with thinking mid.');
   });
 
+  it('restores the previously chosen effort when switching models back and forth', async () => {
+    let model = 'k2';
+    let thinkingEffort = 'ultra';
+    const setModel = vi.fn(async (alias: string) => {
+      model = alias;
+    });
+    const setThinking = vi.fn(async (effort: string) => {
+      thinkingEffort = effort;
+    });
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model,
+        thinkingEffort,
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 0,
+        maxContextTokens: 100,
+        contextUsage: 0,
+      })),
+      setModel,
+      setThinking,
+    });
+    const setConfig = vi.fn(async () => ({ providers: {} }));
+    const { driver } = await makeDriver(session, {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-k2',
+            maxContextSize: 100,
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high', 'ultra'],
+            defaultEffort: 'ultra',
+          },
+          turbo: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-turbo',
+            maxContextSize: 100,
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'mid', 'high'],
+            defaultEffort: 'mid',
+          },
+        },
+        defaultModel: 'k2',
+        thinking: { enabled: true, effort: 'ultra' },
+      })),
+      setConfig,
+    });
+
+    await vi.waitFor(() => {
+      expect(driver.state.appState.thinkingEffort).toBe('ultra');
+    });
+
+    // k2 (ultra) -> turbo: no memory for turbo yet, so its default applies.
+    driver.handleUserInput('/model turbo');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(TabbedModelSelectorComponent);
+    });
+    (driver.state.editorContainer.children[0] as TabbedModelSelectorComponent).handleInput('\r');
+    await vi.waitFor(() => {
+      expect(driver.state.appState.model).toBe('turbo');
+    });
+    expect(setThinking).toHaveBeenLastCalledWith('mid');
+    expect(setConfig).toHaveBeenCalledWith({
+      defaultModel: 'turbo',
+      thinking: { enabled: true, effort: 'mid' },
+    });
+
+    // turbo -> k2: the picker restores k2's remembered 'ultra' instead of
+    // proposing the default again.
+    driver.handleUserInput('/model k2');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(TabbedModelSelectorComponent);
+    });
+    (driver.state.editorContainer.children[0] as TabbedModelSelectorComponent).handleInput('\r');
+    await vi.waitFor(() => {
+      expect(driver.state.appState.model).toBe('k2');
+    });
+    expect(setThinking).toHaveBeenLastCalledWith('ultra');
+    expect(driver.state.appState.thinkingEffort).toBe('ultra');
+    expect(renderTranscript(driver)).toContain('Switched to kimi-k2 with thinking ultra.');
+  });
+
   it('persists /model selection even when runtime state is unchanged', async () => {
     const session = makeSession();
     const setConfig = vi.fn(async () => ({ providers: {} }));

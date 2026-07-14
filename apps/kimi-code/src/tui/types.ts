@@ -38,6 +38,10 @@ export interface AppState {
    * mirrors the runtime. The single source of truth for the thinking state in
    * the TUI. */
   thinkingEffort: ThinkingEffort;
+  /** Per-model thinking effort the user last committed in this TUI session.
+   * Lets the model picker restore a model's previous effort when switching
+   * back, instead of always proposing `default_effort`. In-memory only. */
+  thinkingEffortByModel?: Record<string, ThinkingEffort>;
   contextUsage: number;
   contextTokens: number;
   maxContextTokens: number;

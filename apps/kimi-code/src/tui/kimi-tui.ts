@@ -211,6 +211,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     inputMode: 'prompt',
     swarmMode: false,
     thinkingEffort: 'off',
+    thinkingEffortByModel: {},
     contextUsage: 0,
     contextTokens: 0,
     maxContextTokens: 0,
@@ -1522,10 +1523,16 @@ export class KimiTUI {
 
   async syncRuntimeState(session: Session = this.requireSession()): Promise<void> {
     const [status, goalResult] = await Promise.all([session.getStatus(), session.getGoal()]);
+    const thinkingEffortByModel = { ...this.state.appState.thinkingEffortByModel };
+    const statusModel = status.model;
+    if (statusModel && thinkingEffortByModel[statusModel] === undefined) {
+      thinkingEffortByModel[statusModel] = status.thinkingEffort;
+    }
     this.setAppState({
       sessionId: session.id,
       model: status.model ?? '',
       thinkingEffort: status.thinkingEffort,
+      thinkingEffortByModel,
       permissionMode: status.permission,
       planMode: status.planMode,
       swarmMode: status.swarmMode ?? false,

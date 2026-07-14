@@ -66,6 +66,10 @@ export interface ModelSelectorOptions {
   /** Live thinking effort of the currently active model (e.g. 'off', 'on',
    * 'high'). Used to highlight the active segment for the current model. */
   readonly currentThinkingEffort: ThinkingEffort;
+  /** Efforts the user committed per model earlier in this session. Checked
+   * before falling back to a model's default effort when drafting a
+   * non-current model, so switching back restores the previous choice. */
+  readonly rememberedEfforts?: Readonly<Record<string, ThinkingEffort>>;
   /** When true, typed characters filter the list (fuzzy) and a search line is shown. */
   readonly searchable?: boolean;
   /** Items per page. Lists longer than this paginate (PgUp/PgDn). */
@@ -179,13 +183,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
   /**
    * Thinking effort for a model: an explicit ←/→ override when set, otherwise
-   * the live effort for the active model, otherwise the model's default effort
-   * (effort-capable) or 'on' (other thinking-capable models).
+   * the live effort for the active model, otherwise the effort remembered for
+   * this model from earlier in the session, otherwise the model's default
+   * effort (effort-capable) or 'on' (other thinking-capable models).
    */
   private draftFor(choice: ModelChoice): string {
     const override = this.thinkingOverrides.get(choice.alias);
     if (override !== undefined) return override;
     if (choice.alias === this.opts.currentValue) return this.opts.currentThinkingEffort;
+    const remembered = this.opts.rememberedEfforts?.[choice.alias];
+    if (remembered !== undefined) return remembered;
     const efforts = effortsOf(choice.model);
     if (efforts.length > 0) {
       // A model with support_efforts but no default_effort defaults to the

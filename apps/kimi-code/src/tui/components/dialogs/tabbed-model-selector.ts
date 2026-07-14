@@ -13,7 +13,7 @@
  * AskUserQuestion dialog's tab strip) — see .agents/skills/write-tui/DESIGN.md.
  */
 
-import type { ModelAlias } from '@moonshot-ai/kimi-code-sdk';
+import type { ModelAlias, ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
 import {
   Container,
   Key,
@@ -40,6 +40,9 @@ export interface TabbedModelSelectorOptions {
   readonly currentValue: string;
   readonly selectedValue?: string;
   readonly currentThinkingEffort: string;
+  /** Per-model efforts remembered from earlier commits in this session;
+   * forwarded to each inner selector. */
+  readonly rememberedEfforts?: Readonly<Record<string, ThinkingEffort>>;
   /** When set, the tab for this provider id is initially active instead of the
    * tab derived from `currentValue`. */
   readonly initialTabId?: string;
@@ -180,6 +183,7 @@ function makeSelector(
     currentValue: opts.currentValue,
     ...(selectedValue !== undefined ? { selectedValue } : {}),
     currentThinkingEffort: opts.currentThinkingEffort,
+    rememberedEfforts: opts.rememberedEfforts,
     searchable: true,
     providerSwitchHint: true,
     onSelect: opts.onSelect,

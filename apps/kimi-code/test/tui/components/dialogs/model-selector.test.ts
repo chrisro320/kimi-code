@@ -210,6 +210,49 @@ describe('ModelSelectorComponent', () => {
     expect(onSelect).toHaveBeenCalledWith({ alias: 'other', thinking: 'on' });
   });
 
+  it('restores the remembered effort for a non-current model instead of the default', () => {
+    const onSelect = vi.fn();
+    const picker = new ModelSelectorComponent({
+      models: {
+        current: effortModel('Kimi Current', ['low', 'high', 'max'], 'high'),
+        other: effortModel('Kimi Other', ['low', 'high', 'max'], 'high'),
+      },
+      currentValue: 'current',
+      currentThinkingEffort: 'high',
+      rememberedEfforts: { other: 'max' },
+      onSelect,
+      onCancel: vi.fn(),
+    });
+
+    picker.handleInput(DOWN); // -> the other effort model
+    // The remembered 'max' wins over the model's declared default ('high').
+    expect(text(picker)).toContain('[ Max ]');
+    picker.handleInput('\r');
+    expect(onSelect).toHaveBeenCalledWith({ alias: 'other', thinking: 'max' });
+  });
+
+  it('coerces a remembered effort the model no longer supports', () => {
+    const onSelect = vi.fn();
+    const picker = new ModelSelectorComponent({
+      models: {
+        current: effortModel('Kimi Current', ['low', 'high'], 'high'),
+        other: effortModel('Kimi Other', ['low', 'high'], 'high'),
+      },
+      currentValue: 'current',
+      currentThinkingEffort: 'high',
+      rememberedEfforts: { other: 'max' },
+      onSelect,
+      onCancel: vi.fn(),
+    });
+
+    picker.handleInput(DOWN); // -> the other effort model
+    // 'max' is not in ['off', 'low', 'high'] — the draft coerces to the first
+    // segment rather than referencing an effort the model cannot select.
+    expect(text(picker)).toContain('[ Off ]');
+    picker.handleInput('\r');
+    expect(onSelect).toHaveBeenCalledWith({ alias: 'other', thinking: 'off' });
+  });
+
   it('fuzzy-filters by typing and reports a match count', () => {
     const onCancel = vi.fn();
     const picker = new ModelSelectorComponent({

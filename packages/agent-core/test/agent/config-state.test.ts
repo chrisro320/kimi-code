@@ -188,7 +188,7 @@ describe('ConfigState model capabilities', () => {
 });
 
 describe('ConfigState thinking clamp for always-thinking models', () => {
-  function alwaysThinkingAgent() {
+  function alwaysThinkingAgent(persistence?: InMemoryAgentRecordPersistence) {
     // The always_thinking clamp in ConfigState.update() reads the model from
     // `agent.kimiConfig.models`, so the same config must back both the
     // ProviderManager (provider resolution) and the agent's kimiConfig (the
@@ -228,6 +228,7 @@ describe('ConfigState thinking clamp for always-thinking models', () => {
     };
     return testAgent({
       initialConfig: config,
+      persistence,
       providerManager: new ProviderManager({ config }),
     });
   }
@@ -285,6 +286,47 @@ describe('ConfigState thinking clamp for always-thinking models', () => {
     ctx.agent.config.update({ modelAlias: 'kimi-code/toggle' });
 
     expect(ctx.agent.config.thinkingEffort).toBe('on');
+  });
+
+  it('remembers the chosen effort when switching models back and forth', () => {
+    const ctx = alwaysThinkingAgent();
+    ctx.agent.config.update({ modelAlias: 'kimi-code/ultra', thinkingEffort: 'ultra' });
+
+    // The switch falls back to the target model's default on the wire...
+    ctx.agent.config.update({ modelAlias: 'kimi-code/standard' });
+    expect(ctx.agent.config.thinkingEffort).toBe('mid');
+
+    // ...but the original choice is restored when switching back.
+    ctx.agent.config.update({ modelAlias: 'kimi-code/ultra' });
+    expect(ctx.agent.config.thinkingEffort).toBe('ultra');
+  });
+
+  it('restores a concrete effort after a round-trip through a boolean model', () => {
+    const ctx = alwaysThinkingAgent();
+    ctx.agent.config.update({ modelAlias: 'kimi-code/ultra', thinkingEffort: 'ultra' });
+
+    ctx.agent.config.update({ modelAlias: 'kimi-code/toggle' });
+    expect(ctx.agent.config.thinkingEffort).toBe('on');
+
+    ctx.agent.config.update({ modelAlias: 'kimi-code/ultra' });
+    expect(ctx.agent.config.thinkingEffort).toBe('ultra');
+  });
+
+  it('records bare model switches without rewriting the stored effort', () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const ctx = alwaysThinkingAgent(persistence);
+    ctx.agent.config.update({ modelAlias: 'kimi-code/ultra', thinkingEffort: 'ultra' });
+
+    ctx.agent.config.update({ modelAlias: 'kimi-code/standard' });
+
+    const switchRecord = persistence.records
+      .filter((record) => record.type === 'config.update')
+      .find(
+        (record) =>
+          (record as { modelAlias?: string }).modelAlias === 'kimi-code/standard',
+      ) as { thinkingEffort?: string } | undefined;
+    expect(switchRecord).toBeDefined();
+    expect(switchRecord).not.toHaveProperty('thinkingEffort');
   });
 
   it('rejects an unsupported effort explicitly set on the current Kimi model', () => {

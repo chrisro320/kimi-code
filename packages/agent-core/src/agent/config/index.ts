@@ -47,38 +47,51 @@ export class ConfigState {
     const targetProvider = this.tryResolvedProviderConfigFor(targetAlias);
     const targetModel = this.modelForThinking(targetAlias, targetProvider);
     const kimiProvider = targetProvider?.type === 'kimi';
+    // `_unforcedThinkingEffort` stores the user's choice VERBATIM so it
+    // survives model switches; the model-aware resolution only derives the
+    // effective `_thinkingEffort` applied on the wire. Overwriting the stored
+    // choice with the resolved fallback made A→B→A round-trips forget the
+    // original effort — the fallback re-resolved to `default_effort`.
     let unforcedThinkingEffort: ThinkingEffort | undefined;
     let thinkingEffort: ThinkingEffort | undefined;
+    let forcedThinkingEffort: ThinkingEffort | undefined;
     if (changed.thinkingEffort !== undefined) {
-      unforcedThinkingEffort = resolveThinkingEffort(
-        changed.thinkingEffort,
-        this.agent.kimiConfig?.thinking,
-        targetModel,
-        kimiProvider,
-      );
+      unforcedThinkingEffort = changed.thinkingEffort;
     } else if (changed.modelAlias !== undefined) {
-      unforcedThinkingEffort = resolveThinkingEffort(
-        this._modelAlias === undefined ? undefined : this._unforcedThinkingEffort,
+      unforcedThinkingEffort =
+        this._modelAlias === undefined ? undefined : this._unforcedThinkingEffort;
+    }
+    if (unforcedThinkingEffort !== undefined || changed.modelAlias !== undefined) {
+      const resolved = resolveThinkingEffort(
+        unforcedThinkingEffort,
         this.agent.kimiConfig?.thinking,
         targetModel,
         kimiProvider,
       );
+      forcedThinkingEffort = resolveKimiEnvThinkingEffort(resolved, kimiProvider);
+      thinkingEffort = forcedThinkingEffort ?? resolved;
+      // First model bind with no prior choice: adopt the config-derived
+      // default as the stored choice (previous behavior).
+      unforcedThinkingEffort ??= resolved;
     }
-    if (unforcedThinkingEffort !== undefined) {
-      thinkingEffort =
-        resolveKimiEnvThinkingEffort(unforcedThinkingEffort, kimiProvider) ??
-        unforcedThinkingEffort;
-    }
-    const effectiveChanged =
+    // Records persist the request verbatim so the raw choice survives
+    // replay/resume — except when the Kimi env-forced effort is in effect,
+    // which is recorded so a resumed session keeps reporting it. The
+    // client-facing projection always carries the effective effort.
+    const recordChanged =
+      forcedThinkingEffort !== undefined && changed.thinkingEffort === undefined
+        ? { ...changed, thinkingEffort: thinkingEffort as ThinkingEffort }
+        : changed;
+    const projectedChanged =
       thinkingEffort === undefined ? changed : { ...changed, thinkingEffort };
 
     this.agent.records.logRecord({
       type: 'config.update',
-      ...effectiveChanged,
+      ...recordChanged,
     });
     this.agent.replayBuilder.push({
       type: 'config_updated',
-      config: effectiveChanged,
+      config: projectedChanged,
     });
     if (changed.cwd) {
       this._cwd = changed.cwd;

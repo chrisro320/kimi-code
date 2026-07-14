@@ -366,12 +366,21 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
     );
     return;
   }
+  // Seed the memory with the live effort of the current model so a fresh TUI
+  // session (memory still empty) also restores it after a round-trip.
+  const rememberedEfforts = { ...host.state.appState.thinkingEffortByModel };
+  const currentModel = host.state.appState.model;
+  if (currentModel.length > 0 && rememberedEfforts[currentModel] === undefined) {
+    rememberedEfforts[currentModel] = host.state.appState.thinkingEffort;
+    host.setAppState({ thinkingEffortByModel: rememberedEfforts });
+  }
   host.mountEditorReplacement(
     new TabbedModelSelectorComponent({
       models: host.state.appState.availableModels,
       currentValue: host.state.appState.model,
       selectedValue,
       currentThinkingEffort: host.state.appState.thinkingEffort,
+      rememberedEfforts,
       onSelect: ({ alias, thinking }) => {
         host.restoreEditor();
         void performModelSwitch(host, alias, thinking, true);
@@ -437,7 +446,17 @@ async function performModelSwitch(
     effectiveAlias,
     host.state.appState.availableModels[effectiveAlias],
   );
-  host.setAppState({ model: effectiveAlias, thinkingEffort: effectiveEffort });
+  host.setAppState({
+    model: effectiveAlias,
+    thinkingEffort: effectiveEffort,
+    // Remember the requested effort per model so the picker can restore it
+    // when switching back (record the choice, not the runtime-effective
+    // fallback).
+    thinkingEffortByModel: {
+      ...host.state.appState.thinkingEffortByModel,
+      [effectiveAlias]: effort,
+    },
+  });
   if (session === undefined && runtimeChanged) {
     if (effectiveModelChanged) {
       host.track('model_switch', { model: effectiveAlias });
