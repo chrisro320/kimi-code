@@ -1,3 +1,10 @@
+/**
+ * Scenario: workspace queries combine the catalog with persisted sessions.
+ * Responsibilities: canonical roots, derived workspaces, legacy cwd fallback,
+ * tombstones, archived counts, and recent-session filtering.
+ * Wiring: real query service with in-memory contract fakes for registry/index.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -7,7 +14,14 @@ import {
   registerScopedService,
 } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
+import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
 import { ISessionIndex, type SessionListQuery, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
+import {
+  IWorkspaceRegistry,
+  type Workspace,
+  type WorkspaceRegistrySnapshot,
+  type WorkspaceUpdate,
+} from '#/app/workspaceRegistry/workspaceRegistry';
 import {
   IWorkspaceQueryService,
   RECENT_SESSIONS_LIMIT,
@@ -19,9 +33,14 @@ class FakeSessionIndex implements ISessionIndex {
   lastListQuery: SessionListQuery | undefined;
   items: readonly SessionSummary[] = [];
 
-  async list(query: SessionListQuery) {
+  async list(query: SessionListQuery): Promise<{ items: readonly SessionSummary[] }> {
     this.lastListQuery = query;
-    return { items: this.items };
+    const items = this.items.filter(
+      (item) =>
+        (query.workspaceId === undefined || item.workspaceId === query.workspaceId) &&
+        (query.includeArchived === true || !item.archived),
+    );
+    return { items };
   }
 
   async get(_id: string): Promise<SessionSummary | undefined> {
@@ -30,6 +49,41 @@ class FakeSessionIndex implements ISessionIndex {
 
   async countActive(_workspaceId: string): Promise<number> {
     return 0;
+  }
+}
+
+class FakeWorkspaceRegistry implements IWorkspaceRegistry {
+  readonly _serviceBrand: undefined;
+  workspaces: readonly Workspace[] = [];
+  readonly deletedIds = new Set<string>();
+  readonly deletedRoots = new Map<string, string>();
+
+  async list(): Promise<readonly Workspace[]> {
+    return this.workspaces;
+  }
+
+  async snapshot(): Promise<WorkspaceRegistrySnapshot> {
+    return {
+      workspaces: this.workspaces,
+      deletedWorkspaceIds: new Set(this.deletedIds),
+      deletedWorkspaceRoots: new Map(this.deletedRoots),
+    };
+  }
+
+  async get(id: string): Promise<Workspace | undefined> {
+    return this.workspaces.find((workspace) => workspace.id === id);
+  }
+
+  async createOrTouch(_root: string, _name?: string): Promise<Workspace> {
+    throw new Error('not used');
+  }
+
+  async update(_id: string, _patch: WorkspaceUpdate): Promise<Workspace | undefined> {
+    return undefined;
+  }
+
+  async delete(id: string): Promise<void> {
+    this.deletedIds.add(id);
   }
 }
 
@@ -52,40 +106,134 @@ describe('WorkspaceQueryService', () => {
     currentHost = undefined;
   });
 
-  function build(): { query: IWorkspaceQueryService; index: FakeSessionIndex } {
+  function build(): {
+    query: IWorkspaceQueryService;
+    index: FakeSessionIndex;
+    registry: FakeWorkspaceRegistry;
+  } {
     const index = new FakeSessionIndex();
-    const host = createScopedTestHost([stubPair(ISessionIndex, index)]);
-    currentHost = host;
-    return { query: host.app.accessor.get(IWorkspaceQueryService), index };
+    const registry = new FakeWorkspaceRegistry();
+    currentHost = createScopedTestHost([
+      stubPair(ISessionIndex, index),
+      stubPair(IWorkspaceRegistry, registry),
+    ]);
+    return {
+      query: currentHost.app.accessor.get(IWorkspaceQueryService),
+      index,
+      registry,
+    };
   }
 
-  function summary(id: string, workspaceId: string, updatedAt: number): SessionSummary {
-    return { id, workspaceId, createdAt: updatedAt - 1, updatedAt, archived: false };
+  function summary(
+    id: string,
+    workspaceId: string,
+    updatedAt: number,
+    cwd?: string,
+    archived = false,
+  ): SessionSummary {
+    return {
+      id,
+      workspaceId,
+      cwd,
+      createdAt: updatedAt - 10,
+      updatedAt,
+      archived,
+    };
   }
 
-  it('delegates to the session index with the workspace id and the recent limit', async () => {
+  it('deduplicates aliases by normalized root and returns the canonical id', async () => {
+    const { query, registry } = build();
+    registry.workspaces = [
+      {
+        id: 'wd_legacy_deadbeef0000',
+        root: '/work/../work/project',
+        name: 'Project',
+        createdAt: 1,
+        lastOpenedAt: 2,
+      },
+      {
+        id: encodeWorkDirKey('/work/project'),
+        root: '/work/project',
+        name: 'Project',
+        createdAt: 1,
+        lastOpenedAt: 3,
+      },
+    ];
+
+    await expect(query.list()).resolves.toEqual([
+      expect.objectContaining({
+        id: encodeWorkDirKey('/work/project'),
+        root: '/work/project',
+        sessionCount: 0,
+      }),
+    ]);
+  });
+
+  it('derives an active workspace and excludes archived sessions from its count', async () => {
     const { query, index } = build();
+    const workspaceId = encodeWorkDirKey('/work/derived');
+    index.items = [
+      summary('active', workspaceId, 200, '/work/derived'),
+      summary('archived', workspaceId, 300, '/work/derived', true),
+    ];
 
-    await query.listRecentSessions('wd_abc');
+    await expect(query.list()).resolves.toEqual([
+      expect.objectContaining({
+        id: workspaceId,
+        root: '/work/derived',
+        sessionCount: 1,
+        createdAt: 190,
+        lastOpenedAt: 200,
+      }),
+    ]);
+    expect(index.lastListQuery).toEqual({});
+  });
 
-    expect(index.lastListQuery).toEqual({
-      workspaceId: 'wd_abc',
-      limit: RECENT_SESSIONS_LIMIT,
-    });
+  it('retains a legacy session without cwd by falling back to its workspace root', async () => {
+    const { query, index, registry } = build();
+    const root = '/work/legacy';
+    const alias = 'wd_legacy_deadbeef0000';
+    registry.workspaces = [
+      { id: alias, root, name: 'Legacy', createdAt: 1, lastOpenedAt: 2 },
+    ];
+    index.items = [summary('legacy-session', alias, 100)];
+
+    await expect(query.list()).resolves.toEqual([
+      expect.objectContaining({
+        id: encodeWorkDirKey(root),
+        root,
+        sessionCount: 1,
+      }),
+    ]);
+    await expect(query.listSessions(encodeWorkDirKey(root))).resolves.toHaveLength(1);
+  });
+
+  it('resolves an alias to its root before returning recent sessions', async () => {
+    const { query, index, registry } = build();
+    const root = '/work/recent';
+    const alias = 'wd_legacy_deadbeef0000';
+    registry.workspaces = [
+      { id: alias, root, name: 'Recent', createdAt: 1, lastOpenedAt: 2 },
+    ];
+    index.items = [
+      summary('s2', alias, 200, root),
+      summary('s1', encodeWorkDirKey(root), 100, root),
+      summary('other', encodeWorkDirKey('/work/other'), 300, '/work/other'),
+    ];
+
+    await expect(query.listRecentSessions(alias)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 's2' }), expect.objectContaining({ id: 's1' })]),
+    );
+    expect((await query.listRecentSessions(alias))).toHaveLength(2);
     expect(RECENT_SESSIONS_LIMIT).toBe(20);
   });
 
-  it('returns the index items for the workspace', async () => {
-    const { query, index } = build();
-    const items = [summary('s2', 'wd_abc', 200), summary('s1', 'wd_abc', 100)];
-    index.items = items;
+  it('hides a derived workspace after its root tombstone', async () => {
+    const { query, index, registry } = build();
+    index.items = [summary('s1', 'wd_unknown', 100, '/work/deleted')];
+    registry.deletedRoots.set('wd_deleted', '/work/deleted');
 
-    await expect(query.listRecentSessions('wd_abc')).resolves.toEqual(items);
-  });
-
-  it('returns an empty array when the workspace has no sessions', async () => {
-    const { query } = build();
-
-    await expect(query.listRecentSessions('wd_empty')).resolves.toEqual([]);
+    await expect(query.list()).resolves.toEqual([]);
+    await expect(query.get('wd_unknown')).resolves.toBeUndefined();
   });
 });

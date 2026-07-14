@@ -266,6 +266,7 @@ export * from '#/app/workspaceRegistry/workspaceRegistry';
 export * from '#/app/workspaceRegistry/workspaceRegistryService';
 export * from '#/app/workspaceRegistry/workspacePersistence';
 export * from '#/app/workspaceRegistry/fileWorkspacePersistence';
+export * from '#/app/workspaceRegistry/workspaceQuery';
 // Register-only bindings not re-exported by their domain barrel — loaded for side effects.
 import '#/app/workspaceRegistry/workspaceQueryService';
 import '#/app/git/gitService';

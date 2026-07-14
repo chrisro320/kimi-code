@@ -7,9 +7,9 @@
  * concerns (ISO ↔ epoch-ms, record ↔ array) from the registry. The generic
  * `IAtomicDocumentStore` it builds on stays schema-agnostic.
  *
- * `load()` returns `undefined` to mean "no usable catalog" so the registry can
- * trigger a one-shot rebuild from the legacy session index; an empty array is
- * a valid, already-materialized catalog and must NOT trigger a rebuild.
+ * `load()` returns `undefined` to mean "no usable catalog". `withWriteLock()`
+ * serializes a fresh load and atomic replacement across processes that share
+ * the same home directory.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -28,6 +28,14 @@ export interface PersistedWorkspaceEntry {
 export interface PersistedWorkspaceFile {
   readonly version: number;
   readonly workspaces: Record<string, PersistedWorkspaceEntry>;
+  readonly deleted_workspace_ids?: readonly string[];
+  readonly deleted_workspace_roots?: Readonly<Record<string, string>>;
+}
+
+export interface WorkspaceCatalog {
+  readonly workspaces: readonly Workspace[];
+  readonly deletedWorkspaceIds: readonly string[];
+  readonly deletedWorkspaceRoots: Readonly<Record<string, string>>;
 }
 
 export interface IWorkspacePersistence {
@@ -38,11 +46,12 @@ export interface IWorkspacePersistence {
    *
    * - `undefined` → no usable catalog exists (absent or malformed); the caller
    *   should rebuild.
-   * - `Workspace[]` (possibly empty) → a materialized catalog; do not rebuild.
+ * - `WorkspaceCatalog` (possibly empty) → a materialized catalog; do not rebuild.
    */
-  load(): Promise<Workspace[] | undefined>;
+  load(): Promise<WorkspaceCatalog | undefined>;
   /** Atomically replace the persisted catalog. */
-  save(workspaces: readonly Workspace[]): Promise<void>;
+  save(catalog: WorkspaceCatalog): Promise<void>;
+  withWriteLock<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export const IWorkspacePersistence: ServiceIdentifier<IWorkspacePersistence> =

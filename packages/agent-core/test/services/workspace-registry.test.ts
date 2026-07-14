@@ -1,6 +1,8 @@
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import lockfile from 'proper-lockfile';
+import { basename as posixBasename } from 'pathe';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -127,6 +129,51 @@ describe('WorkspaceRegistryService', () => {
     const list = await ctx.registry.list();
     const matches = list.filter((w) => w.root === root);
     expect(matches).toHaveLength(1);
+  });
+
+  it('normalizes lexical root aliases to one canonical workspace', async () => {
+    const root = await makeProjectRoot('normalized');
+    const alias = join(root, '..', posixBasename(root));
+
+    const created = await ctx.registry.createOrTouch(alias);
+
+    expect(created.root).toBe(root);
+    expect((await ctx.registry.list()).filter((workspace) => workspace.root === root)).toHaveLength(1);
+  });
+
+  it('serializes concurrent registry mutations across instances', async () => {
+    const rootA = await makeProjectRoot('lock-a');
+    const rootB = await makeProjectRoot('lock-b');
+    const second = new WorkspaceRegistryService(
+      {
+        _serviceBrand: undefined,
+        homeDir: ctx.homeDir,
+        configPath: join(ctx.homeDir, 'config.toml'),
+      },
+      makeLogger(),
+      makeEventService(),
+    );
+    const releaseExternal = await lockfile.lock(join(ctx.homeDir, 'workspaces.json'), {
+      realpath: false,
+    });
+    let settled = false;
+    const pending = Promise.all([
+      ctx.registry.createOrTouch(rootA),
+      second.createOrTouch(rootB),
+    ]).then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await releaseExternal();
+    await pending;
+
+    expect((await ctx.registry.list()).map((workspace) => workspace.root).toSorted()).toEqual(
+      [rootA, rootB].toSorted(),
+    );
+    second.dispose();
   });
 
   it('keeps a derived bucket visible even when its root no longer exists on disk', async () => {

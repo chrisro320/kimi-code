@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
+import lockfile from 'proper-lockfile';
 
 import { InstantiationType } from '#/_base/di/extensions';
 import {
@@ -15,6 +16,7 @@ import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
 import { ErrorCodes, Error2 } from '#/errors';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
@@ -62,6 +64,7 @@ describe('WorkspaceRegistryService (file-backed)', () => {
   function build(): IWorkspaceRegistry {
     const fileStorage = new FileStorageService(homeDir);
     const host = createScopedTestHost([
+      stubPair(IBootstrapService, { homeDir } as IBootstrapService),
       stubPair(IFileSystemStorageService, fileStorage),
       stubPair(IAtomicDocumentStore, new JsonAtomicDocumentStore(fileStorage)),
       stubPair(IHostFileSystem, new HostFileSystem()),
@@ -97,6 +100,48 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     const list = await restart().list();
     expect(list.map((w) => w.id)).toContain(created.id);
     expect(list.find((w) => w.id === created.id)?.name).toBe('proj');
+  });
+
+  it('normalizes a lexical root alias before deriving its canonical id', async () => {
+    const root = join(homeDir, 'project');
+    await fsp.mkdir(root, { recursive: true });
+    const created = await build().createOrTouch(join(root, '..', 'project'), 'project');
+
+    expect(created.root).toBe(root);
+    expect(created.id).toBe(encodeWorkDirKey(root));
+    expect((await restart().list()).map((workspace) => workspace.root)).toEqual([root]);
+  });
+
+  it('serializes concurrent registry mutations across instances', async () => {
+    const rootA = join(homeDir, 'a');
+    const rootB = join(homeDir, 'b');
+    await fsp.mkdir(rootA, { recursive: true });
+    await fsp.mkdir(rootB, { recursive: true });
+
+    const first = build();
+    const firstHost = currentHost as ReturnType<typeof createScopedTestHost>;
+    const second = build();
+    const releaseExternal = await lockfile.lock(join(homeDir, 'workspaces.json'), {
+      realpath: false,
+    });
+    let settled = false;
+    const pending = Promise.all([
+      first.createOrTouch(rootA),
+      second.createOrTouch(rootB),
+    ]).then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await releaseExternal();
+    await pending;
+
+    expect((await second.list()).map((workspace) => workspace.root).toSorted()).toEqual(
+      [rootA, rootB].toSorted(),
+    );
+    firstHost.dispose();
   });
 
   it('rebuilds from session_index.jsonl when workspaces.json is absent', async () => {
@@ -220,5 +265,23 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     const matches = list.filter((w) => w.root === root);
     expect(matches).toHaveLength(1);
     expect(matches[0]?.id).toBe(canonicalId);
+  });
+
+  it('keeps a derived workspace tombstoned after a registry restart', async () => {
+    const root = join(homeDir, 'derived');
+    const id = encodeWorkDirKey(root);
+    await seedSessionIndex([
+      {
+        sessionId: 'derived-session',
+        sessionDir: join(homeDir, 'sessions', id, 'derived-session'),
+        workDir: root,
+      },
+    ]);
+
+    const registry = build();
+    expect((await registry.list()).map((workspace) => workspace.id)).toContain(id);
+    await registry.delete(id);
+
+    expect((await restart().list()).map((workspace) => workspace.id)).not.toContain(id);
   });
 });

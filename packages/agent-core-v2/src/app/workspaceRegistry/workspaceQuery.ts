@@ -12,14 +12,27 @@ import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiatio
 
 import type { SessionSummary } from '#/app/sessionIndex/sessionIndex';
 
+import type { Workspace } from './workspaceRegistry';
+
 export type { SessionSummary };
 
 /** Number of recent sessions returned by `listRecentSessions`. */
 export const RECENT_SESSIONS_LIMIT = 20;
 
+export interface WorkspaceListItem extends Workspace {
+  readonly sessionCount: number;
+}
+
 export interface IWorkspaceQueryService {
   readonly _serviceBrand: undefined;
 
+  list(): Promise<readonly WorkspaceListItem[]>;
+  get(workspaceId: string): Promise<Workspace | undefined>;
+  listSessions(
+    workspaceId: string,
+    options?: { readonly includeArchived?: boolean },
+  ): Promise<readonly SessionSummary[]>;
+  countActiveSessions(workspaceId: string): Promise<number>;
   /**
    * List the `RECENT_SESSIONS_LIMIT` (20) most recent sessions in
    * `workspaceId`, newest first (by `updatedAt`). Returns an empty array when
