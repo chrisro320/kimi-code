@@ -388,7 +388,7 @@ describe('WorkspaceRegistryService', () => {
     expect(matches[0]?.session_count).toBe(2);
 
     expect((await ctx.registry.get(canonicalId)).session_count).toBe(2);
-    expect((await ctx.registry.get(legacyId)).id).toBe(canonicalId);
+    expect((await ctx.registry.get(legacyId)).id).toBe(legacyId);
     expect((await ctx.registry.createOrTouch(root)).session_count).toBe(2);
     expect((await ctx.registry.update(canonicalId, { name: 'renamed' })).session_count).toBe(2);
   });

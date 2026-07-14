@@ -159,7 +159,11 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     const { match, deleted, deletedRoots } = await this.runExclusive(async () => {
       const file = await this.readRegistry();
       const deletedRoots = normalizedDeletedRoots(file);
-      const match = findRepresentativeRegistryEntry(file, workspaceId);
+      const exact = file.workspaces[workspaceId];
+      const match =
+        exact === undefined
+          ? findRepresentativeRegistryEntry(file, workspaceId)
+          : { id: workspaceId, entry: exact };
       return {
         match,
         deletedRoots,

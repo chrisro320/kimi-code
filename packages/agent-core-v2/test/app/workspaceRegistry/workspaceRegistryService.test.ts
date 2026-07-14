@@ -187,7 +187,7 @@ describe('WorkspaceRegistryService (file-backed)', () => {
 
   it('derives sessions after an empty catalog has already been materialized', async () => {
     const root = join(homeDir, 'late-session');
-    const workspaceId = encodeWorkDirKey(root);
+    const workspaceId = 'wd_late_alias_deadbeef0000';
     await fsp.mkdir(root, { recursive: true });
     expect(await build().list()).toEqual([]);
     await seedSessionIndex([
@@ -331,6 +331,25 @@ describe('WorkspaceRegistryService (file-backed)', () => {
       id: alias,
       name: 'renamed',
     });
+  });
+
+  it('resolves a legacy physical alias when the catalog only has the canonical entry', async () => {
+    const root = join(homeDir, 'canonical-with-legacy-session');
+    const canonicalId = encodeWorkDirKey(root);
+    const alias = 'wd_legacy_physical_deadbeef0000';
+    await fsp.mkdir(root, { recursive: true });
+    const registry = build();
+    await registry.createOrTouch(root);
+    await seedSessionIndex([
+      {
+        sessionId: 'legacy-session',
+        sessionDir: join(homeDir, 'sessions', alias, 'legacy-session'),
+        workDir: root,
+      },
+    ]);
+
+    await expect(registry.get(alias)).resolves.toMatchObject({ id: alias, root });
+    await expect(registry.get(canonicalId)).resolves.toMatchObject({ id: canonicalId, root });
   });
 
   it('rebuilds an alias-only workspace from the physical session bucket id', async () => {
