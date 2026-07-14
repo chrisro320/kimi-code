@@ -17,6 +17,7 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { isStorageError, StorageErrors } from '#/persistence/interface/storage';
 
 import type { Workspace } from './workspaceRegistry';
 import {
@@ -46,10 +47,16 @@ export class FileWorkspacePersistence implements IWorkspacePersistence {
   ) {}
 
   async load(): Promise<WorkspaceCatalog | undefined> {
-    const file = await this.docs.get<PersistedWorkspaceFile>(
-      WORKSPACE_REGISTRY_SCOPE,
-      WORKSPACE_REGISTRY_KEY,
-    );
+    let file: PersistedWorkspaceFile | undefined;
+    try {
+      file = await this.docs.get<PersistedWorkspaceFile>(
+        WORKSPACE_REGISTRY_SCOPE,
+        WORKSPACE_REGISTRY_KEY,
+      );
+    } catch (error) {
+      if (isStorageError(error, StorageErrors.codes.STORAGE_DECODE_FAILED)) return undefined;
+      throw error;
+    }
     if (file === undefined) return undefined;
     if (
       typeof file !== 'object' ||

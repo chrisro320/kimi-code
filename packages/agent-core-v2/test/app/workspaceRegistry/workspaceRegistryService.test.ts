@@ -205,6 +205,22 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     expect(list[0]?.name).toBe('existing');
   });
 
+  it('rebuilds from the session index when workspaces.json is malformed', async () => {
+    const work = join(homeDir, 'malformed');
+    await fsp.writeFile(join(homeDir, 'workspaces.json'), '{not json', 'utf8');
+    await seedSessionIndex([
+      {
+        sessionId: 's-malformed',
+        sessionDir: join(homeDir, 'sessions', encodeWorkDirKey(work), 's-malformed'),
+        workDir: work,
+      },
+    ]);
+
+    await expect(build().list()).resolves.toEqual([
+      expect.objectContaining({ id: encodeWorkDirKey(work), root: work }),
+    ]);
+  });
+
   it('writes through on update and delete', async () => {
     const created = await build().createOrTouch(homeDir, 'proj');
     await build().update(created.id, { name: 'renamed' });
