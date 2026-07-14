@@ -43,6 +43,7 @@ interface WorkspaceRegistryFile {
 interface IndexedWorkspace {
   readonly root: string;
   readonly workspaceIds: Set<string>;
+  readonly activeCountByWorkspaceId: Map<string, number>;
   activeCount: number;
   createdAt: number;
   lastOpenedAt: number;
@@ -90,10 +91,8 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     // the current canonical key so sessions' workspace_id still resolves and
     // the sidebar doesn't render the same workspace twice.
     //
-    // The session count is intentionally scoped to the representative's own
-    // bucket (via hydrate) rather than aggregated across every id for the root:
-    // GET /sessions?workspace_id=<representative> only pages the canonical
-    // bucket, so the count must reflect what the list can actually retrieve.
+    // Counts use the representative bucket so they match the sessions that
+    // GET /sessions?workspace_id=<representative> can retrieve.
     const byRoot = new Map<
       string,
       { id: string; entry: WorkspaceRegistryEntry; canonical: boolean }
@@ -113,7 +112,10 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
       }
     }
     for (const [root, { id, entry }] of byRoot) {
-      result.push(await this.hydrate(id, entry, indexed.get(root)?.activeCount ?? 0));
+      const bucket = indexed.get(root);
+      result.push(
+        await this.hydrate(id, entry, bucket?.activeCountByWorkspaceId.get(id) ?? 0),
+      );
     }
 
     // Derived workspaces: cwds that own sessions but were never registered
@@ -144,7 +146,10 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
       );
     }
 
-    return result.toSorted((a, b) => (b.last_opened_at < a.last_opened_at ? -1 : 1));
+    return result.toSorted(
+      (a, b) =>
+        b.last_opened_at.localeCompare(a.last_opened_at) || a.id.localeCompare(b.id),
+    );
   }
 
   async get(workspaceId: string): Promise<Workspace> {
@@ -342,18 +347,26 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     for (const summary of summaries) {
       if (!(await hasReadableSessionState(summary.sessionDir))) continue;
       const root = normalizeWorkDir(summary.workDir);
+      const bucketId = posixBasename(dirname(summary.sessionDir));
       const existing = indexed.get(root);
       const workspace =
         existing ??
         {
           root,
           workspaceIds: new Set<string>(),
+          activeCountByWorkspaceId: new Map<string, number>(),
           activeCount: 0,
           createdAt: finiteTimestamp(summary.createdAt),
           lastOpenedAt: finiteTimestamp(summary.updatedAt),
         };
-      workspace.workspaceIds.add(posixBasename(dirname(summary.sessionDir)));
-      if (summary.archived !== true) workspace.activeCount++;
+      workspace.workspaceIds.add(bucketId);
+      if (summary.archived !== true) {
+        workspace.activeCount++;
+        workspace.activeCountByWorkspaceId.set(
+          bucketId,
+          (workspace.activeCountByWorkspaceId.get(bucketId) ?? 0) + 1,
+        );
+      }
       workspace.createdAt = Math.min(workspace.createdAt, finiteTimestamp(summary.createdAt));
       workspace.lastOpenedAt = Math.max(
         workspace.lastOpenedAt,

@@ -246,6 +246,21 @@ describe('WorkspaceRegistryService', () => {
     expect(list.map((w) => w.root)).not.toContain(root);
   });
 
+  it('does not count an indexed session whose state document is missing', async () => {
+    const root = await makeProjectRoot('missing-state');
+    const workspace = await ctx.registry.createOrTouch(root);
+    const sessionDir = join(ctx.homeDir, 'sessions', workspace.id, 'missing-state-session');
+    await mkdir(sessionDir, { recursive: true });
+    await appendSessionIndexEntry(ctx.homeDir, {
+      sessionId: 'missing-state-session',
+      sessionDir,
+      workDir: root,
+    });
+
+    const listed = await ctx.registry.list();
+    expect(listed.find((entry) => entry.id === workspace.id)?.session_count).toBe(0);
+  });
+
   it('tombstones a derived workspace on delete so it stays removed', async () => {
     const root = await makeProjectRoot('derived-del');
     // Derived (cwd-only, never registered) workspace with an active session.
@@ -293,6 +308,11 @@ describe('WorkspaceRegistryService', () => {
       JSON.stringify({ archived: false }),
       'utf-8',
     );
+    await appendSessionIndexEntry(ctx.homeDir, {
+      sessionId: 'sess-legacy-1',
+      sessionDir: legacySessionDir,
+      workDir: root,
+    });
 
     const list = await ctx.registry.list();
     const matches = list.filter((w) => w.root === root);
