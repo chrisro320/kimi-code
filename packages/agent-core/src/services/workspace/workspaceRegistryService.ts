@@ -278,7 +278,8 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
         const derived = await this.findDerivedWorkspace(workspaceId);
         if (
           derived === undefined ||
-          normalizedDeletedRoots(file).has(normalizeWorkDir(derived.root))
+          normalizedDeletedRoots(file).has(normalizeWorkDir(derived.root)) ||
+          file.deleted_workspace_ids.includes(encodeWorkDirKey(normalizeWorkDir(derived.root)))
         ) {
           throw new WorkspaceNotFoundError(workspaceId);
         }

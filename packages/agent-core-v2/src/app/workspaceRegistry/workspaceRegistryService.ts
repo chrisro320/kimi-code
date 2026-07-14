@@ -266,17 +266,20 @@ export class WorkspaceRegistryService implements IWorkspaceRegistry {
     if (bytes === undefined) {
       return { workspaces: result, deletedWorkspaceIds: new Set(), deletedWorkspaceRoots: new Map() };
     }
-    const latestBySession = new Map<string, SessionIndexLine>();
+    const latestBySession = new Map<
+      string,
+      { readonly entry: SessionIndexLine; readonly id: string }
+    >();
     for (const line of new TextDecoder().decode(bytes).split(/\r?\n/)) {
       const entry = parseSessionIndexLine(line.trim());
-      if (entry !== undefined) latestBySession.set(entry.sessionId, entry);
+      if (entry === undefined || !isAbsolute(entry.workDir)) continue;
+      const id = sessionBucketId(entry.sessionDir, entry.sessionId, this.bootstrap.sessionsDir);
+      if (id !== undefined) latestBySession.set(entry.sessionId, { entry, id });
     }
     const now = Date.now();
-    for (const entry of latestBySession.values()) {
-      if (!isAbsolute(entry.workDir)) continue;
+    for (const { entry, id } of latestBySession.values()) {
       const root = normalizeWorkDir(entry.workDir);
-      const id = sessionBucketId(entry.sessionDir, entry.sessionId, this.bootstrap.sessionsDir);
-      if (id === undefined || result.has(id)) continue;
+      if (result.has(id)) continue;
       result.set(id, {
         id,
         root,

@@ -231,6 +231,32 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     ]);
   });
 
+  it('keeps a prior valid session index entry when a later duplicate is invalid', async () => {
+    const root = join(homeDir, 'repaired-valid');
+    const bucket = 'wd_repaired_valid_deadbeef0000';
+    await seedSessionIndex([
+      {
+        sessionId: 'repaired-session-invalid-later',
+        sessionDir: join(homeDir, 'sessions', bucket, 'repaired-session-invalid-later'),
+        workDir: root,
+      },
+      {
+        sessionId: 'repaired-session-invalid-later',
+        sessionDir: join(
+          homeDir,
+          'sessions',
+          'wd_repaired_invalid_deadbeef0000',
+          'repaired-session-invalid-later',
+        ),
+        workDir: 'relative/workdir',
+      },
+    ]);
+
+    await expect(build().list()).resolves.toEqual([
+      expect.objectContaining({ id: bucket, root }),
+    ]);
+  });
+
   it('prefers an existing workspaces.json over the session index', async () => {
     const work = join(homeDir, 'existing');
     await writeWorkspacesJson({
