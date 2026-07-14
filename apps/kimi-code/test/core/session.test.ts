@@ -14,7 +14,7 @@ import {
   IAgentPermissionModeService,
   IAgentPlanService,
   IAgentProfileService,
-  IAgentPromptLegacyService,
+  IAgentPromptService,
   IAgentRPCService,
   IAgentSwarmService,
   IAgentSystemReminderService,
@@ -125,11 +125,16 @@ function makeFixture(options?: {
       bus,
       entries: [
         [IEventBus, bus],
-        [IAgentPromptLegacyService, { submit: recordReturning(`${id}.submit`, Promise.resolve({ prompt_id: 'p1' })) }],
+        [
+          IAgentPromptService,
+          {
+            enqueue: recordReturning(`${id}.enqueue`, Promise.resolve({})),
+            inject: recordReturning(`${id}.inject`, Promise.resolve(undefined)),
+          },
+        ],
         [
           IAgentRPCService,
           {
-            steer: record(`${id}.steer`),
             cancel: record(`${id}.cancel`),
             runShellCommand: recordReturning(`${id}.runShellCommand`, shellResult),
             cancelShellCommand: record(`${id}.cancelShellCommand`),
@@ -210,6 +215,10 @@ function makeFixture(options?: {
   const lifecycle = {
     list: () => [mainAgent],
     getHandle: (id: string) => {
+      getHandleCalls.push(id);
+      return handles.get(id);
+    },
+    whenReady: async (id: string) => {
       getHandleCalls.push(id);
       return handles.get(id);
     },
@@ -317,11 +326,19 @@ function makeFixture(options?: {
 
 const parts = [{ type: 'text' as const, text: 'hello' }];
 
+/** The ContextMessage the facade builds for a text-only prompt/steer. */
+const promptMessage = (content: unknown) => ({
+  role: 'user',
+  content,
+  toolCalls: [],
+  origin: { kind: 'user' },
+});
+
 describe('CoreSession conversation flow and agent routing', () => {
   it('prompt routes to the main agent prompt service by default', async () => {
     const fx = makeFixture();
     await fx.core.prompt(parts);
-    expect(fx.calls['main.submit']).toEqual([[{ content: parts }]]);
+    expect(fx.calls['main.enqueue']).toEqual([[{ message: promptMessage(parts) }]]);
     // ensureMainAgent resolves main through the lifecycle's existing handle.
     expect(fx.getHandleCalls).toContain('main');
   });
@@ -329,8 +346,8 @@ describe('CoreSession conversation flow and agent routing', () => {
   it('prompt with an explicit agentId routes to that agent', async () => {
     const fx = makeFixture();
     await fx.core.prompt(parts, { agentId: 'btw-1' });
-    expect(fx.calls['btw-1.submit']).toEqual([[{ content: parts }]]);
-    expect(fx.calls['main.submit']).toBeUndefined();
+    expect(fx.calls['btw-1.enqueue']).toEqual([[{ message: promptMessage(parts) }]]);
+    expect(fx.calls['main.enqueue']).toBeUndefined();
   });
 
   it('prompt with an unknown agentId rejects with AGENT_NOT_FOUND', async () => {
@@ -355,7 +372,7 @@ describe('CoreSession conversation flow and agent routing', () => {
     await fx.core.setPermission('auto');
     await fx.core.cancelCompaction();
 
-    expect(fx.calls['main.steer']).toEqual([[{ input: parts }]]);
+    expect(fx.calls['main.inject']).toEqual([[promptMessage(parts)]]);
     expect(fx.calls['main.cancel']).toEqual([[{}]]);
     expect(fx.calls['main.runShellCommand']).toEqual([[{ command: 'ls', commandId: 'c1' }]]);
     expect(shell).toEqual(fx.shellResult);

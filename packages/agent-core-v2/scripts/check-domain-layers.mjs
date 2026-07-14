@@ -136,7 +136,6 @@ const DOMAIN_LAYER = new Map([
   ['activity', 4],
   ['context', 4],
   ['message', 4],
-  ['turn', 4],
   ['injection', 4],
   ['compaction', 4],
   ['plan', 4],
@@ -154,6 +153,7 @@ const DOMAIN_LAYER = new Map([
   ['contextSize', 4],
   ['fullCompaction', 4],
   ['loop', 4],
+  ['stepRetry', 4],
   ['media', 4],
   // `edit` spans two scopes: the App-scope `IFileEditService` capability (pure
   // TextModel / EditService + os-backed read/write over the L1 hostFs bridge)
@@ -162,6 +162,7 @@ const DOMAIN_LAYER = new Map([
   // the domain to L4 beside the other agent-behaviour tools.
   ['edit', 4],
   ['llmRequester', 4],
+  ['faultInjection', 4],
   ['profile', 4],
   ['prompt', 4],
   // `shellCommand` orchestrates user `!` commands through `toolRegistry` (L3),
@@ -195,13 +196,19 @@ const DOMAIN_LAYER = new Map([
   // Its highest real dependency is `agentLifecycle`, so it sits in L6 beside
   // the other coordination domains.
   ['workspaceCommand', 6],
+  // `sessionInit` runs the `/init` command: it reaches through `agentLifecycle`
+  // (L6) to spawn the `coder` sub-agent and to the `main` agent's `profile`
+  // (L4) / `systemReminder` (L4) / `wireRecord` (L4), and reloads `AGENTS.md`
+  // through `profile` (L4). Its highest real dependency is `agentLifecycle`,
+  // so it sits in L6 beside `workspaceCommand`.
+  ['sessionInit', 6],
   // L7 — boundary
   ['approval', 7],
   ['question', 7],
   ['questionTools', 7],
   ['gateway', 7],
   ['rpc', 7],
-  ['promptLegacy', 7],
+  
   ['sessionLegacy', 7],
   ['authLegacy', 7],
   ['messageLegacy', 7],
@@ -266,8 +273,7 @@ function domainFromRel(rel, { exemptRootFile }) {
  *                                 Agent plan state to approve/deny tool use.
  *  - `permissionPolicy>swarm`    : swarm-mode approval policy needs the current
  *                                 Agent swarm state to approve AgentSwarm.
- *  - `skill>turn`           : skill activate starts a turn (same Agent scope intent).
- *  - `turn>agentLifecycle` : turn cancels sub-agents via lifecycle handle.
+ *  - `skill>loop`           : skill activate starts a turn through the loop (same Agent scope intent).
  *  - `swarm>agentLifecycle`: swarm spawns/manages sub-agents.
  *  - `cron>agentLifecycle` : cron coordinator steers the main agent.
  *  - `cron>sessionContext`: cron scheduler reads session identity for store filtering.
@@ -277,7 +283,7 @@ function domainFromRel(rel, { exemptRootFile }) {
  * Post-rebase-v2 restructuring introduced cross-domain type sharing between
  * L3 (registries/capabilities) and L4 (agent behaviour). The tool contract
  * (`ExecutableTool` / `ToolExecution` / results) and the tool-execution hook
- * contexts (`ToolExecutionHookContext` / `ToolWillExecuteContext` / …) now
+ * contexts (`ToolExecutionHookContext` / `ToolBeforeExecuteContext` / …) now
  * live in `tool` (L3); the only remaining L3→L4 import is a `loop` error /
  * event helper used by `toolExecutor` — surfaced for review rather than a
  * layering violation to fix here.
@@ -293,16 +299,11 @@ const ALLOWED_EXCEPTIONS = new Set([
   // auth-independent `web` domain.
   'auth>tool',
   'auth>toolRegistry',
-  // path-access (base tool policy) needs the `IHostEnvironment` type to stay
-  // host-aware (path class, home dir). Structural type dependency only —
-  // path-access does not construct or resolve the service.
-  '_base>os/interface',
   'permissionGate>approval',
   'userTool>interaction',
   'permissionPolicy>plan',
   'permissionPolicy>swarm',
-  'skill>turn',
-  'turn>agentLifecycle',
+  'skill>loop',
   'swarm>agentLifecycle',
   'cron>agentLifecycle',
   'cron>sessionContext',

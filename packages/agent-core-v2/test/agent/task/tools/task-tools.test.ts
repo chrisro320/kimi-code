@@ -4,6 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { abortable, userCancellationReason } from '#/_base/utils/abort';
 import type {
   AgentTask,
   AgentTaskInfo,
@@ -37,8 +38,12 @@ import { executeTool } from '../../../tools/fixtures/execute-tool';
 
 const signal = new AbortController().signal;
 
-function context<Input>(toolCallId: string, args: Input) {
-  return { turnId: 0, toolCallId, args, signal };
+function context<Input>(
+  toolCallId: string,
+  args: Input,
+  executionSignal: AbortSignal = signal,
+) {
+  return { turnId: 0, toolCallId, args, signal: executionSignal };
 }
 
 function outputString(result: { readonly output: string | readonly unknown[] }): string {
@@ -114,7 +119,10 @@ function outputSnapshot(
 interface FakeTaskEntry {
   info: AgentTaskInfo;
   output: AgentTaskOutputSnapshot;
-  wait?: (timeoutMs: number | undefined) => Promise<void>;
+  wait?: (
+    timeoutMs: number | undefined,
+    signal: AbortSignal | undefined,
+  ) => Promise<void>;
 }
 
 class FakeTaskService implements IAgentTaskService {
@@ -129,7 +137,10 @@ class FakeTaskService implements IAgentTaskService {
   add(
     info: AgentTaskInfo,
     output: AgentTaskOutputSnapshot = outputSnapshot(),
-    wait?: (timeoutMs: number | undefined) => Promise<void>,
+    wait?: (
+      timeoutMs: number | undefined,
+      signal: AbortSignal | undefined,
+    ) => Promise<void>,
   ): string {
     this.entries.set(info.taskId, { info, output, wait });
     return info.taskId;
@@ -216,10 +227,18 @@ class FakeTaskService implements IAgentTaskService {
     return stopped.filter((info): info is AgentTaskInfo => info !== undefined);
   }
 
-  async wait(taskId: string, timeoutMs?: number): Promise<AgentTaskInfo | undefined> {
+  async stopAllOnExit(reason: string): Promise<readonly AgentTaskInfo[]> {
+    return this.stopAll(reason);
+  }
+
+  async wait(
+    taskId: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<AgentTaskInfo | undefined> {
     this.waitCalls.push({ taskId, timeoutMs });
     const entry = this.entries.get(taskId);
-    await entry?.wait?.(timeoutMs);
+    await entry?.wait?.(timeoutMs, signal);
     return entry?.info;
   }
 
@@ -490,6 +509,7 @@ describe('TaskOutputTool', () => {
 
     expect(output).toContain('retrieval_status: not_ready');
     expect(output).toContain('status: running');
+    expect(output).not.toContain('next_step');
     expect(tasks.waitCalls).toEqual([]);
   });
 
@@ -503,9 +523,44 @@ describe('TaskOutputTool', () => {
     );
     const output = outputString(result);
 
+    expect(result.isError ?? false).toBe(false);
     expect(output).toContain('retrieval_status: timeout');
     expect(output).toContain('status: running');
+    expect(output).toContain('next_step:');
+    expect(output).toContain('Do not block on it again');
     expect(tasks.waitCalls).toEqual([{ taskId, timeoutMs: 1_000 }]);
+  });
+
+  it('cancels a blocking read when the tool execution signal aborts', async () => {
+    const tasks = new FakeTaskService();
+    let markWaitStarted: () => void = () => {};
+    const waitStarted = new Promise<void>((resolve) => {
+      markWaitStarted = resolve;
+    });
+    const taskId = tasks.add(
+      processTask({ taskId: 'bash-cancel01' }),
+      outputSnapshot(),
+      (_timeoutMs, waitSignal) => {
+        markWaitStarted();
+        if (waitSignal === undefined) throw new Error('Missing tool execution signal.');
+        return abortable(new Promise<void>(() => {}), waitSignal);
+      },
+    );
+    const controller = new AbortController();
+    const execution = executeTool(
+      new TaskOutputTool(tasks),
+      context(
+        'task_output_cancelled',
+        { task_id: taskId, block: true, timeout: 60 },
+        controller.signal,
+      ),
+    );
+    await waitStarted;
+    const reason = userCancellationReason();
+
+    controller.abort(reason);
+
+    await expect(execution).rejects.toBe(reason);
   });
 
   it('surfaces timeout terminal metadata', async () => {

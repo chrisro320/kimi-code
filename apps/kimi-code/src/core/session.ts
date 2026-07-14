@@ -21,7 +21,7 @@ import {
   IAgentPermissionModeService,
   IAgentPlanService,
   IAgentProfileService,
-  IAgentPromptLegacyService,
+  IAgentPromptService,
   IAgentRPCService,
   IAgentSwarmService,
   IAgentTaskService,
@@ -141,27 +141,36 @@ export class CoreSession {
 
   // -- Conversation flow ----------------------------------------------------
 
-  // `prompt` stays on the v1 Legacy service for its FIFO queue: a prompt sent
-  // while a turn is running is queued and drained in order. The native
-  // `IAgentRPCService.prompt` returns `undefined` (does not queue) when the
-  // agent is busy or a hook blocks it, which would drop back-to-back input.
-  // Everything else that mutates a turn (`steer`/`cancel`/`runShellCommand`/
-  // `undoHistory`/`activateSkill`/`setPermission`/`getContext`/`cancelCompaction`)
-  // goes through the native `IAgentRPCService`. The split is intentional.
+  // `prompt`/`steer` both go through the native `IAgentPromptService` (the
+  // promptLegacy surface is gone): `enqueue` keeps the FIFO queue a prompt
+  // sent mid-turn relies on, and `inject` steers content into the active turn
+  // (or opens a fresh one when the queue drained between the TUI's check and
+  // the call). Wire-shaped parts are converted to v2-native `ContentPart`s at
+  // this boundary — the TUI's paste path already compressed any base64 image,
+  // so the conversion is a pure re-shape (mirrors kap-server's
+  // `contentToCoreParts`). Everything else that mutates a turn
+  // (`cancel`/`runShellCommand`/`undoHistory`/`activateSkill`/`setPermission`/
+  // `getContext`/`cancelCompaction`) goes through the native `IAgentRPCService`.
   async prompt(parts: readonly PromptPart[], options?: { agentId?: string }): Promise<void> {
     const agent = await this.agent(options?.agentId);
-    await agent.accessor.get(IAgentPromptLegacyService).submit({ content: [...parts] });
+    await agent.accessor.get(IAgentPromptService).enqueue({
+      message: {
+        role: 'user',
+        content: toCoreParts(parts),
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
+    });
   }
 
   async steer(parts: readonly PromptPart[], options?: { agentId?: string }): Promise<void> {
     const agent = await this.agent(options?.agentId);
-    // The RPC facade takes v2-native `ContentPart`s while the public surface
-    // uses the v1 protocol parts (same `text` shape the TUI steers with);
-    // media parts would need the promptLegacy conversion, which v2 keeps
-    // module-private.
-    await agent.accessor
-      .get(IAgentRPCService)
-      .steer({ input: parts as unknown as readonly ContentPart[] });
+    await agent.accessor.get(IAgentPromptService).inject({
+      role: 'user',
+      content: toCoreParts(parts),
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
   }
 
   async cancel(options?: { agentId?: string }): Promise<void> {
@@ -557,4 +566,32 @@ export class CoreSession {
       dismiss: (id) => questions.dismiss(id),
     };
   }
+}
+
+/**
+ * Convert wire-shaped prompt parts to v2-native `ContentPart`s. Pure re-shape:
+ * text passes through, url sources stay urls, and base64 sources become
+ * data-URL `*_url` parts (mirrors kap-server's `contentToCoreParts`). Inline
+ * images arrive already compressed by the TUI's paste path.
+ */
+function toCoreParts(parts: readonly PromptPart[]): ContentPart[] {
+  const converted: ContentPart[] = [];
+  for (const part of parts) {
+    if (part.type === 'text') {
+      converted.push({ type: 'text', text: part.text });
+    } else if (part.type === 'image') {
+      const url =
+        part.source.kind === 'url'
+          ? part.source.url
+          : `data:${part.source.media_type};base64,${part.source.data}`;
+      converted.push({ type: 'image_url', imageUrl: { url } });
+    } else if (part.type === 'video') {
+      const url =
+        part.source.kind === 'url'
+          ? part.source.url
+          : `data:${part.source.media_type};base64,${part.source.data}`;
+      converted.push({ type: 'video_url', videoUrl: { url } });
+    }
+  }
+  return converted;
 }

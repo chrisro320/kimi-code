@@ -10,7 +10,7 @@ import { Event } from '#/_base/event';
 import { userCancellationReason } from '#/_base/utils/abort';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
 import { IAgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalog';
@@ -1090,6 +1090,69 @@ describe('SessionSwarmService metadata compatibility', () => {
     );
   });
 
+  it('does not emit spawned again when a rate-limited child retries', async () => {
+    vi.useFakeTimers();
+    try {
+      agents['agent-retry'] = {
+        homedir: '/tmp/kimi/s1/agents/agent-retry',
+        labels: { parentAgentId: 'main' },
+      };
+      agents['agent-blocker'] = {
+        homedir: '/tmp/kimi/s1/agents/agent-blocker',
+        labels: { parentAgentId: 'main' },
+      };
+      handles.set('agent-retry', agentHandle('agent-retry', lifecycle, eventBus));
+      handles.set('agent-blocker', agentHandle('agent-blocker', lifecycle, eventBus));
+      const rateLimited = createControlledPromise<{ summary: string }>();
+      const blocker = createControlledPromise<{ summary: string }>();
+      const published: DomainEvent[] = [];
+      (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: DomainEvent) => {
+        published.push(event);
+      });
+      let retryRuns = 0;
+      runAgent.mockImplementation((agentId, request, options) => {
+        options?.onReady?.();
+        if (agentId === 'agent-retry') {
+          retryRuns += 1;
+          return {
+            agentId,
+            turn: {} as never,
+            completion:
+              retryRuns === 1
+                ? rateLimited
+                : Promise.resolve({ summary: 'recovered summary' }),
+          };
+        }
+        return { agentId, turn: {} as never, completion: blocker };
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [resumeSessionTask('agent-retry'), resumeSessionTask('agent-blocker')],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      blocker.resolve({ summary: 'blocker summary' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await running;
+
+      expect(
+        published
+          .filter((event) => event.type === 'subagent.spawned')
+          .map((event) => event.subagentId),
+      ).toEqual(['agent-retry', 'agent-blocker']);
+      expect(
+        runAgent.mock.calls
+          .filter(([agentId]) => agentId === 'agent-retry')
+          .map(([, request]) => request),
+      ).toEqual([{ kind: 'prompt', prompt: 'Continue' }, { kind: 'retry' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects resume of an already running child before launching or emitting spawned', async () => {
     agents['agent-existing'] = {
       homedir: '/tmp/kimi/s1/agents/agent-existing',
@@ -1099,10 +1162,10 @@ describe('SessionSwarmService metadata compatibility', () => {
       'agent-existing',
       agentHandle('agent-existing', lifecycle, eventBus, {}, new Map([
         [
-          IAgentTurnService,
+          IAgentLoopService,
           {
             _serviceBrand: undefined,
-            getActiveTurn: () => ({ id: 1 }),
+            status: () => ({ state: 'running', activeTurnId: 1, pendingTurnIds: [], hasPendingRequests: true }),
           },
         ],
       ])),
@@ -1161,13 +1224,11 @@ function lifecycleStub(
   handles: Map<string, IAgentScopeHandle>,
   eventBus: IEventBus,
 ): IAgentLifecycleService {
-  const hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-    'onWillStartAgentTask',
-    'onDidStopAgentTask',
-  ]);
+  const hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']);
   const lifecycle = {
     _serviceBrand: undefined,
     hooks,
+    onDidStopAgentTask: Event.None,
     onDidCreate: Event.None,
     onDidCreateMain: Event.None,
     onDidDispose: Event.None,
@@ -1184,6 +1245,7 @@ function lifecycleStub(
     }),
     ensureMcpReady: async () => {},
     notifyMainCreated: () => {},
+    notifyAgentTaskStopped: () => {},
     fork: vi.fn(),
     run: vi.fn(async (agentId: string) => ({
       agentId,
@@ -1191,6 +1253,7 @@ function lifecycleStub(
       completion: Promise.resolve({ summary: 'child summary' }),
     })),
     getHandle: (agentId: string) => handles.get(agentId),
+    whenReady: (agentId: string) => Promise.resolve(handles.get(agentId)),
     list: () => [...handles.values()],
     remove: async (agentId: string) => {
       handles.delete(agentId);
@@ -1219,7 +1282,7 @@ function agentHandle(
     _serviceBrand: undefined,
     mode: 'auto',
     setMode: () => {},
-    hooks: createHooks(['onChanged']),
+    onDidChangeMode: Event.None,
   } as IAgentPermissionModeService;
   return {
     id,
@@ -1230,11 +1293,11 @@ function agentHandle(
         if (service !== undefined) return service;
         if (serviceId === IAgentProfileService) return profile;
         if (serviceId === IAgentPermissionModeService) return permissionMode;
-        if (serviceId === IAgentTurnService) {
+        if (serviceId === IAgentLoopService) {
           return {
             _serviceBrand: undefined,
-            getActiveTurn: () => undefined,
-          } as IAgentTurnService;
+            status: () => ({ state: 'idle', pendingTurnIds: [], hasPendingRequests: false }),
+          } as unknown as IAgentLoopService;
         }
         if (serviceId === IAgentUserToolService) return userToolServiceStub();
         if (serviceId === IEventBus) return eventBus;

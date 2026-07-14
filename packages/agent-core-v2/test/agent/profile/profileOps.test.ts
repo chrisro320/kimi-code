@@ -14,6 +14,8 @@ import type { ThinkingEffort } from '#/app/llmProtocol/thinkingEffort';
 import { type LLMEvent, type Model } from '#/app/model/modelInstance';
 import { IModelResolver } from '#/app/model/modelResolver';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
+import { AgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContextService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
@@ -34,6 +36,7 @@ function createTelemetryStub(): ITelemetryService {
   return {
     _serviceBrand: undefined,
     track: () => undefined,
+    track2: () => undefined,
   } as unknown as ITelemetryService;
 }
 
@@ -91,6 +94,7 @@ function buildHost(key: string): {
   host.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
   host.set(IAgentWireService, new SyncDescriptor(WireService, [{ logScope: SCOPE, logKey: key }]));
   host.stub(ITelemetryService, createTelemetryStub());
+  host.stub(IAgentTelemetryContextService, new AgentTelemetryContextService());
   host.stub(IConfigService, createConfigStub());
   host.stub(IModelResolver, modelResolver);
   host.stub(IHostEnvironment, stubUnused());
@@ -194,8 +198,6 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     const model = modelOf(wire);
     expect(model.profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
     expect(model.systemPrompt).toBe('You are helpful.');
-    // Explicit 'on' persists verbatim — normalizing it to a concrete effort
-    // is the UI boundary's job, not the resolver's.
     expect(model.thinkingLevel).toBe('on');
     expect(svc.getSystemPrompt()).toBe('You are helpful.');
 
@@ -237,8 +239,6 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     const records = await readRecords();
 
-    // Fresh host + wire: replay the persisted records. The Model rebuilds but
-    // neither chdir nor emitStatusUpdated re-fires — replay is silent.
     const host = buildHost('profile-replay');
     let replayChdir = 0;
     let replayEmits = 0;
@@ -268,8 +268,6 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     svc.update({ thinkingLevel: 'on' });
     const records = await readRecords();
 
-    // Fresh host whose config section would resolve differently is irrelevant:
-    // the persisted resolved value ('on') is restored verbatim.
     const host = buildHost('profile-replay-thinking');
     await host.wire.replay(...records);
     expect(modelOf(host.wire).thinkingLevel).toBe('on');

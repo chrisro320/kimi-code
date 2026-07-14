@@ -30,10 +30,11 @@ import { IAgentPromptService } from '#/agent/prompt/prompt';
 import type { AgentAPI } from '#/agent/rpc/core-api';
 import { IAgentSkillService } from '#/agent/skill/skill';
 import { AgentSkillService } from '#/agent/skill/skillService';
+import { IAgentToolDedupeService } from '#/agent/toolDedupe/toolDedupe';
 import type {
   ExecutableToolOutput as ToolOutput,
   ExecutableToolResult,
-} from '#/agent/tool/toolContract';
+} from '#/tool/toolContract';
 import type {
   PersistedWireRecord,
   WireRecordRestoreOptions,
@@ -86,6 +87,8 @@ import {
   ISessionContext,
   ISessionProcessRunner,
   IAgentScopeContext,
+  IAgentStepRetryService,
+  IAgentLoopContinuationService,
   IAgentSwarmService,
   AgentSwarmService,
   ITelemetryService,
@@ -375,28 +378,13 @@ function defineServiceValue<T>(
   }
 }
 
-/**
- * Session-scope override for the execution environment and derived atoms.
- *
- * The session cwd is controlled via `TestAgentOptions.cwd` (seeded into
- * `ISessionContext.cwd`); this override only swaps the host-fs and process
- * runner atoms that depend on it.
- */
 export interface ExecEnvOverride {
   readonly hostFs?: IHostFileSystem | Partial<IHostFileSystem>;
   readonly processRunner?: ISessionProcessRunner | Partial<ISessionProcessRunner>;
 }
 
-/**
- * Register a fake execution-environment set for a test session. Any
- * unspecified atom keeps the harness default and the real services backed by
- * it.
- */
 export function execEnvServices(override: ExecEnvOverride = {}): TestAgentServiceOverride {
-  return sessionServices((reg) => {
-    if (override.hostFs !== undefined) {
-      reg.defineInstance(IHostFileSystem, resolveHostFsOverride(override.hostFs));
-    }
+  const session = sessionServices((reg) => {
     if (override.processRunner !== undefined) {
       reg.defineInstance(
         ISessionProcessRunner,
@@ -408,13 +396,18 @@ export function execEnvServices(override: ExecEnvOverride = {}): TestAgentServic
       new SyncDescriptor(SessionWorkspaceContextService),
     );
   });
+  if (override.hostFs === undefined) return session;
+
+  const hostFs = resolveHostFsOverride(override.hostFs);
+  return [
+    appServices((reg) => {
+      reg.defineInstance(IHostFileSystem, hostFs);
+    }),
+    session,
+  ];
 }
 
 function resolveHostFsOverride(input: IHostFileSystem | Partial<IHostFileSystem>): IHostFileSystem {
-  // A full impl (class instance or `Proxy` over one) exposes every core
-  // method. A partial override typically covers only a few of them. If every
-  // core method is a function, pass the input through unchanged; otherwise
-  // treat it as a partial override and spread it over the fake defaults.
   if (isFullHostFs(input)) return input as IHostFileSystem;
   return createFakeHostFs(input as Partial<IHostFileSystem>);
 }
@@ -440,9 +433,6 @@ function isFullHostFs(input: unknown): boolean {
 function resolveProcessRunnerOverride(
   input: ISessionProcessRunner | Partial<ISessionProcessRunner>,
 ): ISessionProcessRunner {
-  // `ISessionProcessRunner` has only one method (`exec`), so a full impl is
-  // any object with `exec` as a function. Both `SessionProcessRunner`
-  // instances and `createFakeProcessRunner()` results satisfy this.
   if (
     typeof input === 'object' &&
     input !== null &&
@@ -471,12 +461,6 @@ export function homeDirServices(homeDir: string | undefined): TestAgentServiceOv
   });
 }
 
-/**
- * Override the App-scope `IHostEnvironment` with a fully-populated POSIX
- * snapshot whose `homeDir` points at a hermetic test directory. Used by tests
- * that render system prompts / resolve user-level config so a developer's real
- * `~/.kimi-code` / `~/.agents` files never leak into the assertions.
- */
 export function hostEnvironmentServices(homeDir: string): TestAgentServiceOverride {
   return appServices((reg) => {
     reg.defineInstance(
@@ -629,7 +613,7 @@ function createSessionSkillCatalog(catalog: SkillCatalog): ISessionSkillCatalog 
     _serviceBrand: undefined,
     catalog,
     ready: Promise.resolve(),
-    onDidChange: Event.None as Event<void>,
+    onDidChange: Event.None as Event<string>,
     load: async () => { },
     reload: async () => { },
   };
@@ -653,10 +637,6 @@ export function swarmServices(
   ];
 }
 
-/**
- * Build a fake `ISessionProcessRunner` whose `exec` returns a scripted
- * `IProcess` emitting `stdout` on stdout and exiting with `exitCode`.
- */
 export function createCommandRunner(stdout: string, exitCode = 0): ISessionProcessRunner {
   function createProcess(): IProcess {
     return {
@@ -912,11 +892,6 @@ export class AgentTestContext {
           })) {
             reg.defineInstance(id, value);
           }
-          // In-memory Storage-layer backend. The `InMemoryStorageService` is no
-          // longer auto-registered, so the harness seeds it here to keep a
-          // workable default for storage-backed services. Tests that need durable
-          // (file) storage override this via `homeDirServices(dir)` — overrides
-          // win over this base seed (see `collectScopeSeed`).
           const memoryStorage = (): SyncDescriptor<IFileSystemStorageService> =>
             new SyncDescriptor(InMemoryStorageService, [], true);
           reg.defineDescriptor(IFileSystemStorageService, memoryStorage());
@@ -936,10 +911,6 @@ export class AgentTestContext {
             ),
           );
           reg.defineInstance(ILogService, createLogService(undefined));
-          // Per-scope `*LogService` bindings (e.g. SessionLogService) resolve their
-          // level/paths from the App-scope `ILogOptions`. Seed a quiet config so
-          // harness-built agents can construct them; logs go under the throwaway
-          // test home dir and `level: 'off'` keeps them from being emitted.
           reg.defineInstance(
             ILogOptions,
             {
@@ -971,10 +942,6 @@ export class AgentTestContext {
             );
           }
           reg.defineInstance(IHostTerminalService, createHostTerminalService());
-          // The real `HostEnvironmentService` probes the host asynchronously (`ready`);
-          // builtin tools (e.g. `BashTool`) read `osKind`/`shellName` synchronously at
-          // construction, which throws "accessed before ready". Seed a fully-populated
-          // POSIX snapshot so agent-scope tools construct without awaiting the probe.
           reg.defineInstance(
             IHostEnvironment,
             {
@@ -1017,9 +984,6 @@ export class AgentTestContext {
             reg.defineInstance(ISessionInteractionService, this.createInteractionService());
             reg.defineInstance(ISessionApprovalService, this.createApprovalService());
             reg.defineInstance(ISessionQuestionService, this.createQuestionService());
-            // Note: the os `IHostFileSystem` (App scope) and `ISessionProcessRunner`
-            // are auto-registered by their service files. Tests that need a fake
-            // filesystem override it via `execEnvServices({ hostFs })`.
             reg.defineDescriptor(
               ISessionWorkspaceContext,
               new SyncDescriptor(SessionWorkspaceContextService),
@@ -1034,9 +998,6 @@ export class AgentTestContext {
         'session',
       ),
     });
-    // The harness builds scopes directly (bypassing SessionLifecycleService), so
-    // drive the Session activity kernel to `active` here — the lifecycle would
-    // do this in `announceCreated` after materialize / replay.
     this.session.accessor.get(ISessionActivityKernel).markActive();
     const workspace = this.session.accessor.get(ISessionWorkspaceContext);
 
@@ -1046,7 +1007,7 @@ export class AgentTestContext {
           (reg) => {
             reg.defineDescriptor(
               IAgentWireRecordService,
-              new SyncDescriptor(AgentWireRecordService, [{}]),
+              new SyncDescriptor(AgentWireRecordService),
             );
             reg.defineDescriptor(
               IAgentWireService,
@@ -1110,10 +1071,6 @@ export class AgentTestContext {
     const wire = this.get(IAgentWireService);
     this.disposables.push(
       wire.onEmission((e) => {
-        // `onEmission` is the record-only channel: `dispatch` persists each record
-        // through the append log and emits it here for `[wire]` snapshot capture.
-        // Op-derived facts (formerly signals) ride `IEventBus` instead — see the
-        // subscription below.
         this.captureRecord(e.record as PersistedWireRecord);
       }),
     );
@@ -1187,12 +1144,11 @@ export class AgentTestContext {
     const permissionRules = this.get(IAgentPermissionRulesService);
     const cron = this.get(ISessionCronService);
     const plan = this.get(IAgentPlanService);
-    // Force-instantiate the Eager builtin-tools registrar: its constructor
-    // consumes every `registerTool(...)` contribution, so `Read`/`Write`/
-    // `Bash`/etc. land in the per-agent registry the same way they would
-    // under a real Agent scope (see `AgentLifecycleService.create`).
     this.get(IAgentBuiltinToolsRegistrar);
+    this.get(IAgentToolDedupeService);
     this.get(IAgentExternalHooksService);
+    this.get(IAgentStepRetryService);
+    this.get(IAgentLoopContinuationService);
     const tasks = this.get(IAgentTaskService);
     const permission = this.get(IAgentPermissionGate);
     const swarm = this.get(IAgentSwarmService);
@@ -1826,8 +1782,6 @@ export class AgentTestContext {
       inputCacheRead: 0,
       inputCacheCreation: 0,
     };
-    // Persist both the context-size measurement and turn-scoped usage so resume
-    // rebuilds size and usage the same way the real loop does.
     const context = this.get(IAgentContextMemoryService);
     const contextSize = this.get(IAgentContextSizeService);
     contextSize.measured(context.get(), [], usage);
@@ -1892,10 +1846,6 @@ function createWorkspaceContextStub(
 
 function createPermissionModeService(initialMode: PermissionMode): IAgentPermissionModeService {
   let mode = initialMode;
-  const emptyHook = {
-    register: () => toDisposable(() => { }),
-    run: () => Promise.resolve(),
-  };
   return {
     _serviceBrand: undefined,
     get mode() {
@@ -1904,9 +1854,7 @@ function createPermissionModeService(initialMode: PermissionMode): IAgentPermiss
     setMode: (nextMode) => {
       mode = nextMode;
     },
-    hooks: {
-      onChanged: emptyHook,
-    } as unknown as IAgentPermissionModeService['hooks'],
+    onDidChangeMode: Event.None as IAgentPermissionModeService['onDidChangeMode'],
   };
 }
 
@@ -1933,8 +1881,8 @@ function createHostTerminalService(): IHostTerminalService {
   return {
     _serviceBrand: undefined,
     spawn: async () => ({
-      onData: Event.None as Event<string>,
-      onExit: Event.None as Event<{ exitCode: number | null }>,
+      onProcessData: Event.None as Event<string>,
+      onProcessExit: Event.None as Event<{ exitCode: number | null }>,
       write: () => { },
       resize: () => { },
       kill: () => { },
@@ -1949,12 +1897,6 @@ const failOnResumeGenerate: GenerateFn = async () => {
 function resumeStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot {
   const usage = ctx.get(IAgentUsageService);
   const permission = ctx.get(IAgentPermissionGate);
-  // Live-only state is excluded from the resume comparison: the measured
-  // context token count, the per-turn usage accumulator, runtime-added
-  // permission rules (`permission.rules.add` is persist: false), and the task
-  // list (`task.started` / `task.terminated` are persist: false — tasks
-  // restore from their own persistence, not the wire log) are intentionally
-  // not persisted (v1 parity) and reset on resume.
   const { currentTurn: _currentTurn, ...usageStatus } = usage.status();
   const { rules: _rules, ...permissionData } = permission.data();
   return {
@@ -1974,8 +1916,6 @@ function stripUndefinedFields<T extends object>(value: T): T {
 function resumeContextSnapshot(ctx: AgentTestContext) {
   const context = ctx.contextData();
   return {
-    // `tokenCount` (the measured prefix) is live-only and resets on resume;
-    // compare the history only.
     history: context.history
       .filter((message) => !isSystemReminderMessage(message))
       .map(stripMessageId),
@@ -2061,7 +2001,12 @@ function taskNotificationKey(taskId: string, status: string): string {
 function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config'] {
   const profile = ctx.get(IAgentProfileService);
   const data = profile.data();
-  const model = profile.resolveModel();
+  let model: ReturnType<IAgentProfileService['resolveModel']>;
+  try {
+    model = profile.resolveModel();
+  } catch {
+    model = undefined;
+  }
   const providerConfig =
     model === undefined ? undefined : ctx.get(IProviderService).get(model.providerName);
   return {

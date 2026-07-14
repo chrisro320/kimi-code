@@ -565,11 +565,17 @@ function readNumber(record: Record<string, unknown>, key: string): number | unde
  */
 export function reduceTranscript(records: Iterable<object>): TranscriptModelState {
   let state = TranscriptModel.initial();
+  // `ModelReducers` is mapped over the persisted op-type union (no string
+  // index signature); the fold feeds it raw persisted records whose `type`
+  // is only known to be a string, so index through a string-keyed view.
+  const reducers = TranscriptModel.reducers as Readonly<
+    Record<string, ((state: TranscriptModelState, payload: unknown) => TranscriptModelState) | undefined>
+  >;
   for (const record of records) {
     const fields = record as Record<string, unknown>;
     const type = fields['type'];
     if (typeof type !== 'string') continue;
-    const reducer = TranscriptModel.reducers[type];
+    const reducer = reducers[type];
     if (reducer === undefined) continue;
     state = reducer(state, recordToPayload(fields));
   }

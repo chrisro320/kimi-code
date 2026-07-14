@@ -92,6 +92,7 @@ const mocks = vi.hoisted(() => {
     getStatus: vi.fn(async () => ({ permission: 'auto', model: 'k2' })),
     createGoal: vi.fn(async () => snapshot({ status: 'active' })),
     getGoal: vi.fn(async () => ({ goal: snapshot({ status: 'complete' }) })),
+    getCronTasks: vi.fn(async () => ({ tasks: [] })),
     onEvent: vi.fn((handler: (event: any) => void) => {
       eventHandlers.add(handler);
       return () => eventHandlers.delete(handler);
@@ -167,6 +168,11 @@ describe('runPrompt headless goal mode', () => {
   let savedExitCode: typeof process.exitCode;
 
   beforeEach(() => {
+    // Pin the experimental engine flag off so runPrompt stays on the v1 path
+    // this suite mocks, regardless of the host environment (matches
+    // run-prompt.test.ts). With the flag on, runPrompt dispatches to the
+    // native v2 runner, which ignores these mocks and hangs the test.
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '');
     savedExitCode = process.exitCode;
     mocks.experimentalFeatures = [{ id: 'micro_compaction', enabled: true }];
     mocks.sessions = [];
@@ -175,9 +181,11 @@ describe('runPrompt headless goal mode', () => {
     mocks.session.waitForBackgroundTasksOnPrint.mockClear();
     mocks.session.getStatus.mockResolvedValue({ permission: 'auto', model: 'k2' } as never);
     mocks.session.getGoal.mockResolvedValue({ goal: snapshot({ status: 'complete' }) } as never);
+    mocks.session.getCronTasks.mockResolvedValue({ tasks: [] } as never);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     process.exitCode = savedExitCode;
   });
 

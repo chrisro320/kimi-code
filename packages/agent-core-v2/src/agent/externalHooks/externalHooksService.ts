@@ -10,8 +10,9 @@
  * of its own). The requester-side `SubagentStart` / `SubagentStop` hooks are
  * translated by the Session-scope `SessionExternalHooksService`, which observes
  * the `agentLifecycle` run slots hosted on `IAgentLifecycleService`. Appends
- * UserPromptSubmit hook results and Stop hook continuation prompts through
- * `contextMemory`, and passes the current session id from `sessionContext`
+ * UserPromptSubmit hook results through `contextMemory`, drives Stop hook
+ * continuations by enqueueing a mergeable `StepRequest` onto `loop`, and
+ * passes the current session id from `sessionContext`
  * into hook runner payloads.
  */
 
@@ -29,6 +30,7 @@ import {
 } from '#/agent/fullCompaction/fullCompaction';
 import type { CompactionResult } from '#/agent/fullCompaction/types';
 import { IAgentLoopService, type AfterStepContext } from '#/agent/loop/loop';
+import { ContinuationStepRequest } from '#/agent/loop/stepRequest';
 import {
   IAgentPermissionGate,
 } from '#/agent/permissionGate/permissionGate';
@@ -38,10 +40,9 @@ import {
 } from '#/agent/prompt/prompt';
 import type { HookResultEvent, TurnEndedEvent } from '@moonshot-ai/protocol';
 import { IEventBus } from '#/app/event/eventBus';
-import type { ExecutableToolResult } from '#/agent/tool/toolContract';
-import type { ToolDidExecuteContext, ToolWillExecuteContext } from '#/agent/tool/toolHooks';
+import type { ExecutableToolResult } from '#/tool/toolContract';
+import type { ToolDidExecuteContext, ToolBeforeExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
-import { IAgentTurnService } from '#/agent/turn/turn';
 import { toKimiErrorPayload } from '#/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
@@ -80,10 +81,6 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
     matcherValue?: string,
     signal?: AbortSignal,
   ): void {
-    // Genuinely fire-and-forget: never throw on an already-aborted signal. A
-    // cancelled tool still finalizes its result (e.g. the "manually interrupted"
-    // output), and throwing here would clobber that with a finalize-abort error.
-    // The runner mirrors the legacy fire-and-forget behavior.
     try {
       void this.runner.fireAndForgetTrigger(event, {
         matcherValue,
@@ -107,9 +104,7 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
       this.instantiation.invokeFunction((accessor) => accessor.get(IAgentPromptService)),
     );
 
-    this.registerTurnHooks(
-      this.instantiation.invokeFunction((accessor) => accessor.get(IAgentTurnService)),
-    );
+    this.registerTurnHooks();
 
     this.registerLoopHooks(
       this.instantiation.invokeFunction((accessor) => accessor.get(IAgentLoopService)),
@@ -126,7 +121,7 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
 
   private registerToolHooks(toolExecutor: IAgentToolExecutorService): void {
     this._register(
-      toolExecutor.hooks.onWillExecuteTool.register('externalHooks', async (ctx, next) => {
+      toolExecutor.hooks.onBeforeExecuteTool.register('externalHooks', async (ctx, next) => {
         const reason = await this.runPreToolUse(ctx);
         if (reason !== undefined) {
           ctx.decision = { block: true, reason };
@@ -160,7 +155,7 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
 
   private registerPromptHooks(prompt: IAgentPromptService): void {
     this._register(
-      prompt.hooks.onWillSubmitPrompt.register('externalHooks', async (ctx, next) => {
+      prompt.hooks.onBeforeSubmitPrompt.register('externalHooks', async (ctx, next) => {
         if (await this.runPromptSubmitHook(ctx)) {
           ctx.block = true;
           return;
@@ -170,7 +165,7 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
     );
   }
 
-  private registerTurnHooks(_turn: IAgentTurnService): void {
+  private registerTurnHooks(): void {
     this._register(
       this.eventBus.subscribe('turn.ended', (e) => this.notifyTurnEnded(e)),
     );
@@ -178,12 +173,12 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
 
   private registerLoopHooks(loop: IAgentLoopService): void {
     this._register(
-      loop.hooks.afterStep.register('externalHooks', async (ctx, next) => {
+      loop.hooks.onDidFinishStep.register('externalHooks', async (ctx, next) => {
         await next();
         if (
           ctx.finishReason === 'tool_calls' ||
           ctx.finishReason === 'filtered' ||
-          ctx.continue
+          loop.hasPendingRequests()
         ) {
           return;
         }
@@ -196,7 +191,13 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
             toolCalls: [],
             origin: { kind: 'system_trigger', name: 'stop_hook' },
           });
-          ctx.continue = true;
+          loop.enqueue(
+            new ContinuationStepRequest({
+              kind: 'stop_hook',
+              mergeable: true,
+              admission: 'activeOrNextTurn',
+            }),
+          );
           return;
         }
       }),
@@ -224,7 +225,7 @@ export class AgentExternalHooksService extends Disposable implements IAgentExter
     );
   }
 
-  private async runPreToolUse(ctx: ToolWillExecuteContext): Promise<string | undefined> {
+  private async runPreToolUse(ctx: ToolBeforeExecuteContext): Promise<string | undefined> {
     ctx.signal.throwIfAborted();
     const toolInput = isPlainRecord(ctx.args) ? ctx.args : {};
     const block = await this.runner.triggerBlock('PreToolUse', {

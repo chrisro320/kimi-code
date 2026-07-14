@@ -71,7 +71,6 @@ import type {
   FlagExplanation,
   PermissionMode,
   ResumedSessionState,
-  SessionEvent,
   TelemetryClient,
   TelemetryContextPatch,
   TelemetryProperties,
@@ -200,6 +199,26 @@ export class CoreHarness {
   get sessions(): ReadonlyMap<string, CoreSession> {
     return new Map([...this.activeSessions].map(([id, { session }]) => [id, session]));
   }
+
+  /**
+   * Synchronous view of the `[image]` limits for ingestion-time compression
+   * (paste). Mirrors the v1 harness's `imageLimits`: v2's config service
+   * resolves the section as env > config.toml > default on every read, so a
+   * config reload applies immediately. Before the config service is ready (or
+   * if the section is absent) the accessor yields `undefined` and
+   * `compressImageForModel` falls back to its own env/built-in default.
+   */
+  readonly imageLimits = {
+    maxEdgePx: (): number | undefined => {
+      try {
+        return this.deps.app.accessor
+          .get(IConfigService)
+          .get<{ maxEdgePx?: number } | undefined>('image')?.maxEdgePx;
+      } catch {
+        return undefined;
+      }
+    },
+  };
 
   // -- Session lifecycle ------------------------------------------------------
 

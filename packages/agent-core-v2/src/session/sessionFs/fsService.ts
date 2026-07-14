@@ -46,7 +46,7 @@ import ignore, { type Ignore } from 'ignore';
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
 import { IGitService } from '#/app/git/git';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IHostFileSystem, type HostDirEntry, type HostFileStat } from '#/os/interface/hostFileSystem';
@@ -71,11 +71,8 @@ const SEARCH_HARD_CAP = 500;
 const GREP_TIMEOUT_MS = 30_000;
 const WALK_MAX_DEPTH = 64;
 
-/** Hard cap for `fs:read` payloads (10 MiB). */
 const FS_READ_MAX_BYTES = 10 * 1024 * 1024;
-/** Sample size used to sniff binary content. */
 const FS_BINARY_SAMPLE_BYTES = 4096;
-/** Fraction of non-printable bytes above which a sample is treated as binary. */
 const FS_BINARY_NONPRINTABLE_FRACTION = 0.3;
 
 const HIDDEN_NAME_RE = /^\./;
@@ -85,11 +82,6 @@ export class SessionFsService implements ISessionFsService {
   declare readonly _serviceBrand: undefined;
 
   private readonly gitignoreCache = new Map<string, Ignore>();
-  /**
-   * Cached ripgrep resolution. `undefined` = not probed yet; `null` = probed
-   * and unavailable (use the node fallback). Mirrors the old `rgAvailable`
-   * boolean cache so we probe at most once per session.
-   */
   private rgResolution: RgResolution | null | undefined = undefined;
 
   constructor(
@@ -100,7 +92,6 @@ export class SessionFsService implements ISessionFsService {
     @IGitService private readonly git: IGitService,
   ) {}
 
-  /** Resolve a workspace-relative path (or `.`) back to an absolute path for `IHostFileSystem`. */
   private absOf(rel: string): string {
     return rel === '' || rel === '.' ? this.workspace.workDir : join(this.workspace.workDir, rel);
   }
@@ -116,7 +107,7 @@ export class SessionFsService implements ISessionFsService {
       throw mapFsError(err, req.path);
     }
     if (!topStat.isDirectory) {
-      throw new KimiError(ErrorCodes.FS_PATH_NOT_FOUND, `path not found: ${req.path}`, {
+      throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `path not found: ${req.path}`, {
         details: { path: req.path },
       });
     }
@@ -208,12 +199,12 @@ export class SessionFsService implements ISessionFsService {
       throw mapFsError(err, req.path);
     }
     if (st.isDirectory) {
-      throw new KimiError(ErrorCodes.FS_IS_DIRECTORY, `path is a directory: ${req.path}`, {
+      throw new Error2(ErrorCodes.FS_IS_DIRECTORY, `path is a directory: ${req.path}`, {
         details: { path: req.path },
       });
     }
     if (st.size > FS_READ_MAX_BYTES) {
-      throw new KimiError(
+      throw new Error2(
         ErrorCodes.FS_TOO_LARGE,
         `file too large: ${req.path} (${st.size} bytes > ${FS_READ_MAX_BYTES})`,
         { details: { path: req.path, size: st.size } },
@@ -226,7 +217,7 @@ export class SessionFsService implements ISessionFsService {
     const isBinary = detectBinary(sample);
 
     if (isBinary && req.encoding === 'utf-8') {
-      throw new KimiError(ErrorCodes.FS_IS_BINARY, `file is binary: ${req.path}`, {
+      throw new Error2(ErrorCodes.FS_IS_BINARY, `file is binary: ${req.path}`, {
         details: { path: req.path },
       });
     }
@@ -285,7 +276,7 @@ export class SessionFsService implements ISessionFsService {
           results[p] = sub.items;
           if (sub.truncated) truncatedPaths.push(p);
         } catch (err) {
-          if (err instanceof KimiError && err.code === ErrorCodes.FS_PATH_ESCAPES) throw err;
+          if (err instanceof Error2 && err.code === ErrorCodes.FS_PATH_ESCAPES) throw err;
           partialErrors[p] = toWireError(err);
         }
       }),
@@ -339,12 +330,12 @@ export class SessionFsService implements ISessionFsService {
     } catch (err) {
       const code = errnoCode(err);
       if (code === 'EEXIST') {
-        throw new KimiError(ErrorCodes.FS_ALREADY_EXISTS, `path already exists: ${req.path}`, {
+        throw new Error2(ErrorCodes.FS_ALREADY_EXISTS, `path already exists: ${req.path}`, {
           details: { path: req.path },
         });
       }
       if (code === 'ENOENT' || code === 'ENOTDIR') {
-        throw new KimiError(ErrorCodes.FS_PATH_NOT_FOUND, `parent not found: ${req.path}`, {
+        throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `parent not found: ${req.path}`, {
           details: { path: req.path },
         });
       }
@@ -376,7 +367,7 @@ export class SessionFsService implements ISessionFsService {
       throw mapFsError(err, relPath);
     }
     if (st.isDirectory) {
-      throw new KimiError(ErrorCodes.FS_IS_DIRECTORY, `path is a directory: ${relPath}`, {
+      throw new Error2(ErrorCodes.FS_IS_DIRECTORY, `path is a directory: ${relPath}`, {
         details: { path: relPath },
       });
     }
@@ -437,7 +428,7 @@ export class SessionFsService implements ISessionFsService {
       if (resolution !== null) {
         return await this.grepWithRg(req, controller.signal, startedAt, resolution.path);
       }
-      this.telemetry.track('fs_grep_node_fallback', { reason: 'rg_missing' });
+      this.telemetry.track2('fs_grep_node_fallback', { reason: 'rg_missing' });
       return await this.grepWithNode(req, controller.signal, startedAt);
     } finally {
       clearTimeout(timer);
@@ -493,10 +484,6 @@ export class SessionFsService implements ISessionFsService {
 
     const proc = await this.runner.exec([rgPath, ...args], { cwd: this.workspace.workDir });
 
-    // Stream `--json` records as they arrive so we can stop `rg` the moment a
-    // cap (`max_total_matches` / `max_files`) is hit, instead of buffering the
-    // whole output and letting rg scan the entire tree. The accumulator drops
-    // any records that were already buffered before the kill landed.
     const acc = new RgJsonAccumulator(req);
     let killed = false;
     const kill = (): void => {
@@ -527,8 +514,6 @@ export class SessionFsService implements ISessionFsService {
         }
         if (stdoutBuf.length > 0) acc.feed(stdoutBuf);
       } catch (error) {
-        // Once we kill rg (cap reached / abort / timeout) the pipe can close
-        // mid-read; that is the intended early stop, not a search failure.
         if (!(killed && isPrematureCloseError(error))) throw error;
       }
     };
@@ -540,7 +525,6 @@ export class SessionFsService implements ISessionFsService {
       try {
         void proc.dispose();
       } catch {
-        /* best-effort cleanup */
       }
     }
 
@@ -571,7 +555,7 @@ export class SessionFsService implements ISessionFsService {
     for (const rel of filePaths) {
       if (signal.aborted) {
         if (totalMatches === 0 && filesScanned === 0) {
-          throw new KimiError(ErrorCodes.FS_GREP_TIMEOUT, `grep timed out after ${Date.now() - startedAt}ms`);
+          throw new Error2(ErrorCodes.FS_GREP_TIMEOUT, `grep timed out after ${Date.now() - startedAt}ms`);
         }
         truncated = true;
         break;
@@ -640,9 +624,6 @@ export class SessionFsService implements ISessionFsService {
       const { name } = entry;
       if (name === '.git') continue;
       const childRel = rootRel === '' ? name : `${rootRel}/${name}`;
-      // Symlinks are reported as themselves and never descended into — a
-      // symlinked directory must not be treated as a traversable directory,
-      // otherwise search could escape the workspace through the link target.
       const isDir = entry.isDirectory && entry.isSymbolicLink !== true;
       if (matcher) {
         const probe = isDir ? `${childRel}/` : childRel;
@@ -670,20 +651,11 @@ export class SessionFsService implements ISessionFsService {
       const contents = await this.hostFs.readText(join(this.workspace.workDir, '.gitignore'));
       ig.add(contents);
     } catch {
-      // No .gitignore — keep the `.git/` default only.
     }
     this.gitignoreCache.set(cwd, ig);
     return ig;
   }
 
-  /**
-   * Resolve a usable `rg` once per session via the shared locator. Probes
-   * `rg --version` through the session runner (so it respects the execution
-   * environment). Returns `null` when `rg` is unavailable so the caller can
-   * fall back to the pure-node walker. The cached-binary fallback is disabled
-   * here — Grep's node fallback already covers the missing-`rg` case and
-   * keeping it off makes the fallback deterministic.
-   */
   private async resolveRg(): Promise<RgResolution | null> {
     if (this.rgResolution !== undefined) return this.rgResolution;
     const probe: RgProbe = {
@@ -699,24 +671,24 @@ export class SessionFsService implements ISessionFsService {
 
   private resolveWithin(inputPath: string): string {
     if (inputPath === '' || inputPath === '/') {
-      throw new KimiError(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (empty)`, {
+      throw new Error2(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (empty)`, {
         details: { path: inputPath, reason: 'empty' },
       });
     }
     if (isAbsolute(inputPath)) {
-      throw new KimiError(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (absolute)`, {
+      throw new Error2(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (absolute)`, {
         details: { path: inputPath, reason: 'absolute' },
       });
     }
     const segments = inputPath.split(/[/\\]+/);
     if (segments.some((s) => s === '..')) {
-      throw new KimiError(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (dotdot segment)`, {
+      throw new Error2(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" rejected (dotdot segment)`, {
         details: { path: inputPath, reason: 'dotdot_segment' },
       });
     }
     const abs = this.workspace.resolve(inputPath);
     if (!this.workspace.isWithin(abs)) {
-      throw new KimiError(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" escapes workspace`, {
+      throw new Error2(ErrorCodes.FS_PATH_ESCAPES, `path "${inputPath}" escapes workspace`, {
         details: { path: inputPath, reason: 'resolved_outside' },
       });
     }
@@ -732,13 +704,6 @@ export class SessionFsService implements ISessionFsService {
   }
 }
 
-/**
- * Incremental accumulator for ripgrep `--json` output. Fed one record per line
- * by `grepWithRg` so the caller can kill `rg` as soon as `max_total_matches`
- * or `max_files` is reached (see {@link RgJsonAccumulator.capped}). Records
- * buffered in the pipe after the cap are dropped by the same `>=` guards that
- * bound the live counts.
- */
 class RgJsonAccumulator {
   private readonly fileBuf = new Map<
     string,
@@ -751,7 +716,6 @@ class RgJsonAccumulator {
 
   constructor(private readonly req: FsGrepRequest) {}
 
-  /** `true` once either output cap has been reached and `rg` should be stopped. */
   get capped(): boolean {
     return (
       this.totalMatches >= this.req.max_total_matches || this.filesScanned >= this.req.max_files
@@ -817,7 +781,7 @@ class RgJsonAccumulator {
     let truncated = this.truncated;
     if (aborted) {
       if (this.totalMatches === 0 && this.filesScanned === 0) {
-        throw new KimiError(ErrorCodes.FS_GREP_TIMEOUT, `grep timed out after ${elapsedMs}ms`);
+        throw new Error2(ErrorCodes.FS_GREP_TIMEOUT, `grep timed out after ${elapsedMs}ms`);
       }
       truncated = true;
     }
@@ -843,10 +807,6 @@ class RgJsonAccumulator {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers shared by the list/read/stat/mkdir methods. Ported from the v1
-// `SessionFsService` so the `/api/v1` mirror stays byte-compatible.
-// ---------------------------------------------------------------------------
 
 function isHidden(name: string): boolean {
   return HIDDEN_NAME_RE.test(name) || MACOS_NOISE.has(name);
@@ -872,7 +832,6 @@ function sortChildren(
     },
     name_asc: (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name),
     name_desc: (a: { name: string }, b: { name: string }) => b.name.localeCompare(a.name),
-    // v1 does not implement mtime/size ordering; keep the same name fallback.
     mtime_desc: (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name),
     size_desc: (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name),
   }[sort];
@@ -938,8 +897,9 @@ function countLines(text: string): number {
 }
 
 function errnoCode(err: unknown): string | undefined {
-  if (typeof err === 'object' && err !== null && 'code' in err) {
-    const c = (err as { code: unknown }).code;
+  const unwrapped = unwrapErrorCause(err);
+  if (typeof unwrapped === 'object' && unwrapped !== null && 'code' in unwrapped) {
+    const c = (unwrapped as { code: unknown }).code;
     return typeof c === 'string' ? c : undefined;
   }
   return undefined;
@@ -948,7 +908,7 @@ function errnoCode(err: unknown): string | undefined {
 function mapFsError(err: unknown, inputPath: string): Error {
   const code = errnoCode(err);
   if (code === 'ENOENT' || code === 'ENOTDIR') {
-    return new KimiError(ErrorCodes.FS_PATH_NOT_FOUND, `path not found: ${inputPath}`, {
+    return new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `path not found: ${inputPath}`, {
       details: { path: inputPath },
     });
   }
@@ -956,7 +916,7 @@ function mapFsError(err: unknown, inputPath: string): Error {
 }
 
 function toWireError(err: unknown): { code: number; msg: string } {
-  if (err instanceof KimiError) {
+  if (err instanceof Error2) {
     switch (err.code) {
       case ErrorCodes.FS_PATH_NOT_FOUND:
         return { code: ErrorCode.FS_PATH_NOT_FOUND, msg: err.message };

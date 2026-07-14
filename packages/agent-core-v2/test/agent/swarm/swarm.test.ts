@@ -15,10 +15,10 @@ import { IAgentSwarmService } from '#/agent/swarm/swarm';
 import { AgentSwarmService } from '#/agent/swarm/swarmService';
 import { SwarmModel } from '#/agent/swarm/swarmOps';
 import { AgentSwarmTool, AgentSwarmToolInputSchema } from '#/agent/swarm/tools/agent-swarm';
-import type { ExecutableToolContext } from '#/agent/tool/toolContract';
+import type { ExecutableToolContext } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
@@ -32,7 +32,7 @@ import { EventBusService } from '#/app/event/eventBusService';
 
 import { stubContextMemory, stubWireRecord } from '../contextMemory/stubs';
 import { executeTool } from '../../tools/fixtures/execute-tool';
-import { stubTurnWithHooks } from '../turn/stubs';
+import { stubLoopWithHooks } from '../loop/stubs';
 
 const signal = new AbortController().signal;
 
@@ -78,7 +78,7 @@ describe('AgentSwarmService', () => {
       new SyncDescriptor(WireService, [{ logScope: 'wire', logKey: 'swarm-test' }]),
     );
     ix.set(IEventBus, new SyncDescriptor(EventBusService));
-    ix.stub(IAgentTurnService, stubTurnWithHooks());
+    ix.stub(IAgentLoopService, stubLoopWithHooks());
     ix.set(IAgentToolRegistryService, new SyncDescriptor(AgentToolRegistryService));
     ix.stub(IAgentLifecycleService, {});
     ix.stub(ISessionSwarmService, {
@@ -106,8 +106,6 @@ describe('AgentSwarmService', () => {
     expect(events).toEqual([
       { type: 'agent.status.updated', swarmMode: true },
       { type: 'agent.status.updated', swarmMode: false },
-      // Exit pops the swarm-mode enter reminder via the ContextModel
-      // cross-reducer; the service mirrors the pop as a live context.spliced.
       { type: 'context.spliced', start: 0, deleteCount: 1, messages: [] },
     ]);
   });
@@ -296,8 +294,6 @@ describe('AgentSwarmTool', () => {
   it('description states the enforced input requirements', () => {
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode());
-    // Mirrors the throws in createAgentSwarmSpecs (agent-swarm.ts): min-2-unless-resume,
-    // prompt_template required + must contain {{item}}, distinct resulting prompts.
     expect(tool.description).toContain('at least 2');
     expect(tool.description).toContain('{{item}}');
     expect(tool.description.toLowerCase()).toContain('distinct');

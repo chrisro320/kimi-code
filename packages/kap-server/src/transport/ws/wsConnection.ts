@@ -4,10 +4,13 @@
  * Multiplexes RPC `call`s and event `listen`s over one socket, carrying the
  * safety features from v1's `WsConnection` and VSCode's `ChannelServer`:
  *   - request ids + active-request table (cancel / unlisten disposes them)
- *   - heartbeat (ping / pong timeout → terminate)
  *   - schema validation (invalid frames are dropped, not fatal)
  *   - graceful cleanup on close (dispose listeners, cancel pending)
  *   - no stack traces over the wire
+ *
+ * The server never initiates a disconnect: there is no heartbeat / pong
+ * timeout — a connection stays open until the client closes it or the process
+ * shuts down.
  *
  * Captures per-connection metadata (`connectedAt`, `remoteAddress`,
  * `userAgent`, handshake state) and tracks the session ids of active
@@ -15,21 +18,18 @@
  * can list live clients in the v1 wire shape.
  */
 
-import { ErrorCodes, KimiError, type IDisposable, type Scope } from '@moonshot-ai/agent-core-v2';
+import { ErrorCodes, Error2, type IDisposable, type Scope } from '@moonshot-ai/agent-core-v2';
 import { ulid } from 'ulid';
 import type { RawData, WebSocket } from 'ws';
 
 import type { ScopeKind } from '../channel';
-import { parseServiceAction } from '../channel';
-import { dispatch, resolveScope } from '../dispatcher';
+import { dispatch, resolveScope, resolveService } from '../dispatcher';
 import { assertSerializable, mapError } from '../errors';
 import type { CredentialValidator } from '../../services/auth/credentials';
 import { resolveEventSource } from './eventMap';
 import type { CallMessage, ListenMessage, ServerMessage } from './wsProtocol';
 import { clientMessageSchema } from './wsProtocol';
 
-const DEFAULT_PING_INTERVAL_MS = 30_000;
-const DEFAULT_PONG_TIMEOUT_MS = 10_000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 
 interface PendingEntry {
@@ -47,8 +47,6 @@ export interface WsConnectionOptions {
    * When omitted, the handshake accepts any client (upgrade already ran).
    */
   readonly validateCredential?: CredentialValidator;
-  readonly pingIntervalMs?: number;
-  readonly pongTimeoutMs?: number;
   readonly callTimeoutMs?: number;
   /** ISO 8601 timestamp the socket was accepted at; defaults to `now`. */
   readonly connectedAt?: string;
@@ -66,17 +64,14 @@ export class WsConnection {
   private readonly socket: WebSocket;
   private readonly core: Scope;
   private readonly validateCredential?: CredentialValidator;
-  private readonly pingIntervalMs: number;
-  private readonly pongTimeoutMs: number;
   private readonly callTimeoutMs: number;
 
   private closed = false;
   private gotHello = false;
   private readonly pending = new Map<string, PendingEntry>();
+  private readonly eventWaits = new Map<string, Map<string, () => void>>();
   /** Active session/agent-scoped `listen`s: listen id → session id. */
   private readonly subscriptions = new Map<string, string>();
-  private pingTimer?: ReturnType<typeof setInterval>;
-  private pongTimer?: ReturnType<typeof setTimeout>;
 
   constructor(opts: WsConnectionOptions) {
     this.id = `conn_${ulid()}`;
@@ -86,16 +81,13 @@ export class WsConnection {
     this.socket = opts.socket;
     this.core = opts.core;
     this.validateCredential = opts.validateCredential;
-    this.pingIntervalMs = opts.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
-    this.pongTimeoutMs = opts.pongTimeoutMs ?? DEFAULT_PONG_TIMEOUT_MS;
     this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
 
     this.socket.on('message', (data: RawData) => this.onMessage(data));
     this.socket.on('close', () => this.onClose());
     this.socket.on('error', () => this.onClose());
 
-    this.startHeartbeat();
-    this.send({ type: 'ready', heartbeatMs: this.pingIntervalMs });
+    this.send({ type: 'ready' });
   }
 
   /** Whether the client has completed the `hello` (auth) handshake. */
@@ -133,9 +125,6 @@ export class WsConnection {
       case 'hello':
         this.onHello(msg.token);
         return;
-      case 'pong':
-        this.onPong();
-        return;
       case 'call':
         void this.onCall(msg);
         return;
@@ -147,6 +136,9 @@ export class WsConnection {
         return;
       case 'unlisten':
         this.cancel(msg.id);
+        return;
+      case 'event_result':
+        this.finishEventWait(msg.id, msg.eventId);
         return;
     }
   }
@@ -182,17 +174,6 @@ export class WsConnection {
       return;
     }
 
-    const parsed = parseServiceAction(msg.sa);
-    if (parsed === undefined) {
-      this.send({
-        type: 'error',
-        id: msg.id,
-        code: 40001,
-        msg: `expected <resource>:<action>, got '${msg.sa}'`,
-      });
-      return;
-    }
-
     // Track so `cancel` can drop the result.
     let settled = false;
     const entry: PendingEntry = {
@@ -205,7 +186,14 @@ export class WsConnection {
 
     try {
       const data = await withTimeoutWs(
-        dispatch(this.core, msg.scope as ScopeKind, scopeParams(msg), parsed, msg.arg),
+        dispatch(
+          this.core,
+          msg.scope as ScopeKind,
+          scopeParams(msg),
+          msg.service,
+          msg.method,
+          msg.arg,
+        ),
         this.callTimeoutMs,
       );
       if (settled || this.closed) return;
@@ -229,31 +217,40 @@ export class WsConnection {
       return;
     }
 
-    const source = resolveEventSource(msg.scope as ScopeKind, msg.event);
-    if (source === undefined) {
-      this.send({ type: 'error', id: msg.id, code: 40001, msg: `unknown event: ${msg.event}` });
-      return;
-    }
-
-    let scope;
-    try {
-      scope = await resolveScope(this.core, msg.scope as ScopeKind, scopeParams(msg));
-    } catch {
-      scope = undefined;
-    }
-    if (scope === undefined) {
-      this.send({
-        type: 'error',
-        id: msg.id,
-        code: 40401,
-        msg: `session ${msg.sessionId ?? ''} not found`,
-      });
-      return;
-    }
-
     let disposable: IDisposable;
     try {
-      disposable = source.subscribe(scope, (data) => this.sendEvent(msg.id, data));
+      if (msg.service !== undefined) {
+        const service = await resolveService(
+          this.core,
+          msg.scope as ScopeKind,
+          scopeParams(msg),
+          msg.service,
+        );
+        const event = (service as Record<string, unknown>)[msg.event];
+        if (typeof event !== 'function' || !/^on[A-Z]/.test(msg.event)) {
+          throw new Error2(
+            ErrorCodes.REQUEST_INVALID,
+            `event not found: ${msg.service}.${msg.event}`,
+          );
+        }
+        disposable = (event as (listener: (data: unknown) => void) => IDisposable).call(
+          service,
+          (data) => this.sendEvent(msg.id, msg.event, data),
+        );
+      } else {
+        const source = resolveEventSource(msg.scope as ScopeKind, msg.event);
+        if (source === undefined) {
+          throw new Error2(ErrorCodes.REQUEST_INVALID, `unknown event: ${msg.event}`);
+        }
+        const scope = await resolveScope(this.core, msg.scope as ScopeKind, scopeParams(msg));
+        if (scope === undefined) {
+          throw new Error2(
+            ErrorCodes.SESSION_NOT_FOUND,
+            `session ${msg.sessionId ?? ''} not found`,
+          );
+        }
+        disposable = source.subscribe(scope, (data) => this.sendEvent(msg.id, msg.event, data));
+      }
     } catch (error) {
       const env = mapError(error, msg.id);
       this.send({ type: 'error', id: msg.id, code: env.code, msg: env.msg });
@@ -270,24 +267,70 @@ export class WsConnection {
         this.subscriptions.delete(msg.id);
       },
     });
+    this.send({ type: 'listen_result', id: msg.id });
   }
 
   private cancel(id: string): void {
     const entry = this.pending.get(id);
     if (entry !== undefined) entry.cancel();
+    this.cancelEventWaits(id);
+  }
+
+  private finishEventWait(id: string, eventId: string): void {
+    this.eventWaits.get(id)?.get(eventId)?.();
+  }
+
+  private cancelEventWaits(id: string): void {
+    const waits = this.eventWaits.get(id);
+    if (waits === undefined) return;
+    for (const [eventId, finish] of waits) {
+      this.send({ type: 'event_cancel', id, eventId });
+      finish();
+    }
   }
 
   // -------------------------------------------------------------------------
   // Outbound
   // -------------------------------------------------------------------------
 
-  private sendEvent(id: string, data: unknown): void {
+  private sendEvent(id: string, event: string, data: unknown): void {
     if (this.closed) return;
+    const isWill = /^onWill[A-Z]/.test(event);
     try {
-      const wire = assertSerializable(data);
-      this.send({ type: 'event', id, data: wire });
-    } catch {
-      // Non-serializable event payload — drop, don't tear down the connection.
+      const wire = assertSerializable(
+        isWill && data !== null && typeof data === 'object'
+          ? Object.fromEntries(
+              Object.entries(data as Record<string, unknown>).filter(
+                ([key]) => key !== 'waitUntil' && key !== 'signal',
+              ),
+            )
+          : data,
+      );
+      if (!isWill) {
+        this.send({ type: 'event', id, data: wire });
+        return;
+      }
+      const eventId = ulid();
+      const promise = new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          const waits = this.eventWaits.get(id);
+          waits?.delete(eventId);
+          if (waits?.size === 0) this.eventWaits.delete(id);
+          resolve();
+        };
+        const waits = this.eventWaits.get(id) ?? new Map<string, () => void>();
+        waits.set(eventId, finish);
+        this.eventWaits.set(id, waits);
+      });
+      (data as { waitUntil(promise: Promise<unknown>): void }).waitUntil(promise);
+      this.send({ type: 'event', id, eventId, data: wire });
+    } catch (error) {
+      const env = mapError(error, id);
+      this.send({ type: 'error', id, code: env.code, msg: env.msg });
+      this.cancel(id);
     }
   }
 
@@ -297,35 +340,6 @@ export class WsConnection {
       this.socket.send(JSON.stringify(msg));
     } catch {
       // best-effort
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Heartbeat
-  // -------------------------------------------------------------------------
-
-  private startHeartbeat(): void {
-    this.pingTimer = setInterval(() => {
-      if (this.closed) return;
-      this.send({ type: 'ping' });
-      if (this.pongTimer !== undefined) clearTimeout(this.pongTimer);
-      this.pongTimer = setTimeout(() => {
-        if (this.closed) return;
-        try {
-          this.socket.terminate();
-        } catch {
-          // ignore
-        }
-      }, this.pongTimeoutMs);
-      this.pongTimer.unref?.();
-    }, this.pingIntervalMs);
-    this.pingTimer.unref?.();
-  }
-
-  private onPong(): void {
-    if (this.pongTimer !== undefined) {
-      clearTimeout(this.pongTimer);
-      this.pongTimer = undefined;
     }
   }
 
@@ -345,8 +359,6 @@ export class WsConnection {
   private onClose(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.pingTimer !== undefined) clearInterval(this.pingTimer);
-    if (this.pongTimer !== undefined) clearTimeout(this.pongTimer);
     for (const entry of this.pending.values()) {
       try {
         entry.cancel();
@@ -355,6 +367,10 @@ export class WsConnection {
       }
     }
     this.pending.clear();
+    for (const waits of this.eventWaits.values()) {
+      for (const finish of waits.values()) finish();
+    }
+    this.eventWaits.clear();
   }
 }
 
@@ -377,7 +393,7 @@ async function withTimeoutWs<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(
-      () => reject(new KimiError(ErrorCodes.INTERNAL, `call timed out after ${ms}ms`)),
+      () => reject(new Error2(ErrorCodes.INTERNAL, `call timed out after ${ms}ms`)),
       ms,
     );
     timer.unref?.();

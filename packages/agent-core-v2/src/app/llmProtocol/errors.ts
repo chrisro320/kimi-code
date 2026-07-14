@@ -1,8 +1,5 @@
 import type { FinishReason } from './provider';
 
-/**
- * Base error for all chat provider errors.
- */
 export class ChatProviderError extends Error {
   constructor(message: string) {
     super(message);
@@ -10,9 +7,6 @@ export class ChatProviderError extends Error {
   }
 }
 
-/**
- * Network-level connection failure.
- */
 export class APIConnectionError extends ChatProviderError {
   constructor(message: string) {
     super(message);
@@ -20,9 +14,6 @@ export class APIConnectionError extends ChatProviderError {
   }
 }
 
-/**
- * Request timed out.
- */
 export class APITimeoutError extends ChatProviderError {
   constructor(message: string) {
     super(message);
@@ -30,46 +21,68 @@ export class APITimeoutError extends ChatProviderError {
   }
 }
 
-/**
- * HTTP status error from the API.
- */
 export class APIStatusError extends ChatProviderError {
   readonly statusCode: number;
   readonly requestId: string | null;
+  readonly retryAfterMs: number | null;
 
-  constructor(statusCode: number, message: string, requestId?: string | null) {
+  constructor(
+    statusCode: number,
+    message: string,
+    requestId?: string | null,
+    retryAfterMs?: number | null,
+  ) {
     super(message);
     this.name = 'APIStatusError';
     this.statusCode = statusCode;
     this.requestId = requestId ?? null;
+    this.retryAfterMs = retryAfterMs ?? null;
   }
 }
 
-/**
- * HTTP status error that specifically means the request exceeded the model
- * context window.
- */
 export class APIContextOverflowError extends APIStatusError {
-  constructor(statusCode: number, message: string, requestId?: string | null) {
-    super(statusCode, message, requestId);
+  constructor(
+    statusCode: number,
+    message: string,
+    requestId?: string | null,
+    retryAfterMs?: number | null,
+  ) {
+    super(statusCode, message, requestId, retryAfterMs);
     this.name = 'APIContextOverflowError';
   }
 }
 
-/**
- * HTTP status error that specifically means the provider rate-limited the
- * request.
- */
+export class APIRequestTooLargeError extends APIStatusError {
+  constructor(
+    statusCode: number,
+    message: string,
+    requestId?: string | null,
+    retryAfterMs?: number | null,
+  ) {
+    super(statusCode, message, requestId, retryAfterMs);
+    this.name = 'APIRequestTooLargeError';
+  }
+}
+
 export class APIProviderRateLimitError extends APIStatusError {
-  constructor(message: string, requestId?: string | null) {
-    super(429, message, requestId);
+  constructor(message: string, requestId?: string | null, retryAfterMs?: number | null) {
+    super(429, message, requestId, retryAfterMs);
     this.name = 'APIProviderRateLimitError';
   }
 }
 
-/**
- * The API returned an empty response (no content, no tool calls).
- */
+export class APIProviderOverloadedError extends APIStatusError {
+  constructor(
+    statusCode: number,
+    message: string,
+    requestId?: string | null,
+    retryAfterMs?: number | null,
+  ) {
+    super(statusCode, message, requestId, retryAfterMs);
+    this.name = 'APIProviderOverloadedError';
+  }
+}
+
 export class APIEmptyResponseError extends ChatProviderError {
   readonly finishReason: FinishReason | null;
   readonly rawFinishReason: string | null;
@@ -88,6 +101,40 @@ export class APIEmptyResponseError extends ChatProviderError {
   }
 }
 
+const IMAGE_FORMAT_PROVIDER_MESSAGE_PATTERNS = [
+  /unsupported media type for base64 image/,
+  /invalid data url for image/,
+] as const;
+
+const IMAGE_FORMAT_STATUS_MESSAGE_PATTERNS = [
+  /unsupported image (?:url|format|type)/,
+  /does not represent a valid image/,
+  /could not (?:process|decode) (?:the |input )?image/,
+  /unable to process (?:the |input )?image/,
+  /failed to decode (?:the )?image/,
+  /invalid image(?: data| type| format)?/,
+] as const;
+
+const MEDIA_TYPE_FIELD_PATTERN = /(?:media|mime)_?type/;
+
+export function isImageFormatError(error: unknown): boolean {
+  if (error instanceof APIStatusError) {
+    if (error instanceof APIContextOverflowError) return false;
+    if (error instanceof APIRequestTooLargeError) return false;
+    if (error.statusCode !== 400) return false;
+    const lowerMessage = error.message.toLowerCase();
+    return (
+      IMAGE_FORMAT_STATUS_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage)) ||
+      (MEDIA_TYPE_FIELD_PATTERN.test(lowerMessage) && lowerMessage.includes('image'))
+    );
+  }
+  if (error instanceof ChatProviderError) {
+    const lowerMessage = error.message.toLowerCase();
+    return IMAGE_FORMAT_PROVIDER_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+  }
+  return false;
+}
+
 export function isRetryableGenerateError(error: unknown): boolean {
   if (error instanceof APIConnectionError || error instanceof APITimeoutError) {
     return true;
@@ -95,7 +142,13 @@ export function isRetryableGenerateError(error: unknown): boolean {
   if (error instanceof APIEmptyResponseError) {
     return true;
   }
-  return error instanceof APIStatusError && [429, 500, 502, 503, 504].includes(error.statusCode);
+  if (error instanceof APIProviderOverloadedError) {
+    return true;
+  }
+  if (error instanceof APIStatusError) {
+    return [408, 409, 429, 500, 502, 503, 504, 529].includes(error.statusCode);
+  }
+  return error instanceof ChatProviderError && !isImageFormatError(error);
 }
 
 const NETWORK_RE = /network|connection|connect|disconnect|terminated/i;
@@ -132,6 +185,18 @@ const PROVIDER_RATE_LIMIT_MESSAGE_PATTERNS = [
   /rate-limited/,
 ] as const;
 
+const PROVIDER_OVERLOAD_MESSAGE_PATTERNS = [/overload/] as const;
+
+const REQUEST_TOO_LARGE_MESSAGE_PATTERNS = [
+  /request exceeds the maximum size/,
+  /request entity too large/,
+  /request_too_large/,
+  /exceeds? the maximum allowed number of bytes/,
+  /payload too large/,
+  /content too large/,
+  /request (?:body )?too large/,
+] as const;
+
 export function isContextOverflowErrorCode(code: string | null | undefined): boolean {
   return code === 'context_length_exceeded';
 }
@@ -140,20 +205,53 @@ export function normalizeAPIStatusError(
   statusCode: number,
   message: string,
   requestId?: string | null,
+  retryAfterMs?: number | null,
 ): APIStatusError {
   if (statusCode === 429) {
-    return new APIProviderRateLimitError(message, requestId);
+    return new APIProviderRateLimitError(message, requestId, retryAfterMs);
   }
   if (isContextOverflowStatusError(statusCode, message)) {
-    return new APIContextOverflowError(statusCode, message, requestId);
+    return new APIContextOverflowError(statusCode, message, requestId, retryAfterMs);
   }
-  return new APIStatusError(statusCode, message, requestId);
+  if (isRequestTooLargeStatusError(statusCode, message)) {
+    return new APIRequestTooLargeError(statusCode, message, requestId, retryAfterMs);
+  }
+  if (isProviderOverloadStatusError(statusCode, message)) {
+    return new APIProviderOverloadedError(statusCode, message, requestId, retryAfterMs);
+  }
+  return new APIStatusError(statusCode, message, requestId, retryAfterMs);
+}
+
+export function parseRetryAfterMs(headers: unknown): number | null {
+  const raw =
+    headers !== null &&
+    typeof headers === 'object' &&
+    typeof (headers as { get?: unknown }).get === 'function'
+      ? (headers as { get(name: string): string | null }).get('retry-after')
+      : null;
+  if (raw === null || raw === undefined) return null;
+  const seconds = Number.parseInt(raw, 10);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return seconds * 1000;
 }
 
 export function isContextOverflowStatusError(statusCode: number, message: string): boolean {
   if (statusCode !== 400 && statusCode !== 413 && statusCode !== 422) return false;
   const lowerMessage = message.toLowerCase();
   return CONTEXT_OVERFLOW_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
+export function isProviderOverloadStatusError(statusCode: number, message: string): boolean {
+  if (statusCode === 529) return true;
+  if (statusCode !== 500 && statusCode !== 503) return false;
+  const lowerMessage = message.toLowerCase();
+  return PROVIDER_OVERLOAD_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
+export function isRequestTooLargeStatusError(statusCode: number, message: string): boolean {
+  if (statusCode !== 413) return false;
+  const lowerMessage = message.toLowerCase();
+  return REQUEST_TOO_LARGE_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
 }
 
 const TOOL_EXCHANGE_ADJACENCY_MESSAGE_PATTERNS = [

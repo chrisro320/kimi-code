@@ -2,14 +2,14 @@
  * `toolExecutor` domain (L3) — Agent-scope tool execution contract.
  *
  * Defines the public execution surface for provider tool calls, will/did
- * execution hooks, tool-call result settlement, and preflight description
- * extension points. Bound at Agent scope.
+ * execution hooks, tool-call result settlement, duplicate-call tagging for
+ * telemetry, and preflight description extension points. Bound at Agent scope.
  */
 
 import { createDecorator } from '#/_base/di/instantiation';
 import type { IDisposable } from '#/_base/di/lifecycle';
-import type { ToolResult } from '#/agent/tool/toolContract';
-import type { ToolDidExecuteContext, ToolWillExecuteContext } from '#/agent/tool/toolHooks';
+import type { ToolResult } from '#/tool/toolContract';
+import type { ToolDidExecuteContext, ToolBeforeExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import type { ToolCall } from '#/app/llmProtocol/message';
 import type { OrderedHookSlot } from '#/hooks';
 
@@ -34,26 +34,21 @@ export interface ToolExecutionResult {
 export type MissingToolDescriber = (toolName: string) => string | undefined;
 export type UnavailableToolDescriber = (toolName: string) => string | undefined;
 
+export type ToolCallDupType = 'same_step' | 'cross_step';
+
 export interface IAgentToolExecutorService {
   readonly _serviceBrand: undefined;
 
   execute(calls: ToolCall[], options: ToolExecutorExecuteOptions): AsyncIterable<ToolExecutionResult>;
 
   readonly hooks: {
-    readonly onWillExecuteTool: OrderedHookSlot<ToolWillExecuteContext>;
+    readonly onBeforeExecuteTool: OrderedHookSlot<ToolBeforeExecuteContext>;
     readonly onDidExecuteTool: OrderedHookSlot<ToolDidExecuteContext>;
   };
 
-  /**
-   * Single-slot hook for the "registered but currently unavailable" preflight
-   * message. A second registration overwrites the first; disposing the returned
-   * handle clears the slot only when the same describer still occupies it.
-   */
+  recordDupType(toolCallId: string, dupType: ToolCallDupType): void;
+
   registerUnavailableToolDescriber(describer: UnavailableToolDescriber): IDisposable;
-  /**
-   * Single-slot hook for the tool-miss preflight message (e.g. a loaded tool
-   * whose server dropped). Same single-slot semantics as above.
-   */
   registerMissingToolDescriber(describer: MissingToolDescriber): IDisposable;
 }
 

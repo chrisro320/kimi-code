@@ -13,9 +13,7 @@ export interface Workspace {
   readonly id: string;
   readonly root: string;
   readonly name: string;
-  /** Epoch ms when the workspace was first registered in this process. */
   readonly createdAt: number;
-  /** Epoch ms of the most recent `createOrTouch` (open) for this workspace. */
   readonly lastOpenedAt: number;
 }
 

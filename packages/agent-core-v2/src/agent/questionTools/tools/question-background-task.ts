@@ -10,12 +10,13 @@
  * `AgentTaskService` terminal notifications.
  */
 
+import { isAbortError } from '#/_base/utils/abort';
 import {
   type AgentTask,
   type AgentTaskInfoBase,
   type AgentTaskSink,
 } from '#/agent/task/types';
-import type { ExecutableToolResult } from '#/agent/tool/toolContract';
+import type { ExecutableToolResult } from '#/tool/toolContract';
 
 export interface QuestionTaskInfo extends AgentTaskInfoBase {
   readonly kind: 'question';
@@ -27,10 +28,6 @@ declare module '#/agent/task/types' {
   interface AgentTaskInfoByKind {
     readonly question: QuestionTaskInfo;
   }
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError';
 }
 
 function errorMessage(err: unknown): string {

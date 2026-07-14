@@ -29,9 +29,10 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { IOAuthService } from '#/app/auth/auth';
 import { IConfigService } from '#/app/config/config';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import { IEventService } from '#/app/event/event';
 import { IModelService, MODELS_SECTION, type ModelAlias } from '#/app/model/model';
+import { IHostRequestHeaders } from '#/app/model/hostRequestHeaders';
 import {
   IProviderService,
   type OAuthRef,
@@ -53,11 +54,6 @@ const THINKING_SECTION = 'thinking';
 export class ModelCatalogService implements IModelCatalogService {
   declare readonly _serviceBrand: undefined;
 
-  /**
-   * Serializes refresh runs so a scheduled refresh and a manual one (or two
-   * manual ones with different options) never race on reading/patching the
-   * persisted config. Mirrors v1's `_refreshChain`.
-   */
   private refreshChain: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -66,6 +62,7 @@ export class ModelCatalogService implements IModelCatalogService {
     @IConfigService private readonly config: IConfigService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IEventService private readonly events: IEventService,
+    @IHostRequestHeaders private readonly hostRequestHeaders: IHostRequestHeaders,
   ) {}
 
   async listModels(): Promise<readonly ModelCatalogItem[]> {
@@ -87,7 +84,7 @@ export class ModelCatalogService implements IModelCatalogService {
   async getProvider(providerId: string): Promise<ProviderCatalogItem> {
     const provider = this.providerService.get(providerId);
     if (provider === undefined) {
-      throw new KimiError(ErrorCodes.PROVIDER_NOT_FOUND, `provider ${providerId} does not exist`);
+      throw new Error2(ErrorCodes.PROVIDER_NOT_FOUND, `provider ${providerId} does not exist`);
     }
     const models = this.modelService.list();
     const globalDefaultModel = this.config.get<string>(DEFAULT_MODEL_SECTION);
@@ -97,7 +94,7 @@ export class ModelCatalogService implements IModelCatalogService {
   async setDefaultModel(modelId: string): Promise<SetDefaultModelResponse> {
     const alias = this.modelService.get(modelId);
     if (alias === undefined) {
-      throw new KimiError(ErrorCodes.MODEL_NOT_FOUND, `model ${modelId} does not exist`);
+      throw new Error2(ErrorCodes.MODEL_NOT_FOUND, `model ${modelId} does not exist`);
     }
     await this.config.set(DEFAULT_MODEL_SECTION, modelId);
     const updatedAlias = this.modelService.get(modelId) ?? alias;
@@ -125,7 +122,7 @@ export class ModelCatalogService implements IModelCatalogService {
     if (options.providerId !== undefined) {
       const provider = this.providerService.get(options.providerId);
       if (provider === undefined) {
-        throw new KimiError(
+        throw new Error2(
           ErrorCodes.PROVIDER_NOT_FOUND,
           `provider ${options.providerId} does not exist`,
         );
@@ -138,8 +135,6 @@ export class ModelCatalogService implements IModelCatalogService {
     });
     const response = mapRefreshResult(result);
     if (response.changed.length > 0) {
-      // Broadcasts to every connected client via the core event bus →
-      // `SessionEventBroadcaster` (any provider kind, not just OAuth).
       this.events.publish({ type: 'event.model_catalog.changed', payload: response });
     }
     return response;
@@ -151,14 +146,10 @@ export class ModelCatalogService implements IModelCatalogService {
       removeProvider: (providerId) => this.removeProviderForRefresh(providerId),
       setConfig: (patch) => this.applyRefreshPatch(patch),
       resolveOAuthToken: (providerName, oauthRef) => this.resolveOAuthToken(providerName, oauthRef),
+      userAgent: this.hostRequestHeaders.headers['User-Agent'],
     };
   }
 
-  /**
-   * User-layer config shape the orchestrator diffs and edits. Mirrors
-   * `OAuthService.readUserConfigShape` so both refresh paths edit the same
-   * persisted user config (never env/memory-overlaid effective values).
-   */
   private readUserConfigShape(): ManagedKimiConfigShape {
     const providers =
       this.config.inspect<Record<string, ProviderConfig>>(PROVIDERS_SECTION).userValue ?? {};

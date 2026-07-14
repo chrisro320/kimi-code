@@ -15,9 +15,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const ULID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const BODY_PREVIEW_LIMIT = 500;
 
-// Server-transport auth failure envelope code (see packages/server
-// middleware/auth.ts AUTH_ERROR_CODE). Distinct from provider-auth 40110–40113.
-const SERVER_AUTH_UNAUTHORIZED_CODE = 40101;
+// Server-transport auth failure envelope code (see kap-server
+// src/middleware/auth.ts AUTH_ERROR_CODE). Distinct from provider-auth 40110–40113.
+export const SERVER_AUTH_UNAUTHORIZED_CODE = 40101;
 
 export interface DaemonHttpClientIdentity {
   readonly clientId: string;

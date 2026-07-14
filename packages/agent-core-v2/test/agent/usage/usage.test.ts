@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
-import { IAgentUsageService, type UsageStatus } from '#/agent/usage/usage';
+import {
+  IAgentUsageService,
+  type UsageRecordedContext,
+  type UsageStatus,
+} from '#/agent/usage/usage';
 import { AgentUsageService } from '#/agent/usage/usageService';
 import { UsageModel } from '#/agent/usage/usageOps';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
@@ -131,6 +135,25 @@ describe('AgentUsageService (wire-backed)', () => {
     ]);
   });
 
+  it('fires onDidRecord with the live usage context', () => {
+    const contexts: UsageRecordedContext[] = [];
+    disposables.add(
+      svc.onDidRecord((ctx) => {
+        contexts.push(ctx);
+      }),
+    );
+
+    svc.record('model-a', a1, { type: 'turn', turnId: 7, step: 2 });
+
+    expect(contexts).toEqual([
+      {
+        model: 'model-a',
+        usage: a1,
+        source: { type: 'turn', turnId: 7, step: 2 },
+      },
+    ]);
+  });
+
   it('dispatch persists flat { type, model, usage, usageScope } records (no payload key)', async () => {
     svc.record('model-a', a1);
 
@@ -194,8 +217,6 @@ describe('AgentUsageService (wire-backed)', () => {
       context: { type: 'turn', turnId: 9, step: 3 },
     });
 
-    // The model carries only the per-model totals; the per-turn accumulator is
-    // live-only service state and never comes back from replay.
     expect(fresh.getModel(UsageModel)).toEqual({
       byModel: { 'model-a': a1 },
     });

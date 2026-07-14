@@ -14,6 +14,7 @@ import { mcpResultToExecutableOutput } from '../../mcp/output';
 import { isMcpToolName, qualifyMcpToolName } from '../../mcp/tool-naming';
 import type { MCPClient, MCPToolDefinition } from '../../mcp/types';
 import { DEFAULT_AGENT_PROFILES } from '../../profile';
+import { resolveSubagentTimeoutMs } from '../../session/subagent-host';
 import { extendWorkspaceWithSkillRoots } from '../../skill';
 import { fingerprint } from '../llm-request-logger';
 import * as b from '../../tools/builtin';
@@ -317,6 +318,8 @@ export class ToolManager {
               return mcpResultToExecutableOutput(result, qualified, {
                 originalsDir: this.agent.mediaOriginalsDir,
                 telemetry: this.agent.telemetry,
+                // Resolved per call so a config reload applies immediately.
+                maxImageEdgePx: this.agent.imageLimits?.maxEdgePx(),
               });
             },
           };
@@ -698,6 +701,8 @@ export class ToolManager {
         new b.GlobTool(kaos, workspace, this.agent.telemetry),
         new b.BashTool(kaos, cwd, background, {
           allowBackground,
+          autoBackgroundOnTimeout:
+            this.agent.kimiConfig?.background?.bashAutoBackgroundOnTimeout ?? true,
         }),
         (modelCapabilities.image_in || modelCapabilities.video_in) &&
           new b.ReadMediaFileTool(
@@ -706,6 +711,7 @@ export class ToolManager {
             modelCapabilities,
             videoUploader,
             this.agent.telemetry,
+            this.agent.imageLimits,
           ),
         new b.EnterPlanModeTool(this.agent),
         new b.ExitPlanModeTool(this.agent),
@@ -739,10 +745,15 @@ export class ToolManager {
             {
               allowBackground,
               log: this.agent.log,
+              subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
             },
           ),
         this.agent.subagentHost &&
-          new b.AgentSwarmTool(this.agent.subagentHost, this.agent.swarmMode),
+          new b.AgentSwarmTool(
+            this.agent.subagentHost,
+            this.agent.swarmMode,
+            resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
+          ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),
       ]

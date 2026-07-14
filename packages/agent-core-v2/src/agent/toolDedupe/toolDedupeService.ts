@@ -1,8 +1,8 @@
 /**
  * `toolDedupe` domain (L4) — `IAgentToolDedupeService` implementation.
  *
- * Self-wiring plugin: its constructor registers `loop` beforeStep/afterStep
- * hooks and `toolExecutor` onWillExecuteTool/onDidExecuteTool hooks to drive
+ * Self-wiring plugin: its constructor registers `loop` onWillBeginStep/onDidFinishStep
+ * hooks and `toolExecutor` onBeforeExecuteTool/onDidExecuteTool hooks to drive
  * same-step suppression and cross-step repeat reminders, and reports repeat
  * telemetry through `telemetry`. Constructed eagerly at Agent scope so the
  * hooks are installed without any other service injecting it.
@@ -16,38 +16,34 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { canonicalTelemetryArgs } from '#/_base/utils/canonical-args';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { IAgentToolExecutorService, type ToolCallDupType } from '#/agent/toolExecutor/toolExecutor';
 import type { ContentPart } from '#/app/llmProtocol/message';
 import { IAgentToolDedupeService, type ToolDedupeResult } from './toolDedupe';
 
 const REMINDER_TEXT_1 =
   '\n\n<system-reminder>\n' +
-  'You are repeating the exact same tool call with identical parameters.' +
-  ' Please carefully analyze the previous result. If the task is not yet complete,' +
-  ' try a different method or parameters instead of repeating the same call.' +
+  'The same tool call has been repeated several times in a row. ' +
+  'Before making your next call, write one sentence stating what new information you expect it to produce. ' +
+  'Then act on that sentence: if it names something this result does not already give you, choose the action that best provides it; otherwise, continue with the evidence you already have.' +
   '\n</system-reminder>';
 
-function makeReminderText2(toolName: string, repeatCount: number, args: unknown): string {
-  const argsStr = canonicalTelemetryArgs(args);
+function makeReminderText2(repeatCount: number): string {
   return (
     '\n\n<system-reminder>\n' +
-    'You have repeatedly called the same tool with identical parameters many times.\n' +
-    'Repeated tool call detected:\n' +
-    `- tool: ${toolName}\n` +
-    `- repeated_times: ${String(repeatCount)}\n` +
-    `- arguments: ${argsStr}\n` +
-    'The previous repeated calls did not make progress. Do not call this exact same tool with the exact same arguments again.\n' +
-    'Carefully inspect the latest tool result and choose a different next action, different parameters, or finish the task if enough evidence has been gathered.' +
+    `The same tool call has now been issued ${String(repeatCount)} times in a row. ` +
+    'Choose exactly one of the following and state your choice before acting:\n' +
+    '(1) Falsification check: run the cheapest test that could conclusively disprove your current approach, if such a test exists.\n' +
+    '(2) Missing input: tell the user precisely what information or decision you need to proceed, and ask for it.\n' +
+    '(3) Conclude: deliver your best result based on the evidence already gathered, listing anything that remains uncertain.' +
     '\n</system-reminder>'
   );
 }
 
 const REMINDER_TEXT_3 =
   '\n\n<system-reminder>\n' +
-  'You are stuck in a dead end and have repeatedly made the same function call without progress.\n' +
-  'Stop all function calls immediately. Do not call any tool in your next response.\n' +
-  'In analysis, review the current execution state and identify why progress is blocked.\n' +
-  'Then return a text-only summary to the user that reports the current problem, what has already been tried, and what information or decision is needed next.' +
+  'Write your final response now, without any further tool calls. ' +
+  'Cover: the current blocker, each approach you have tried and what it established, and the specific information or decision you need from the user to unblock progress. ' +
+  'Text only.' +
   '\n</system-reminder>';
 
 const REPEAT_REMINDER_1_START = 3;
@@ -79,8 +75,6 @@ function argsHash(args: unknown): string {
 interface CheckedToolCall {
   readonly syntheticResult: ToolDedupeResult | null;
 }
-
-type ToolCallDupType = 'same_step' | 'cross_step';
 
 function appendReminder(result: ToolDedupeResult, reminderText: string): ToolDedupeResult {
   const output = result.output;
@@ -124,18 +118,18 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
   constructor(
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentLoopService loop: IAgentLoopService,
-    @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
+    @IAgentToolExecutorService private readonly toolExecutor: IAgentToolExecutorService,
   ) {
     super();
-    loop.hooks.beforeStep.register('toolDedupe', async (ctx, next) => {
+    loop.hooks.onWillBeginStep.register('toolDedupe', async (ctx, next) => {
       this.beginStep(ctx.turnId, ctx.step);
       await next();
     });
-    loop.hooks.afterStep.register('toolDedupe', async (_ctx, next) => {
+    loop.hooks.onDidFinishStep.register('toolDedupe', async (_ctx, next) => {
       this.endStep();
       await next();
     });
-    toolExecutor.hooks.onWillExecuteTool.register('toolDedupe', async (ctx, next) => {
+    toolExecutor.hooks.onBeforeExecuteTool.register('toolDedupe', async (ctx, next) => {
       const checked = this.checkToolCall(ctx.toolCall.id, ctx.toolCall.name, ctx.args);
       if (checked.syntheticResult !== null) {
         ctx.decision = { syntheticResult: checked.syntheticResult };
@@ -218,7 +212,8 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
     args: unknown,
     dupType: ToolCallDupType,
   ): void {
-    this.telemetry.track('tool_call_dedupe_detected', {
+    this.toolExecutor.recordDupType(toolCallId, dupType);
+    this.telemetry.track2('tool_call_dedup_detected', {
       turn_id: this.activeTurnId ?? 0,
       step_no: this.activeStep,
       tool_call_id: toolCallId,
@@ -268,7 +263,7 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
       finalResult = appendReminder(result, REMINDER_TEXT_3);
       action = 'r3';
     } else if (streak >= REPEAT_REMINDER_2_START) {
-      finalResult = appendReminder(result, makeReminderText2(toolName, streak, args));
+      finalResult = appendReminder(result, makeReminderText2(streak));
       action = 'r2';
     } else if (streak >= REPEAT_REMINDER_1_START) {
       finalResult = appendReminder(result, REMINDER_TEXT_1);
@@ -276,7 +271,7 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
     }
 
     if (streak >= 2) {
-      this.telemetry.track('tool_call_repeat', {
+      this.telemetry.track2('tool_call_repeat', {
         tool_name: toolName,
         repeat_count: streak,
         action,

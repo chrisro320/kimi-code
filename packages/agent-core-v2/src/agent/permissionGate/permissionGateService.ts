@@ -17,7 +17,7 @@ import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type {
   AuthorizeToolExecutionResult,
   ResolvedToolExecutionHookContext,
-} from '#/agent/tool/toolHooks';
+} from '#/agent/toolExecutor/toolHooks';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -65,7 +65,7 @@ export class AgentPermissionGate extends Disposable implements IAgentPermissionG
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
   ) {
     super();
-    toolExecutor.hooks.onWillExecuteTool.register('permission', async (ctx, next) => {
+    toolExecutor.hooks.onBeforeExecuteTool.register('permission', async (ctx, next) => {
       const result = await this.authorize(ctx);
       if (result !== undefined) {
         ctx.decision = result;
@@ -89,7 +89,7 @@ export class AgentPermissionGate extends Disposable implements IAgentPermissionG
   ): Promise<AuthorizeToolExecutionResult | undefined> {
     const evaluation = await this.policyService.evaluate(context);
     if (evaluation === undefined) return undefined;
-    this.telemetry.track('permission_policy_decision', {
+    this.telemetry.track2('permission_policy_decision', {
       policy_name: evaluation.policyName,
       tool_name: context.toolCall.name,
       permission_mode: this.modeService.mode,
@@ -172,7 +172,7 @@ export class AgentPermissionGate extends Disposable implements IAgentPermissionG
         context.signal.throwIfAborted();
       } catch (error) {
         if (isUserCancellation(error)) throw error;
-        this.telemetry.track('permission_approval_result', {
+        this.telemetry.track2('permission_approval_result', {
           policy_name: policyName ?? null,
           tool_name: name,
           permission_mode: this.modeService.mode,
@@ -215,7 +215,7 @@ export class AgentPermissionGate extends Disposable implements IAgentPermissionG
       sessionApprovalRule,
       result: response,
     });
-    this.telemetry.track('permission_approval_result', {
+    this.telemetry.track2('permission_approval_result', {
       policy_name: policyName ?? null,
       tool_name: name,
       permission_mode: this.modeService.mode,
@@ -276,11 +276,6 @@ export class AgentPermissionGate extends Disposable implements IAgentPermissionG
     return message;
   }
 
-  /**
-   * Rejection messages for agents driven by another agent (no user in the
-   * loop) carry extra "don't retry / don't bypass" guidance. Heuristic: any
-   * agent other than `main` is treated as worker-driven.
-   */
   private usesWorkerRejectionGuidance(): boolean {
     return this.scopeContext.agentId !== 'main';
   }

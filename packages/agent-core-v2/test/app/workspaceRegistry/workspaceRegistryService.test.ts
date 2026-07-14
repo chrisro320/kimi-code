@@ -12,6 +12,9 @@ import {
 } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { ErrorCodes, Error2 } from '#/errors';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
@@ -61,6 +64,7 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     const host = createScopedTestHost([
       stubPair(IFileSystemStorageService, fileStorage),
       stubPair(IAtomicDocumentStore, new JsonAtomicDocumentStore(fileStorage)),
+      stubPair(IHostFileSystem, new HostFileSystem()),
     ]);
     currentHost = host;
     return host.app.accessor.get(IWorkspaceRegistry);
@@ -109,7 +113,6 @@ describe('WorkspaceRegistryService (file-backed)', () => {
         sessionDir: join(homeDir, 'sessions', encodeWorkDirKey(workB), 's2'),
         workDir: workB,
       },
-      // Duplicate workDir → still one workspace.
       {
         sessionId: 's3',
         sessionDir: join(homeDir, 'sessions', encodeWorkDirKey(workA), 's3'),
@@ -125,7 +128,6 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     expect(a?.root).toBe(workA);
     expect(a?.name).toBe('proj-a');
 
-    // The rebuild is persisted, so a fresh instance reads workspaces.json.
     expect((await restart().list()).map((w) => w.id).toSorted()).toEqual(
       list.map((w) => w.id).toSorted(),
     );
@@ -168,11 +170,34 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     expect(await restart().get(created.id)).toBeUndefined();
   });
 
+  it('rejects createOrTouch when the root directory does not exist', async () => {
+    const missing = join(homeDir, 'never-created');
+    await expect(build().createOrTouch(missing)).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
+    expect(await build().list()).toEqual([]);
+  });
+
+  it('rejects createOrTouch when the root is not a directory', async () => {
+    const file = join(homeDir, 'a-file.txt');
+    await fsp.writeFile(file, 'hi', 'utf8');
+    await expect(build().createOrTouch(file)).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
+    expect(await build().list()).toEqual([]);
+  });
+
+  it('rejects createOrTouch when a parent of the root is not a directory', async () => {
+    const file = join(homeDir, 'a-file.txt');
+    await fsp.writeFile(file, 'hi', 'utf8');
+    await expect(build().createOrTouch(join(file, 'child'))).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
+  });
+
   it('collapses duplicate registered entries for the same root, preferring the canonical id', async () => {
     const root = join(homeDir, 'dup');
     const canonicalId = encodeWorkDirKey(root);
-    // Simulate a registry that also holds a legacy id for the same folder (e.g.
-    // one produced by an older encodeWorkDirKey).
     const legacyId = 'wd_duplegacy_deadbeef0000';
     const entry: PersistedWorkspaceEntry = {
       root,
@@ -181,7 +206,6 @@ describe('WorkspaceRegistryService (file-backed)', () => {
       last_opened_at: '2026-01-01T00:00:00.000Z',
     };
     await writeWorkspacesJson({
-      // Legacy first so the canonical entry must actively replace it.
       [legacyId]: entry,
       [canonicalId]: entry,
     });

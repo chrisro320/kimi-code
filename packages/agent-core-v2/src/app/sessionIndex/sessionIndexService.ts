@@ -22,7 +22,10 @@
  * backfill on a cold miss. Writes (create / archive / metadata update) keep the
  * read model warm via `SessionMetadata`; new sessions that have not been
  * mirrored yet are simply a cold miss and backfilled on first read. The legacy
- * N+1 path remains as the flag-off fallback.
+ * N+1 path remains as the flag-off fallback — and as the runtime fallback when
+ * the query store reports `storage.locked` (another process holds the writer
+ * lock): the first lock warns once and disables the read model for the rest of
+ * the process lifetime.
  *
  * This is the local-deployment backend of `ISessionIndex`; a server deployment
  * would substitute a database-backed `DbSessionIndex`. Bound at App scope.
@@ -30,11 +33,12 @@
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IFlagService } from '#/app/flag/flag';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IQueryStore, type Page } from '#/persistence/interface/queryStore';
-import { IFileSystemStorageService } from '#/persistence/interface/storage';
+import { IFileSystemStorageService, isStorageError, StorageErrors } from '#/persistence/interface/storage';
 
 import {
   CHILD_SESSION_KIND,
@@ -50,7 +54,6 @@ const META_KEY = 'state.json';
 const SESSION_COLLECTION = 'session';
 const READ_MODEL_FLAG = 'persistence_minidb_readmodel';
 
-/** Accept both v2 (epoch ms number) and v1 (ISO string) timestamps. */
 function parseTime(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -60,13 +63,6 @@ function parseTime(value: unknown): number {
   return 0;
 }
 
-/**
- * Recover the session's frozen working directory from its metadata document.
- *
- * Precedence: v2 `cwd` → v1 `workDir` → older v1 `custom.cwd`. Returns
- * `undefined` only for documents predating every cwd record; the edge falls
- * back to the workspace registry for those.
- */
 function recoverCwd(meta: Record<string, unknown>): string | undefined {
   if (typeof meta['cwd'] === 'string' && meta['cwd'].length > 0) return meta['cwd'];
   if (typeof meta['workDir'] === 'string' && meta['workDir'].length > 0) {
@@ -80,12 +76,6 @@ function recoverCwd(meta: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-/**
- * Whether a summary is a direct child of `parentId` per the v1 child markers:
- * `custom.parent_session_id === parentId` AND `custom.child_session_kind ===
- * 'child'`. A missing/blank `parentId` (no `childOf` filter) matches every
- * summary. A spoofed kind is ignored.
- */
 function matchesChildOf(summary: SessionSummary, parentId: string | undefined): boolean {
   if (parentId === undefined) return true;
   const custom = summary.custom;
@@ -99,6 +89,7 @@ export class FileSessionIndex implements ISessionIndex {
   declare readonly _serviceBrand: undefined;
 
   private indexesEnsured = false;
+  private readModelDisabled = false;
 
   constructor(
     @IBootstrapService private readonly bootstrap: IBootstrapService,
@@ -106,14 +97,51 @@ export class FileSessionIndex implements ISessionIndex {
     @IAtomicDocumentStore private readonly docs: IAtomicDocumentStore,
     @IQueryStore private readonly queryStore: IQueryStore,
     @IFlagService private readonly flags: IFlagService,
+    @ILogService private readonly log: ILogService,
   ) {}
 
   async list(query: SessionListQuery): Promise<Page<SessionSummary>> {
     if (!this.readModelEnabled()) return this.listLegacy(query);
+    return this.withReadModelFallback(
+      () => this.listFromReadModel(query),
+      () => this.listLegacy(query),
+    );
+  }
 
+  async get(id: string): Promise<SessionSummary | undefined> {
+    if (!this.readModelEnabled()) return this.getLegacy(id);
+    return this.withReadModelFallback(
+      () => this.getFromReadModel(id),
+      () => this.getLegacy(id),
+    );
+  }
+
+  async countActive(workspaceId: string): Promise<number> {
+    if (!this.readModelEnabled()) return this.countActiveLegacy(workspaceId);
+    return this.withReadModelFallback(
+      () => this.countActiveFromReadModel(workspaceId),
+      () => this.countActiveLegacy(workspaceId),
+    );
+  }
+
+  private async withReadModelFallback<T>(op: () => Promise<T>, legacy: () => Promise<T>): Promise<T> {
+    if (this.readModelDisabled) return legacy();
+    try {
+      return await op();
+    } catch (error) {
+      if (!isStorageError(error, StorageErrors.codes.STORAGE_LOCKED)) throw error;
+      this.readModelDisabled = true;
+      this.log.warn('query-store locked by another process; disabling read model', {
+        error: String(error),
+      });
+      return legacy();
+    }
+  }
+
+  private async listFromReadModel(query: SessionListQuery): Promise<Page<SessionSummary>> {
     await this.ensureIndexes();
     if (query.sessionId !== undefined) {
-      const summary = await this.get(query.sessionId);
+      const summary = await this.getFromReadModel(query.sessionId);
       const items =
         summary !== undefined && (!summary.archived || query.includeArchived === true)
           ? [summary]
@@ -137,12 +165,9 @@ export class FileSessionIndex implements ISessionIndex {
     return { items: query.limit !== undefined ? items.slice(0, query.limit) : items };
   }
 
-  async get(id: string): Promise<SessionSummary | undefined> {
-    if (!this.readModelEnabled()) return this.getLegacy(id);
-
+  private async getFromReadModel(id: string): Promise<SessionSummary | undefined> {
     const cached = await this.queryStore.get<SessionSummary>(SESSION_COLLECTION, id);
     if (cached !== undefined) return cached;
-    // Cold miss: locate the session on disk, then read + backfill.
     for (const workspaceId of await this.listWorkspaceIds()) {
       if (!(await this.hasSession(workspaceId, id))) continue;
       return this.getCachedSummary(workspaceId, id);
@@ -150,9 +175,7 @@ export class FileSessionIndex implements ISessionIndex {
     return undefined;
   }
 
-  async countActive(workspaceId: string): Promise<number> {
-    if (!this.readModelEnabled()) return this.countActiveLegacy(workspaceId);
-
+  private async countActiveFromReadModel(workspaceId: string): Promise<number> {
     let count = 0;
     for (const sessionId of await this.listSessionIds(workspaceId)) {
       const summary = await this.getCachedSummary(workspaceId, sessionId);
@@ -181,10 +204,6 @@ export class FileSessionIndex implements ISessionIndex {
     this.indexesEnsured = true;
   }
 
-  /**
-   * Resolve a summary through the read model, backfilling from disk on a cold
-   * miss. The read model is keyed by session id (globally unique).
-   */
   private async getCachedSummary(
     workspaceId: string,
     sessionId: string,
@@ -272,10 +291,6 @@ export class FileSessionIndex implements ISessionIndex {
     sessionId: string,
   ): Promise<SessionSummary | undefined> {
     const base = `${this.sessionsScope}/${workspaceId}/${sessionId}`;
-    // `<sessionDir>/state.json` is the unified metadata document: v2 (tagged
-    // `version: 2`) and v1 (no version) both write here. Fall back to the
-    // legacy v2 `session-meta/` subdir for sessions written before the layouts
-    // were unified.
     const meta = (await this.readMeta(base)) ?? (await this.readMeta(`${base}/${META_SCOPE}`));
     if (meta === undefined) return undefined;
     const rawCustom = meta['custom'];

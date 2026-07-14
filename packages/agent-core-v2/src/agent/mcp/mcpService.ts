@@ -33,8 +33,6 @@ declare module '#/app/event/eventBus' {
   interface DomainEventMap {
     'mcp.server.status': McpServerStatusEvent;
     'tool.list.updated': ToolListUpdatedEvent;
-    // Canonical home of the shared `error` event (`IEventBus`); other domains
-    // (`turn`, `fullCompaction`) reuse it via interface-merge, not re-declared.
     error: ErrorEvent;
   }
 }
@@ -62,7 +60,7 @@ export class AgentMcpService extends Disposable implements IAgentMcpService {
     super();
     this.attachMcpTools();
     this._register(
-      toolExecutor.hooks.onWillExecuteTool.register(
+      toolExecutor.hooks.onBeforeExecuteTool.register(
         'mcp-wait-for-initial-load',
         async (ctx, next) => {
           await this.waitForInitialLoad(ctx.signal);

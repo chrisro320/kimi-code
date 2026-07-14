@@ -9,6 +9,10 @@ export function abortError(message = 'Aborted'): Error {
   return error;
 }
 
+export function isAbortError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
 export class UserCancellationError extends Error {
   readonly userCancelled = true;
 

@@ -27,8 +27,9 @@ import type {
   GoalSnapshot,
   GoalStatus,
   GoalToolResult,
-  IAgentPromptLegacyService,
+  IAgentMcpService,
   IAgentRPCService,
+  ISessionApprovalService,
   ModelCapability,
   PermissionData,
   PermissionMode,
@@ -38,7 +39,10 @@ import type {
   PluginMcpServerInfo,
   PluginSummary,
   PromptOrigin,
+  QuestionAnswerMethod,
   QuestionAnswers,
+  QuestionRequest as CoreQuestionRequest,
+  QuestionResult,
   ResolvedConfig,
   SessionMeta,
   ShellEnvironment,
@@ -51,20 +55,6 @@ import type {
   UsageStatus,
   WorkspaceAdditionalDirsResult,
 } from '@moonshot-ai/agent-core-v2';
-// These were deep-imported from v2 internal paths; the v2 barrel now re-exports
-// them (`SessionApprovalRequest`/`SessionApprovalResponse` are barrel aliases
-// that dodge the `permissionPolicy` name collision, question types are exported
-// directly, and the two MCP types are type-only re-exports). The local
-// `Core*`/`ApprovalResponse` names are kept for TUI compatibility.
-import type {
-  McpServerEntry,
-  McpServerInfo,
-  QuestionAnswerMethod,
-  QuestionRequest as CoreQuestionRequest,
-  QuestionResult,
-  SessionApprovalRequest as CoreApprovalRequest,
-  SessionApprovalResponse as ApprovalResponse,
-} from '@moonshot-ai/agent-core-v2';
 
 // v1 config-file schema shapes the TUI reads. Sourced from the node-sdk (which
 // re-exports the agent-core v1 schema verbatim) instead of hand-copied here.
@@ -74,6 +64,21 @@ import type {
   ProviderConfig,
   ProviderType,
 } from '@moonshot-ai/kimi-code-sdk';
+
+// The v2 barrel no longer re-exports the approval/MCP payload types directly
+// (only the service interfaces), so the facade derives them from those
+// interfaces — same shapes, no drift. The local `Core*`/`ApprovalResponse`
+// names are kept for TUI compatibility.
+
+/** v2 `session/approval` request, derived from the barrel-exported service. */
+type CoreApprovalRequest = Parameters<ISessionApprovalService['request']>[0];
+/** v2 `session/approval` response, derived from the barrel-exported service. */
+type ApprovalResponse = Awaited<ReturnType<ISessionApprovalService['request']>>;
+
+/** One MCP server entry as reported by `IAgentMcpService.list()`. */
+type McpServerEntry = ReturnType<IAgentMcpService['list']>[number];
+/** RPC-level MCP server info — structurally the same row as `McpServerEntry`. */
+type McpServerInfo = McpServerEntry;
 
 export type {
   AgentReplayRecord,
@@ -267,12 +272,31 @@ export interface ResumedSessionState {
 // Types appended for the `CoreSession` facade (session.ts).
 
 /**
- * v1-protocol content parts accepted by `CoreSession.prompt` / `steer` —
- * derived from `IAgentPromptLegacyService.submit` so the facade cannot drift
- * from the service it forwards to.
+ * v1-protocol content parts accepted by `CoreSession.prompt` / `steer` — the
+ * same shapes the wire protocol's `PromptSubmission.content` carries (text,
+ * image, video with url/base64 sources). The facade converts them to
+ * v2-native `ContentPart`s at the `IAgentPromptService` boundary
+ * (`toCoreParts` in session.ts), mirroring kap-server's `contentToCoreParts`.
+ * Declared locally because `@moonshot-ai/protocol` is not a dependency of
+ * this app.
  */
-export type PromptContent = Parameters<IAgentPromptLegacyService['submit']>[0]['content'];
-export type PromptPart = PromptContent[number];
+export interface PromptMediaSourceUrl {
+  readonly kind: 'url';
+  readonly url: string;
+}
+
+export interface PromptMediaSourceBase64 {
+  readonly kind: 'base64';
+  readonly media_type: string;
+  readonly data: string;
+}
+
+export type PromptPart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly source: PromptMediaSourceUrl | PromptMediaSourceBase64 }
+  | { readonly type: 'video'; readonly source: PromptMediaSourceUrl | PromptMediaSourceBase64 };
+
+export type PromptContent = readonly PromptPart[];
 
 /** Result of `CoreSession.runShellCommand` (the v2 RPC facade's shape). */
 export type ShellCommandResult = Awaited<ReturnType<IAgentRPCService['runShellCommand']>>;

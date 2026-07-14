@@ -5,8 +5,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
-import { ToolAccesses } from '#/agent/tool/tool-access';
-import type { ExecutableTool, ExecutableToolContext, ExecutableToolResult, ToolExecution, ToolResult, ToolUpdate } from '#/agent/tool/toolContract';
+import {
+  ToolAccesses,
+  type ExecutableTool,
+  type ExecutableToolContext,
+  type ExecutableToolResult,
+  type ToolExecution,
+  type ToolResult,
+  type ToolUpdate,
+} from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { AgentToolExecutorService, parseToolCallArguments } from '#/agent/toolExecutor/toolExecutorService';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
@@ -104,6 +111,37 @@ describe('AgentToolExecutorService', () => {
         outcome: 'success',
         duration_ms: expect.any(Number),
       }),
+    });
+  });
+
+  it('tags tool_call telemetry with recorded dup types, defaulting to normal', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    let tag = true;
+    executor.hooks.onBeforeExecuteTool.register('test-dup-tag', async (ctx, next) => {
+      if (tag && ctx.toolCall.id === 'call_dup') executor.recordDupType('call_dup', 'cross_step');
+      await next();
+    });
+
+    await execute([
+      toolCall('call_ok', 'echo', { text: 'a' }),
+      toolCall('call_dup', 'echo', { text: 'b' }),
+    ]);
+
+    expect(telemetryEvents).toContainEqual({
+      event: 'tool_call',
+      properties: expect.objectContaining({ tool_call_id: 'call_ok', dup_type: 'normal' }),
+    });
+    expect(telemetryEvents).toContainEqual({
+      event: 'tool_call',
+      properties: expect.objectContaining({ tool_call_id: 'call_dup', dup_type: 'cross_step' }),
+    });
+
+    tag = false;
+    await execute([toolCall('call_dup', 'echo', { text: 'c' })]);
+    expect(telemetryEvents).toContainEqual({
+      event: 'tool_call',
+      properties: expect.objectContaining({ tool_call_id: 'call_dup', dup_type: 'normal' }),
     });
   });
 
@@ -280,8 +318,6 @@ describe('AgentToolExecutorService', () => {
       },
     ]);
 
-    // The trailing comma is NOT repaired: args fall back to `{}`, which fails
-    // schema validation, so the tool is never invoked.
     expect(tool.calls).toEqual([]);
     expect(results).toEqual([
       expect.objectContaining({
@@ -311,10 +347,10 @@ describe('AgentToolExecutorService', () => {
     expect(toolCallEvent?.args).toEqual({ x: 1 });
   });
 
-  it('onWillExecuteTool block records an error result without invoking execute', async () => {
+  it('onBeforeExecuteTool block records an error result without invoking execute', async () => {
     const tool = new TestTool('echo');
     registry.register(tool);
-    executor.hooks.onWillExecuteTool.register('block', async (ctx) => {
+    executor.hooks.onBeforeExecuteTool.register('block', async (ctx) => {
       ctx.decision = { block: true, reason: 'forbidden' };
     });
 
@@ -329,12 +365,12 @@ describe('AgentToolExecutorService', () => {
     expect(tool.calls).toEqual([]);
   });
 
-  it('onWillExecuteTool syntheticResult bypasses execute', async () => {
+  it('onBeforeExecuteTool syntheticResult bypasses execute', async () => {
     const first = new TestTool('first');
     const second = new TestTool('second');
     registry.register(first);
     registry.register(second);
-    executor.hooks.onWillExecuteTool.register('synthetic', async (ctx) => {
+    executor.hooks.onBeforeExecuteTool.register('synthetic', async (ctx) => {
       if (ctx.toolCall.id !== 'call_first') return;
       ctx.decision = {
         syntheticResult: {
@@ -662,8 +698,6 @@ describe('AgentToolExecutorService', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.output).toBe('ack');
-    // The executor only threads `delivery`; an L4 hook (AgentPromptService) is
-    // what consumes and strips it — that hook is not registered in this unit test.
     expect(results[0]!.delivery).toMatchObject({
       kind: 'steer',
       message: { content: [{ type: 'text', text: 'injected' }] },

@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 
-import type { ITelemetryService } from '#/app/telemetry/telemetry';
+import type { ITelemetryService, TelemetryProperties } from '#/app/telemetry/telemetry';
 import { convertMCPContentBlock, mcpResultToExecutableOutput } from '#/agent/mcp/output';
 import { createMcpTool } from '#/agent/mcp/tools/mcp';
 import type { MCPClient, MCPContentBlock, MCPToolResult } from '#/agent/mcp/types';
-import type { ToolExecution } from '#/agent/tool/toolContract';
-import { sniffImageDimensions } from '#/_base/tools/support/file-type';
+import type { ToolExecution } from '#/tool/toolContract';
+import { sniffImageDimensions } from '#/agent/media/file-type';
 
 const MCP_OUTPUT_TRUNCATED_TEXT =
   '\n\n[Output truncated: exceeded 100000 character limit. ' +
@@ -40,6 +40,7 @@ function recordingTelemetry(records: TelemetryRecord[]): ITelemetryService {
     track(event, properties) {
       records.push({ event, properties });
     },
+    track2: (event, properties) => telemetry.track(event, properties as TelemetryProperties),
     withContext: () => telemetry,
     setContext: () => {},
     addAppender: () => ({ dispose: () => {} }),
@@ -175,6 +176,20 @@ describe('convertMCPContentBlock', () => {
       type: 'image_url',
       imageUrl: { url: 'https://example.com/img.png' },
     });
+  });
+
+  test('replaces a resource_link whose declared image format is unsupported with a notice', () => {
+    const block = assertValidMcpBlock({
+      type: 'resource_link',
+      name: 'img.avif',
+      uri: 'https://example.com/img.avif',
+      mimeType: 'image/avif',
+    });
+    const part = convertMCPContentBlock(block);
+    expect(part?.type).toBe('text');
+    const text = (part as { text: string }).text;
+    expect(text).toContain('image/avif');
+    expect(text).toContain('https://example.com/img.avif');
   });
 
   test('converts resource_link with audio/* mimeType to AudioURLPart with URL', () => {

@@ -1,3 +1,11 @@
+/**
+ * `contextInjector` domain (L4) — `IAgentContextInjectorService` implementation.
+ *
+ * Injects registered context providers through `loop` and `systemReminder`,
+ * tracks their positions in `contextMemory` through `eventBus`, and reconciles
+ * those positions after `wire` restoration. Bound at Agent scope.
+ */
+
 import { Disposable, toDisposable } from "#/_base/di/lifecycle";
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
@@ -7,6 +15,8 @@ import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IEventBus } from '#/app/event/eventBus';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentWireService } from '#/wire/tokens';
+import type { IWireService } from '#/wire/wireService';
 import {
   IAgentContextInjectorService,
   type ContextInjectionProvider,
@@ -15,7 +25,6 @@ import {
 interface ContextInjectionEntry {
   readonly provider: ContextInjectionProvider;
   readonly name: string;
-  /** Live positions of this variant's injection messages, ascending. */
   readonly positions: number[];
 }
 
@@ -29,10 +38,11 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
     @IAgentLoopService loopService: IAgentLoopService,
     @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
     @IEventBus private readonly eventBus: IEventBus,
+    @IAgentWireService wire: IWireService,
   ) {
     super();
     this._register(
-      loopService.hooks.beforeStep.register('context-injector', async (_ctx, next) => {
+      loopService.hooks.onWillBeginStep.register('context-injector', async (_ctx, next) => {
         await next();
         await this.inject();
       }),
@@ -42,7 +52,12 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
         this.isNewTurn = true;
       }),
     );
-    this.eventBus.subscribe('context.spliced', (e) => this.handleSplice(e));
+    this._register(this.eventBus.subscribe('context.spliced', (e) => {
+      this.handleSplice(e);
+    }));
+    this._register(wire.onRestored(() => {
+      this.resyncPositions();
+    }));
   }
 
   register(
@@ -94,6 +109,15 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
     }
   }
 
+  private resyncPositions(): void {
+    const history = this.context.get();
+    for (const entry of this.entries) {
+      const found = findInjections(history, entry.name);
+      entry.positions.length = 0;
+      entry.positions.push(...found);
+    }
+  }
+
   private handleSplice(splice: ContextSplice): void {
     let insertedInjections: Map<string, number[]> | undefined;
     splice.messages.forEach((message, offset) => {
@@ -114,9 +138,6 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
       const adopted = insertedInjections?.get(entry.name) ?? [];
       const positions = entry.positions;
       if (adopted.length === 0 && positions.length === 0) continue;
-      // Mirror the context splice onto the ascending positions array: shift
-      // survivors past the deleted range, then replace the deleted segment
-      // with the adopted insertions (which land in [start, start + inserted)).
       let lo = 0;
       while (lo < positions.length && positions[lo]! < splice.start) lo++;
       let hi = lo;

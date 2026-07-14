@@ -4,9 +4,7 @@ import { IOAuthService } from '#/app/auth/auth';
 import { IConfigService } from '#/app/config/config';
 import { IModelResolver } from '#/app/model/modelResolver';
 import { createAppScope } from '#/_base/di/scope';
-import { ErrorCodes, KimiError } from '#/errors';
-// Load every domain barrel so all App-scope services (provider / platform /
-// model / protocol / config registry) are registered before we build a scope.
+import { ErrorCodes, Error2 } from '#/errors';
 import '#/index';
 
 function stubConfig(sections: Record<string, unknown>): IConfigService {
@@ -78,7 +76,7 @@ describe('ModelResolver', () => {
   it('throws CONFIG_INVALID for an unknown model', () => {
     const resolver = createResolver(baseSections());
     expect(() => resolver.resolve('does-not-exist')).toThrowError(
-      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<KimiError>),
+      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<Error2>),
     );
   });
 
@@ -106,7 +104,7 @@ describe('ModelResolver', () => {
       }),
     );
     expect(() => resolver.resolve('orphan')).toThrowError(
-      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<KimiError>),
+      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<Error2>),
     );
   });
 
@@ -120,7 +118,7 @@ describe('ModelResolver', () => {
       }),
     );
     expect(() => resolver.resolve('ghost')).toThrowError(
-      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<KimiError>),
+      expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID } as Partial<Error2>),
     );
   });
 });

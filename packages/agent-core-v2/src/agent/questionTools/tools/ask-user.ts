@@ -10,18 +10,18 @@
 import { z } from 'zod';
 
 import { CoreErrors } from '#/_base/errors/codes';
-import { KimiError } from '#/_base/errors/errors';
-import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
-import { isAbortError } from '#/agent/loop/errors';
+import { Error2 } from '#/_base/errors/errors';
+import { toInputJsonSchema } from '#/tool/input-schema';
+import { isAbortError } from '#/_base/utils/abort';
 import { IAgentTaskService } from '#/agent/task/task';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import type { TelemetryProperties } from '#/app/telemetry/telemetry';
+import type { QuestionAnsweredEvent } from '#/app/telemetry/events';
 import type {
   BuiltinTool,
   ExecutableToolContext,
   ExecutableToolResult,
   ToolExecution,
-} from '#/agent/tool/toolContract';
+} from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
 import { ISessionQuestionService } from '#/session/question/question';
@@ -34,7 +34,6 @@ import type {
 import DESCRIPTION from './ask-user.md?raw';
 import { QuestionBackgroundTask } from './question-background-task';
 
-// ── Input schema ─────────────────────────────────────────────────────
 
 const QuestionOptionSchema = z.object({
   label: z
@@ -76,13 +75,6 @@ export interface AskUserQuestionInput {
 const QUESTION_UNIQUENESS_MESSAGE =
   'Question texts must be unique across questions, and option labels must be unique within each question.';
 
-/**
- * Answers are keyed by question text with option labels as values, so both
- * must be unambiguous: question texts unique across the call, option labels
- * unique within their question. Runtime tool-arg validation is AJV against
- * the JSON Schema (where zod refinements are unrepresentable), so the
- * execution path re-runs this check itself.
- */
 function questionUniquenessError(
   questions: AskUserQuestionInput['questions'],
 ): string | null {
@@ -133,7 +125,6 @@ const QUESTION_DISMISSED_MESSAGE = 'User dismissed the question without answerin
 const QUESTION_UNSUPPORTED_FAILURE_MESSAGE =
   'The connected client does not support interactive questions. Do NOT call this tool again. Ask the user directly in your text response instead.';
 
-// ── Implementation ───────────────────────────────────────────────────
 
 export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
   readonly name = 'AskUserQuestion' as const;
@@ -164,8 +155,6 @@ export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
     args: AskUserQuestionInput,
     { toolCallId, signal, turnId }: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
-    // AJV (the runtime arg validator) cannot express the uniqueness refine,
-    // so enforce it here before any UI interaction or task registration.
     const uniquenessError = questionUniquenessError(args.questions);
     if (uniquenessError !== null) {
       return { isError: true, output: uniquenessError };
@@ -256,15 +245,13 @@ export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
 
       const normalized = normalizeQuestionResult(result);
       if (normalized === null || Object.keys(normalized.answers).length === 0) {
-        this.telemetry.track('question_dismissed');
+        this.telemetry.track2('question_dismissed');
         return dismissedQuestionResult();
       }
 
-      const properties: TelemetryProperties =
-        normalized.method !== undefined
-          ? { answered: Object.keys(normalized.answers).length, method: normalized.method }
-          : { answered: Object.keys(normalized.answers).length };
-      this.telemetry.track('question_answered', properties);
+      const properties: QuestionAnsweredEvent = { answered: Object.keys(normalized.answers).length };
+      if (normalized.method !== undefined) properties.method = normalized.method;
+      this.telemetry.track2('question_answered', properties);
       return {
         isError: false,
         output: JSON.stringify({ answers: normalized.answers }),
@@ -272,7 +259,7 @@ export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
     } catch (error) {
       if (isAbortError(error) || signal.aborted) throw error;
 
-      if (error instanceof KimiError && error.code === CoreErrors.codes.NOT_IMPLEMENTED) {
+      if (error instanceof Error2 && error.code === CoreErrors.codes.NOT_IMPLEMENTED) {
         return {
           isError: true,
           output: QUESTION_UNSUPPORTED_FAILURE_MESSAGE,

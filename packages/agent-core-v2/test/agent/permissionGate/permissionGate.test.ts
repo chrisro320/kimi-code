@@ -10,7 +10,7 @@ import {
   type ApprovalResponse,
 } from '#/session/approval/approval';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
-import type { ResolvedToolExecutionHookContext } from '#/agent/tool/toolHooks';
+import type { ResolvedToolExecutionHookContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentPermissionGate } from '#/agent/permissionGate/permissionGate';
 import { AgentPermissionGate } from '#/agent/permissionGate/permissionGateService';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -30,7 +30,6 @@ import { ISessionContext, makeSessionContext } from '#/session/sessionContext/se
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
-import { IAgentTurnService } from '#/agent/turn/turn';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import type { ToolCall } from '#/app/llmProtocol/message';
 import { IEventBus } from '#/app/event/eventBus';
@@ -42,7 +41,7 @@ import { stubPermissionModeService } from '../permissionMode/stubs';
 import { stubPermissionPolicyService } from '../permissionPolicy/stubs';
 import { stubPermissionRulesService } from '../permissionRules/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
-import { stubTurnWithHooks, stubToolExecutor } from '../turn/stubs';
+import { stubToolExecutor } from '../loop/stubs';
 
 function makeContext(
   toolName: string,
@@ -103,7 +102,7 @@ describe('AgentPermissionGate', () => {
           stubPermissionPolicyService(() => policyResult),
         );
         reg.defineInstance(IEventBus, eventBus);
-        reg.definePartialInstance(ITelemetryService, { track: () => {} });
+        reg.definePartialInstance(ITelemetryService, { track: () => {}, track2: () => {} });
         reg.defineInstance(ISessionApprovalService, stubApprovalService(() => approvalResponse));
         reg.defineInstance(ISessionContext, makeSessionContext({
           sessionId: 'test-session',
@@ -127,7 +126,6 @@ describe('AgentPermissionGate', () => {
           workDir: '/workspace',
           additionalDirs: [],
         });
-        reg.defineInstance(IAgentTurnService, stubTurnWithHooks());
         reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
         reg.define(IEventBus, EventBusService);
         reg.defineInstance(IAgentScopeContext, {

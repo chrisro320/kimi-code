@@ -57,6 +57,7 @@ const MAIN_AGENT_TRANSCRIPT_FRAMES = new Set<string>([
   'tool.result',
   'agent.status.updated',
   'prompt.completed',
+  'error',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -100,9 +101,9 @@ interface SessionState {
   // Assistant message tracking
   currentAssistantMsgId: string | undefined;
 
-  // Per-turn accumulated stream lengths — aligned against the wire `offset`
-  // on volatile delta frames (v2 sync protocol) to skip duplicates and
-  // detect gaps after a snapshot seed.
+  // Per-step accumulated stream lengths — aligned against the (step-relative)
+  // wire `offset` on volatile delta frames (v2 sync protocol) to skip
+  // duplicates and detect gaps after a snapshot seed.
   turnTextLen: number;
   turnThinkLen: number;
 
@@ -499,10 +500,12 @@ export interface AgentProjector {
   /**
    * Seed mid-turn state from a session snapshot's `in_flight_turn` (v2 sync):
    * resets per-session state, builds the partially-streamed assistant message
-   * (thinking + text + running tool_use parts), and returns the AppEvents
-   * (sessionStatusChanged + messageCreated) to apply to the reducer. Live
-   * deltas continue appending; their wire `offset` aligns against the seeded
-   * text so the overlap window around snapshot/subscribe is exact.
+   * (thinking + text + running tool_use parts — the current step only; earlier
+   * steps arrive via the transcript), and returns the messageCreated AppEvent
+   * to apply to the reducer. Live deltas continue appending; their wire
+   * `offset` aligns against the seeded text so the overlap window around
+   * snapshot/subscribe is exact. Session status is NOT seeded here — the REST
+   * snapshot's `session.status` is the authoritative value.
    */
   seedInFlight(sessionId: string, turn: AppInFlightTurn): AppEvent[];
   /** Reset all per-session state (call on re-subscribe / resync). */
@@ -571,19 +574,11 @@ export function createAgentProjector(): AgentProjector {
       s.toolStartTimes.set(tool.toolCallId, Date.now());
     }
     s.currentAssistantMsgId = msg.id;
+    // Seeded step-relative lengths; the next turn.step.started resets both.
     s.turnTextLen = turn.assistantText.length;
     s.turnThinkLen = turn.thinkingText.length;
 
-    return [
-      {
-        type: 'sessionStatusChanged',
-        sessionId,
-        status: 'running',
-        previousStatus: 'idle',
-        currentPromptId: promptId,
-      },
-      { type: 'messageCreated', message: cloneMessage(msg) },
-    ];
+    return [{ type: 'messageCreated', message: cloneMessage(msg) }];
   }
 
   function project(
@@ -701,23 +696,21 @@ export function createAgentProjector(): AgentProjector {
       // -----------------------------------------------------------------------
       case 'turn.started': {
         // Bind turnId → promptId. Generate a synthetic one if none was pre-bound.
+        // Session status is intentionally NOT projected here — the daemon's
+        // `event.session.status_changed` is the single source of status
+        // transitions (it carries the authoritative previousStatus /
+        // currentPromptId and dedupes per real transition); projecting a
+        // second running/idle event per turn from the raw stream made every
+        // turn-end consumer (notifications, sounds) fire twice.
         const turnId: number = p?.turnId;
         const existingPromptId = s.currentPromptId ?? ulid('pr_');
         s.currentPromptId = existingPromptId;
         if (turnId !== undefined) {
           s.turnPromptId.set(turnId, existingPromptId);
         }
-        // Fresh turn → fresh per-turn stream offsets.
+        // Fresh turn → fresh step stream offsets.
         s.turnTextLen = 0;
         s.turnThinkLen = 0;
-
-        out.push({
-          type: 'sessionStatusChanged',
-          sessionId,
-          status: 'running',
-          previousStatus: 'idle',
-          currentPromptId: existingPromptId,
-        });
         break;
       }
 
@@ -733,6 +726,12 @@ export function createAgentProjector(): AgentProjector {
           s.currentPromptId = promptId;
           if (turnId !== undefined) s.turnPromptId.set(turnId, promptId);
         }
+
+        // Fresh step → fresh stream offsets: the server's delta `offset` is
+        // step-relative, so without this reset every delta from step 2 on is
+        // silently skipped or misread as a gap.
+        s.turnTextLen = 0;
+        s.turnThinkLen = 0;
 
         // Create a new pending assistant message
         const msg = startAssistantMessage(s, sessionId, promptId);
@@ -973,16 +972,8 @@ export function createAgentProjector(): AgentProjector {
         const usageSnapshot = buildUsageSnapshot(s);
         out.push({ type: 'sessionUsageUpdated', sessionId, usage: usageSnapshot });
 
-        const newStatus =
-          reason === 'cancelled' || reason === 'failed' || reason === 'blocked'
-            ? 'aborted'
-            : 'idle';
-        out.push({
-          type: 'sessionStatusChanged',
-          sessionId,
-          status: newStatus,
-          previousStatus: 'running',
-        });
+        // No sessionStatusChanged here — see turn.started. The daemon's
+        // `event.session.status_changed` flips the session to idle/aborted.
 
         // Clear per-turn state. Reset the stream offsets too so a stale length
         // from this turn can't wedge the next turn's delta alignment into a

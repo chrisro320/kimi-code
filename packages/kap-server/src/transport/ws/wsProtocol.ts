@@ -5,7 +5,8 @@
  * JSON message protocol. Every request carries a client-chosen `id`; the server
  * correlates responses / events by that id. This is the lean counterpart of
  * VSCode's framed `IMessagePassingProtocol`, carrying the same safety features
- * (request ids, cancellation, heartbeats, schema validation, cleanup).
+ * (request ids, cancellation, schema validation, cleanup). There is no
+ * heartbeat: the server never pings and never terminates an idle connection.
  */
 
 import { z } from 'zod';
@@ -23,7 +24,8 @@ const callMessageSchema = z.object({
   scope: scopeKindSchema,
   sessionId: z.string().min(1).optional(),
   agentId: z.string().min(1).optional(),
-  sa: z.string().min(1),
+  service: z.string().min(1),
+  method: z.string().min(1),
   arg: z.unknown().optional(),
 });
 
@@ -38,7 +40,14 @@ const listenMessageSchema = z.object({
   scope: scopeKindSchema,
   sessionId: z.string().min(1).optional(),
   agentId: z.string().min(1).optional(),
+  service: z.string().min(1).optional(),
   event: z.string().min(1),
+});
+
+const eventResultMessageSchema = z.object({
+  type: z.literal('event_result'),
+  id: z.string().min(1),
+  eventId: z.string().min(1),
 });
 
 const unlistenMessageSchema = z.object({
@@ -46,17 +55,13 @@ const unlistenMessageSchema = z.object({
   id: z.string().min(1),
 });
 
-const pongMessageSchema = z.object({
-  type: z.literal('pong'),
-});
-
 export const clientMessageSchema = z.discriminatedUnion('type', [
   helloMessageSchema,
   callMessageSchema,
   cancelMessageSchema,
   listenMessageSchema,
+  eventResultMessageSchema,
   unlistenMessageSchema,
-  pongMessageSchema,
 ]);
 
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
@@ -67,7 +72,6 @@ export type ListenMessage = z.infer<typeof listenMessageSchema>;
 
 export interface ReadyMessage {
   readonly type: 'ready';
-  readonly heartbeatMs: number;
 }
 
 export interface ResultMessage {
@@ -83,19 +87,28 @@ export interface ErrorMessage {
   readonly msg: string;
 }
 
+export interface ListenResultMessage {
+  readonly type: 'listen_result';
+  readonly id: string;
+}
+
 export interface EventMessage {
   readonly type: 'event';
   readonly id: string;
+  readonly eventId?: string;
   readonly data: unknown;
 }
 
-export interface PingMessage {
-  readonly type: 'ping';
+export interface EventCancelMessage {
+  readonly type: 'event_cancel';
+  readonly id: string;
+  readonly eventId: string;
 }
 
 export type ServerMessage =
   | ReadyMessage
   | ResultMessage
   | ErrorMessage
+  | ListenResultMessage
   | EventMessage
-  | PingMessage;
+  | EventCancelMessage;

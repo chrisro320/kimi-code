@@ -3,26 +3,47 @@
  *
  * Owns the agent's registry of running and restored tasks:
  * registers and drives tasks to completion, retains a bounded output ring,
- * persists task state and output through task persistence, reads
+ * persists task state and output through task persistence rooted at the
+ * agent's own scope (v1's per-agent `<sessionDir>/agents/<id>/tasks/`
+ * layout), lets only the main agent read through the previous v2
+ * session-level task root without writing back to it, reads
  * limits through `config`, records lifecycle and broadcasts through `wire`
  * (`task.started` / `task.terminated` Ops into `TaskModel`, plus the matching
  * signals), restores ghosts through a single `wire.onRestored` handler (wire
- * replay -> disk load -> reconcile, in that order), delivers terminal
- * notifications through `contextMemory`, and re-surfaces active tasks through
- * `contextInjector` after compaction. Bound at Agent scope.
+ * replay -> disk load -> reconcile, in that order), delivers live terminal
+ * notifications by enqueueing `TaskNotificationStepRequest`s onto `loop` with
+ * `activeOrNewTurn` admission (mid-turn ones fold into the active turn's
+ * following step; idle ones launch a fresh turn themselves, matching v1's
+ * `turn.steer`, so the model consumes the notification without waiting for
+ * the user), silently appends restored notifications through `contextMemory`,
+ * re-surfaces active tasks through `contextInjector` after compaction, and
+ * requests every owned task to stop on session close (`stopAllOnExit` — v1's
+ * `stopBackgroundTasksOnExit`) with configurable SIGTERM grace and SIGKILL
+ * escalation. `keepAliveOnExit` skips task-manager teardown so independently
+ * living external work such as processes can continue; Session-scoped agents
+ * remain governed by the Session lifecycle. Scope disposal paths that bypass
+ * graceful close synchronously cancel/abort work and immediately attempt a
+ * best-effort force-stop to reduce the risk of surviving child processes.
+ * Bound at Agent scope.
  */
 
 import { randomBytes } from 'node:crypto';
+import { join } from 'pathe';
+
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 
 import type { ContentPart } from '#/app/llmProtocol/message';
 
 import { Disposable } from '#/_base/di/lifecycle';
+import { abortable } from '#/_base/utils/abort';
 import { escapeXml, escapeXmlAttr } from '#/_base/utils/xml-escape';
 import { IEventBus } from '#/app/event/eventBus';
-import type { TaskOrigin } from '#/agent/contextMemory/types';
+import type { ContextMessage, TaskOrigin } from '#/agent/contextMemory/types';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { MessageStepRequest } from '#/agent/loop/stepRequest';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { ITaskService, type ITaskHandle, TERMINAL_TASK_STATES } from '#/app/task/task';
 import {
   TERMINAL_STATUSES,
@@ -33,12 +54,14 @@ import { renderNotificationXml } from './notificationXml';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IConfigService } from '#/app/config/config';
-import { IAgentPromptService } from '#/agent/prompt/prompt';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import { IAgentWireRecordService, type WireRecord } from '#/agent/wireRecord/wireRecord';
+import {
+  IAgentWireRecordService,
+  type PersistedWireRecord,
+} from '#/agent/wireRecord/wireRecord';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
 import {
@@ -54,7 +77,7 @@ import {
   type IAgentTaskEntry,
   type RegisterAgentTaskOptions,
 } from './task';
-import { LEGACY_BACKGROUND_SECTION, TASK_SECTION, type AgentTaskConfig } from './configSection';
+import { resolveAgentTaskConfig } from './configSection';
 import { AgentTaskPersistence } from './persist';
 import { TaskModel, taskStarted, taskTerminated } from './taskOps';
 import { formatTaskList } from '#/agent/task/tools/task-list';
@@ -95,10 +118,6 @@ interface ManagedTask {
   readonly outputChunks: string[];
   outputSizeBytes: number;
   retainedOutputBytes: number;
-  /**
-   * True once a command has crossed `MAX_TASK_OUTPUT_BYTES` and termination has
-   * been requested. One-shot guard so the ceiling fires exactly once.
-   */
   outputLimitTripped: boolean;
   status: AgentTaskStatus;
   options: RegisterAgentTaskOptions & { description?: string };
@@ -122,21 +141,10 @@ interface ManagedTask {
   handleSubscription?: { dispose(): void };
 }
 
-const MAX_OUTPUT_BYTES = 1024 * 1024; // 1 MiB
+const MAX_OUTPUT_BYTES = 1024 * 1024;
 
-/**
- * Hard ceiling on the combined output a single shell command may stream before
- * it is force-terminated (SIGTERM → grace → SIGKILL). It guards both the
- * live-forward path and the on-disk `output.log` write chain from a runaway
- * command (e.g. `b3sum --length <huge>`) whose output would otherwise grow
- * without bound, filling the disk or retaining each pending-write chunk until
- * Node aborts with an out-of-memory crash. Scoped to process tasks (foreground
- * and background); subagent and user-question results are appended once and must
- * always be persisted, so they are intentionally not capped here.
- */
-const MAX_TASK_OUTPUT_BYTES = 16 * 1024 * 1024; // 16 MiB
+const MAX_TASK_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-/** Terminal `stopReason` recorded when a command trips the output ceiling. */
 function outputLimitReason(): string {
   const mib = Math.floor(MAX_TASK_OUTPUT_BYTES / (1024 * 1024));
   return (
@@ -149,25 +157,18 @@ function outputLimitReason(): string {
 const SIGTERM_GRACE_MS = 5_000;
 const TASK_ID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
 const USER_INTERRUPT_REASON = 'Interrupted by user';
+const SESSION_CLOSED_REASON = 'Session closed';
 const NOTIFICATION_FALLBACK_PREVIEW_BYTES = 3_000;
 const ACTIVE_BACKGROUND_TASK_INJECTION_VARIANT = 'background_task_status';
 const ACTIVE_BACKGROUND_TASK_GUIDANCE = [
-  'The conversation was compacted, so the earlier messages that started these background tasks are gone - but the tasks are still running from before.',
-  'Do not start duplicates. Use TaskOutput to fetch a task result, TaskList to list them, and TaskStop to cancel one.',
+  'The conversation was compacted, so the earlier messages that started these background tasks are gone — but the tasks are still running from before.',
+  'Do not start duplicates. Use TaskOutput to fetch a task’s result, TaskList to list them, and TaskStop to cancel one.',
 ].join(' ');
 
 export function isAgentTaskTerminal(status: AgentTaskStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
-/**
- * A manager-driven deadline (`timeoutMs` / `detachTimeoutMs`) sets
- * `entry.timedOut` before aborting. A process task that self-settles on that
- * abort reports `killed` (its signal was aborted); rewrite it to `timed_out`
- * so the terminal status always reflects the deadline, matching v1's
- * `settlementForOutcome` where a timeout outcome is forced to `timed_out`
- * regardless of how the worker responded to SIGTERM.
- */
 function coerceTimeoutSettlement(
   entry: ManagedTask,
   settlement: AgentTaskSettlement,
@@ -184,6 +185,17 @@ declare module '#/app/event/eventBus' {
   }
 }
 
+export class TaskNotificationStepRequest extends MessageStepRequest {
+  constructor(message: ContextMessage) {
+    super(message, {
+      kind: 'task_notification',
+      mergeable: true,
+      turnScoped: false,
+      admission: 'activeOrNewTurn',
+    });
+  }
+}
+
 export class AgentTaskService extends Disposable implements IAgentTaskService {
   declare readonly _serviceBrand: undefined;
 
@@ -196,26 +208,39 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
   constructor(
     @ITelemetryService private readonly telemetry: ITelemetryService,
-    @IAgentPromptService private readonly prompt: IAgentPromptService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IConfigService private readonly config: IConfigService,
     @IAtomicDocumentStore atomicDocs: IAtomicDocumentStore,
     @IFileSystemStorageService byteStore: IFileSystemStorageService,
     @ISessionContext session: ISessionContext,
+    @IAgentScopeContext scopeContext: IAgentScopeContext,
     @ITaskService private readonly taskService: ITaskService,
     @IAgentWireRecordService wireRecord: IAgentWireRecordService,
     @IAgentWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentContextInjectorService injector: IAgentContextInjectorService,
+    @IAgentLoopService private readonly loop: IAgentLoopService,
   ) {
     super();
+    const fallbackRoot =
+      scopeContext.agentId === 'main'
+        ? { dir: session.sessionDir, scope: session.scope() }
+        : undefined;
     this.persistence = new AgentTaskPersistence(
-      session.sessionDir,
-      session.metaScope.replace(/\/session-meta$/, ''),
+      join(session.sessionDir, 'agents', scopeContext.agentId),
+      scopeContext.scope(),
       atomicDocs,
       byteStore,
+      fallbackRoot,
     );
-    this._register(this.wire.onRestored(() => this.restoreAfterReplay()));
+    this._register(
+      this.wire.onRestored(async () => {
+        for (const record of wireRecord.getRecords()) {
+          this.markDeliveredNotificationsFromRecord(record);
+        }
+        await this.restoreAfterReplay();
+      }),
+    );
     this._register(
       this.eventBus.subscribe('context.spliced', (e) => {
         if (isCompactionSplice(e)) {
@@ -233,25 +258,9 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
         this.activeBackgroundTaskReminder(),
       ),
     );
-    this._register(
-      wireRecord.hooks.onRestoredRecord.register(
-        'task-delivered-notifications',
-        async (ctx, next) => {
-          this.markDeliveredNotificationsFromRecord(ctx.record);
-          await next();
-        },
-      ),
-    );
   }
 
   private async restoreAfterReplay(): Promise<void> {
-    // `wire.replay` has rebuilt `TaskModel` from the persisted task.started /
-    // task.terminated records. Seed the restored "ghosts" from it first (the
-    // wire-replay contribution), THEN load from disk and reconcile — all inside
-    // this single onRestored handler so the ordering (wire ghosts -> disk
-    // ghosts -> reconcile) holds. loadFromDisk / reconcile are async (disk
-    // I/O); awaiting them keeps restore observable only after task state has
-    // reached the same shape as v1's resumed background-task manager.
     this.restoreGhostsFromWire();
     await this.loadFromDisk({ replace: false });
     await this.reconcile();
@@ -272,7 +281,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     }
   }
 
-  private markDeliveredNotificationsFromRecord(record: WireRecord): void {
+  private markDeliveredNotificationsFromRecord(record: PersistedWireRecord): void {
     for (const origin of taskOriginsFromRecord(record)) {
       this.markDeliveredNotification(origin);
     }
@@ -285,6 +294,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       detached,
       timeoutMs,
       detachTimeoutMs: options.detachTimeoutMs,
+      autoBackgroundOnTimeout: options.autoBackgroundOnTimeout,
       signal: detached ? undefined : options.signal,
     };
     this.assertCanRegister(detached);
@@ -316,13 +326,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     this.ghosts.delete(entry.taskId);
 
     if (timeoutMs !== undefined && timeoutMs > 0) {
-      entry.timeoutHandle = setTimeout(() => {
-        void this.terminateWithGrace(entry, {
-          abortReason: 'Timed out',
-          finalStatus: 'timed_out',
-        });
-      }, timeoutMs);
-      entry.timeoutHandle.unref?.();
+      this.armManagerTimeout(entry, timeoutMs);
     }
 
     entry.lifecyclePromise = Promise.resolve()
@@ -398,13 +402,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     this.ghosts.delete(taskId);
 
     if (timeoutMs !== undefined && timeoutMs > 0) {
-      entry.timeoutHandle = setTimeout(() => {
-        void this.terminateWithGrace(entry, {
-          abortReason: 'Timed out',
-          finalStatus: 'timed_out',
-        });
-      }, timeoutMs);
-      entry.timeoutHandle.unref?.();
+      this.armManagerTimeout(entry, timeoutMs);
     }
 
     const outputSub = handle.onDidOutput((chunk) => {
@@ -415,8 +413,8 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       if (!TERMINAL_TASK_STATES.has(state)) return;
       const status = entry.timedOut ? 'timed_out' as const
         : state === 'cancelled' ? 'killed' as const
-        : state === 'failed' ? 'failed' as const
-        : 'completed' as const;
+          : state === 'failed' ? 'failed' as const
+            : 'completed' as const;
       void this.settleTask(entry, { status, stopReason: entry.stopReason });
     });
 
@@ -427,7 +425,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       },
     };
 
-    entry.lifecyclePromise = handle.result.then(() => {}, () => {});
+    entry.lifecyclePromise = handle.result.then(() => { }, () => { });
 
     this.installForegroundSignal(entry);
 
@@ -507,18 +505,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
     const previewLimit = Math.max(0, Math.trunc(maxPreviewBytes));
     const persistence = this.persistence;
-    if (await persistence.taskOutputExists(taskId)) {
-      const outputSizeBytes = await persistence.taskOutputSizeBytes(taskId);
-      const previewOffset = Math.max(0, outputSizeBytes - previewLimit);
-      const previewBytes = outputSizeBytes - previewOffset;
-      const preview = await persistence.readTaskOutputBytes(taskId, previewOffset, previewBytes);
+    const persisted = await persistence.readTaskOutputSnapshot(taskId, previewLimit);
+    if (persisted !== undefined) {
       return {
-        outputPath: persistence.taskOutputFile(taskId),
-        outputSizeBytes,
-        previewBytes,
-        truncated: previewOffset > 0,
+        ...persisted,
         fullOutputAvailable: true,
-        preview,
       };
     }
 
@@ -559,6 +550,10 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   detach(taskId: string): AgentTaskInfo | undefined {
     const entry = this.tasks.get(taskId);
     if (entry === undefined) return this.ghosts.get(taskId);
+    return this.detachEntry(entry, false);
+  }
+
+  private detachEntry(entry: ManagedTask, viaTimeout: boolean): AgentTaskInfo | undefined {
     if (TERMINAL_STATUSES.has(entry.status)) return this.toInfo(entry);
 
     const foregroundRelease = entry.foregroundRelease;
@@ -574,12 +569,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
         (entry.task === undefined ? undefined : entry.task.onDetach?.bind(entry.task));
       onDetach?.();
     } catch {
-      /* detach has already succeeded; hooks must not make RPC fail */
     }
     this.startOutputPersist(entry);
     void this.persistLive(entry);
     this.recordTaskStarted(this.toInfo(entry));
-    foregroundRelease.resolve('detached');
+    foregroundRelease.resolve(viaTimeout ? 'timeout_detached' : 'detached');
     return this.toInfo(entry);
   }
 
@@ -592,14 +586,27 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       entry.timeoutHandle = undefined;
     }
     if (timeoutMs > 0) {
-      entry.timeoutHandle = setTimeout(() => {
-        void this.terminateWithGrace(entry, {
-          abortReason: 'Timed out',
-          finalStatus: 'timed_out',
-        });
-      }, timeoutMs);
-      entry.timeoutHandle.unref?.();
+      this.armManagerTimeout(entry, timeoutMs);
     }
+  }
+
+  private armManagerTimeout(entry: ManagedTask, timeoutMs: number): void {
+    entry.timeoutHandle = setTimeout(() => {
+      entry.timeoutHandle = undefined;
+      if (this.canAutoBackgroundOnTimeout(entry)) {
+        this.detachEntry(entry, true);
+        return;
+      }
+      void this.terminateWithGrace(entry, {
+        abortReason: 'Timed out',
+        finalStatus: 'timed_out',
+      });
+    }, timeoutMs);
+    entry.timeoutHandle.unref?.();
+  }
+
+  private canAutoBackgroundOnTimeout(entry: ManagedTask): boolean {
+    return entry.options.autoBackgroundOnTimeout === true && !this.isDetached(entry);
   }
 
   async stop(taskId: string, reason?: string): Promise<AgentTaskInfo | undefined> {
@@ -613,18 +620,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     });
   }
 
-  /**
-   * Manager-driven teardown shared by every termination path: explicit `stop`,
-   * the wall-clock `timeoutMs` deadline, and the post-detach `detachTimeoutMs`
-   * deadline. It sends SIGTERM (or `handle.cancel()`), gives the task up to
-   * `SIGTERM_GRACE_MS` to settle, escalates to `forceStop` (SIGKILL) when it is
-   * still alive, and records `finalStatus`.
-   *
-   * This mirrors v1's `settlementForOutcome`, where timeout and stop always
-   * shared the same grace + force-stop sequence. Routing the deadline paths
-   * through here is what keeps a runaway process that ignores SIGTERM from
-   * leaking when its deadline fires.
-   */
   private async terminateWithGrace(
     entry: ManagedTask,
     options: {
@@ -638,7 +633,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       return this.toInfo(entry);
     }
 
-    // Disarm a pending wall-clock deadline so it cannot re-enter teardown.
     if (entry.timeoutHandle !== undefined) {
       clearTimeout(entry.timeoutHandle);
       entry.timeoutHandle = undefined;
@@ -653,6 +647,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       entry.abortController.abort(options.abortReason);
     }
 
+    const graceMs = resolveAgentTaskConfig(this.config)?.killGracePeriodMs ?? SIGTERM_GRACE_MS;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     const graceful = await Promise.race([
       entry.lifecyclePromise.then(
@@ -662,7 +657,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       new Promise<false>((resolve) => {
         graceTimer = setTimeout(() => {
           resolve(false);
-        }, SIGTERM_GRACE_MS);
+        }, graceMs);
         graceTimer.unref?.();
       }),
     ]);
@@ -680,7 +675,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
           (entry.task === undefined ? undefined : entry.task.forceStop?.bind(entry.task));
         await forceStop?.();
       } catch {
-        /* best effort */
       }
     }
 
@@ -704,7 +698,55 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     return results.filter((info): info is AgentTaskInfo => info !== undefined);
   }
 
-  async wait(taskId: string, timeoutMs = 30_000): Promise<AgentTaskInfo | undefined> {
+  async stopAllOnExit(reason: string): Promise<readonly AgentTaskInfo[]> {
+    if (this.keepAliveOnExit()) return [];
+    const active = this.list(true);
+    await Promise.all(
+      active
+        .filter((task) => task.detached === true)
+        .map((task) => this.suppressTerminalNotification(task.taskId)),
+    );
+    return this.stopAll(reason);
+  }
+
+  override dispose(): void {
+    if (!this.keepAliveOnExit()) {
+      for (const entry of this.tasks.values()) {
+        if (TERMINAL_STATUSES.has(entry.status)) continue;
+        if (entry.timeoutHandle !== undefined) {
+          clearTimeout(entry.timeoutHandle);
+          entry.timeoutHandle = undefined;
+        }
+        if (entry.handle !== undefined) {
+          entry.handle.cancel();
+        } else {
+          entry.abortController.abort(SESSION_CLOSED_REASON);
+        }
+        this.forceStopOnDispose(entry);
+      }
+    }
+    super.dispose();
+  }
+
+  private forceStopOnDispose(entry: ManagedTask): void {
+    const forceStop =
+      entry.forceStopFn ??
+      (entry.task === undefined ? undefined : entry.task.forceStop?.bind(entry.task));
+    if (forceStop === undefined) return;
+    try {
+      void forceStop().catch(() => {});
+    } catch {}
+  }
+
+  private keepAliveOnExit(): boolean {
+    return resolveAgentTaskConfig(this.config)?.keepAliveOnExit === true;
+  }
+
+  async wait(
+    taskId: string,
+    timeoutMs = 30_000,
+    signal?: AbortSignal,
+  ): Promise<AgentTaskInfo | undefined> {
     const entry = this.tasks.get(taskId);
     if (entry === undefined) return this.ghosts.get(taskId);
     if (TERMINAL_STATUSES.has(entry.status)) {
@@ -718,7 +760,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     let waiter: (() => void) | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
+      const pending = Promise.race([
         new Promise<void>((resolve) => {
           waiter = resolve;
           entry.waiters.push(resolve);
@@ -728,6 +770,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
           timeout.unref?.();
         }),
       ]);
+      await (signal === undefined ? pending : abortable(pending, signal));
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (waiter !== undefined) {
@@ -767,18 +810,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   }
 
   private assertCanRegister(detached: boolean): void {
-    const maxRunningTasks = this.taskConfig()?.maxRunningTasks;
+    const maxRunningTasks = resolveAgentTaskConfig(this.config)?.maxRunningTasks;
     if (maxRunningTasks === undefined) return;
     if (!detached) return;
     if (this.activeTaskCount() < maxRunningTasks) return;
     throw new Error('Too many background tasks are already running.');
-  }
-
-  private taskConfig(): AgentTaskConfig | undefined {
-    return (
-      this.config.get<AgentTaskConfig | undefined>(TASK_SECTION) ??
-      this.config.get<AgentTaskConfig | undefined>(LEGACY_BACKGROUND_SECTION)
-    );
   }
 
   private activeTaskCount(): number {
@@ -828,13 +864,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     entry.outputSizeBytes += chunkBytes;
     this.appendRetainedOutput(entry, chunk, chunkBytes);
 
-    // Output ceiling: a single shell command must not grow the unbounded
-    // live-forward buffer or the on-disk write chain until the process runs out
-    // of memory or fills the disk. Trip once, then request graceful termination
-    // through the shared stop path (SIGTERM → grace → SIGKILL). Scoped to
-    // process tasks (foreground and background): subagent and user-question tasks
-    // append their bounded result in one shot and must always persist it, so they
-    // are intentionally not capped here.
     if (
       !entry.outputLimitTripped &&
       entry.task?.kind === 'process' &&
@@ -844,11 +873,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       void this.stop(entry.taskId, outputLimitReason());
     }
 
-    // Once the cap has tripped the task is being terminated: keep only the
-    // bounded in-memory ring buffer above and stop feeding the (unbounded) disk
-    // write chain. A producer that ignores SIGTERM could otherwise keep the
-    // chain — and the chunk strings each pending write retains — growing through
-    // the grace window until SIGKILL, re-introducing the OOM this cap prevents.
     if (entry.outputLimitTripped) return;
 
     if (!entry.outputPersistStarted) {
@@ -940,14 +964,14 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
   private recordTaskStarted(info: AgentTaskInfo): void {
     this.wire.dispatch(taskStarted({ info }));
-    this.telemetry.track('background_task_created', {
+    this.telemetry.track2('background_task_created', {
       kind: info.kind === 'process' ? 'bash' : info.kind,
     });
   }
 
   private recordTaskTerminated(info: AgentTaskInfo): void {
     this.wire.dispatch(taskTerminated({ info }));
-    this.telemetry.track('background_task_completed', {
+    this.telemetry.track2('background_task_completed', {
       kind: info.kind,
       duration_ms: info.endedAt !== null ? info.endedAt - info.startedAt : null,
       status: info.status,
@@ -957,12 +981,13 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   private async notifyAgentTask(info: AgentTaskInfo): Promise<void> {
     const context = await this.buildAgentTaskNotificationContext(info);
     if (context === undefined) return;
-    await this.prompt.steer({
+    const request = new TaskNotificationStepRequest({
       role: 'user',
       content: [...context.content],
       toolCalls: [],
       origin: context.origin,
-    }).launched;
+    });
+    this.loop.enqueue(request);
     this.fireNotificationHook(context.notification);
   }
 
@@ -1189,7 +1214,7 @@ function notificationKey(origin: TaskNotificationOrigin): string {
   return `${origin.taskId}\0${origin.status}\0${origin.notificationId}`;
 }
 
-function taskOriginsFromRecord(record: WireRecord): readonly TaskNotificationOrigin[] {
+function taskOriginsFromRecord(record: PersistedWireRecord): readonly TaskNotificationOrigin[] {
   const raw = record as {
     readonly type: string;
     readonly message?: unknown;

@@ -132,23 +132,30 @@ describe('MiniDbQueryStore', () => {
     expect(await store.getCheckpoint('wire:abc')).toEqual({ seq: 42 });
   });
 
-  it('degrades gracefully when the database lock is held by another process', async () => {
-    // Simulate another kimi process holding the single-writer lock on the
-    // shared query-store directory.
+  it('throws storage.locked when the database lock is held by another process', async () => {
     const storeDir = join(homeDir, 'cache', 'query-store');
     const lockHolder = await MiniDb.open({ dir: storeDir, valueCodec: 'json' });
     try {
       const store = build();
-      // Writes must not throw: the read model is a rebuildable cache, so lock
-      // contention degrades to a no-op rather than crashing the host.
-      await expect(store.put(COLLECTION, 'a', { id: 'a' })).resolves.toBeUndefined();
-      await expect(store.batch([{ kind: 'put', collection: COLLECTION, key: 'b', value: { id: 'b' } }])).resolves.toBeUndefined();
-      await expect(store.ensureIndex(COLLECTION, { kind: 'value', name: 'byId', field: 'id' })).resolves.toBeUndefined();
-      // Reads fall back to empty so consumers (e.g. session index) take their
-      // legacy path.
-      expect(await store.get(COLLECTION, 'a')).toBeUndefined();
-      expect(await store.getCheckpoint('wire:abc')).toBeUndefined();
-      expect(await store.query(COLLECTION).execute()).toEqual({ items: [] });
+      await expect(store.put(COLLECTION, 'a', { id: 'a' })).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      await expect(
+        store.batch([{ kind: 'put', collection: COLLECTION, key: 'b', value: { id: 'b' } }]),
+      ).rejects.toMatchObject({ code: 'storage.locked' });
+      await expect(
+        store.ensureIndex(COLLECTION, { kind: 'value', name: 'byId', field: 'id' }),
+      ).rejects.toMatchObject({ code: 'storage.locked' });
+      await expect(store.get(COLLECTION, 'a')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      await expect(store.getCheckpoint('wire:abc')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      await expect(store.query(COLLECTION).execute()).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      await expect(store.close()).resolves.toBeUndefined();
     } finally {
       await lockHolder.close();
     }
@@ -162,8 +169,6 @@ describe('MiniDbQueryStore', () => {
     disposeHost?.();
     disposeHost = undefined;
 
-    // Corrupt the persisted index-definition JSON so `open` throws SyntaxError,
-    // which `openOrRebuild` turns into a wipe + fresh open.
     const indexFile = join(homeDir, 'cache', 'query-store', 'db.indexes.json');
     await fsp.writeFile(indexFile, '{ definitely not valid json');
 

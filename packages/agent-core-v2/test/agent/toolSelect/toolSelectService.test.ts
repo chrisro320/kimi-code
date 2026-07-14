@@ -11,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { DisposableStore, toDisposable } from '#/_base/di/lifecycle';
+import { DisposableStore, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type ServiceRegistration, type TestInstantiationService } from '#/_base/di/test';
 import { OrderedHookSlot } from '#/hooks';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
@@ -26,14 +26,16 @@ import {
   IAgentLoopService,
   type AfterStepContext,
   type BeforeStepContext,
-  type LoopErrorContext,
-  type LoopRunOptions,
+  type EnqueueReceipt,
   type LoopRunResult,
+  type StepEnqueueOptions,
+  type Turn,
 } from '#/agent/loop/loop';
+import type { StepRequest } from '#/agent/loop/stepRequest';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { AgentSystemReminderService } from '#/agent/systemReminder/systemReminderService';
-import type { ExecutableTool, ToolExecution } from '#/agent/tool/toolContract';
+import type { ExecutableTool, ToolExecution } from '#/tool/toolContract';
 import { IAgentToolExecutorService, type ToolExecutionResult } from '#/agent/toolExecutor/toolExecutor';
 import { AgentToolExecutorService } from '#/agent/toolExecutor/toolExecutorService';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
@@ -48,8 +50,8 @@ import { SelectToolsTool } from '#/agent/toolSelect/tools/select-tools';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry } from '../../app/telemetry/stubs';
+import { stubToolExecutor } from '../loop/stubs';
 import { registerToolResultTruncationServices } from '../toolResultTruncation/stubs';
-import { stubToolExecutor } from '../turn/stubs';
 
 const MCP_ALPHA = 'mcp__srv__alpha';
 const MCP_BETA = 'mcp__srv__beta';
@@ -197,12 +199,31 @@ class FakeLoopService implements IAgentLoopService {
   readonly _serviceBrand = undefined;
 
   readonly hooks: IAgentLoopService['hooks'] = {
-    beforeStep: new OrderedHookSlot<BeforeStepContext>(),
-    afterStep: new OrderedHookSlot<AfterStepContext>(),
-    onError: new OrderedHookSlot<LoopErrorContext>(),
+    onWillBeginStep: new OrderedHookSlot<BeforeStepContext>(),
+    onDidFinishStep: new OrderedHookSlot<AfterStepContext>(),
   };
 
-  run(_options: LoopRunOptions): Promise<LoopRunResult> {
+  enqueue(_request: StepRequest, _options?: StepEnqueueOptions): EnqueueReceipt {
+    throw new Error('unused in this suite');
+  }
+
+  async run(): Promise<LoopRunResult> {
+    throw new Error('unused in this suite');
+  }
+
+  status() {
+    return { state: 'idle' as const, pendingTurnIds: [], hasPendingRequests: false };
+  }
+
+  cancel(_turnId?: number, _reason?: unknown): boolean {
+    throw new Error('unused in this suite');
+  }
+
+  hasPendingRequests(): boolean {
+    return false;
+  }
+
+  registerLoopErrorHandler(): IDisposable {
     throw new Error('unused in this suite');
   }
 }
@@ -349,7 +370,7 @@ function registerBuiltin(h: Harness, tool: EchoTool): void {
 
 async function announce(h: Harness, step = 1): Promise<string | undefined> {
   const before = h.contextMemory.appended.length;
-  await h.loop.hooks.beforeStep.run({
+  await h.loop.hooks.onWillBeginStep.run({
     turnId: 1,
     step,
     signal: new AbortController().signal,
@@ -636,9 +657,6 @@ describe('AgentToolSelectService.load', () => {
     expect(h.sut.load([MCP_ALPHA]).alreadyAvailable).toEqual([MCP_ALPHA]);
     expect(h.sut.load([MCP_BETA]).alreadyAvailable).toEqual([MCP_BETA]);
 
-    // Undo-style rewrite (v2's undo slices the tail wholesale): beta's schema
-    // message is gone while alpha's survives; the event is published after the
-    // memory service has rewritten history.
     h.contextMemory.history.splice(1, 1);
     h.eventBus.emit('context.spliced', { start: 1, deleteCount: 2, messages: [] });
 

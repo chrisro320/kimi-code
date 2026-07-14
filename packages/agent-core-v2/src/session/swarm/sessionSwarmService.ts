@@ -21,7 +21,7 @@ import { linkAbortSignal } from '#/_base/utils/abort';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import type { SubagentSuspendedEvent } from '@moonshot-ai/protocol';
 import { IEventBus } from '#/app/event/eventBus';
@@ -61,10 +61,6 @@ declare module '#/app/event/eventBus' {
   }
 }
 
-/**
- * Requester-facing label for a resumed agent whose profile binding is unknown.
- * Kept as the legacy wire display value.
- */
 const RESUMED_PROFILE_FALLBACK = 'subagent';
 
 export class SessionSwarmService implements ISessionSwarmService {
@@ -140,9 +136,6 @@ export class SessionSwarmService implements ISessionSwarmService {
     if (callerData.modelAlias === undefined) {
       throw new Error('Caller agent has no model bound');
     }
-    // Explicit inheritance: the child runs the requested profile on the
-    // caller's own model / thinking level / cwd, and inherits the caller's
-    // permission mode so it does not fall back to `manual`.
     const child = await this.lifecycle.create({
       binding: {
         profile: profile.name,
@@ -189,14 +182,16 @@ export class SessionSwarmService implements ISessionSwarmService {
     this.realignChildModel(caller, child);
     const profileName =
       child.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_PROFILE_FALLBACK;
-    emitAgentRunSpawned(caller, agentId, {
-      profileName,
-      parentToolCallId: options.parentToolCallId,
-      parentToolCallUuid: options.parentToolCallUuid,
-      description: options.description,
-      swarmIndex: options.swarmIndex,
-      runInBackground: options.runInBackground,
-    });
+    if (!retryTurn) {
+      emitAgentRunSpawned(caller, agentId, {
+        profileName,
+        parentToolCallId: options.parentToolCallId,
+        parentToolCallUuid: options.parentToolCallUuid,
+        description: options.description,
+        swarmIndex: options.swarmIndex,
+        runInBackground: options.runInBackground,
+      });
+    }
     const request = retryTurn
       ? ({ kind: 'retry' } as const)
       : ({ kind: 'prompt', prompt: options.prompt } as const);
@@ -242,7 +237,7 @@ export class SessionSwarmService implements ISessionSwarmService {
   }
 
   private requireIdleSubagent(agentId: string, child: IAgentScopeHandle): void {
-    if (child.accessor.get(IAgentTurnService).getActiveTurn() !== undefined) {
+    if (child.accessor.get(IAgentLoopService).status().state === 'running') {
       throw new Error(`Agent instance "${agentId}" is already running and cannot run concurrently`);
     }
   }
@@ -263,7 +258,6 @@ export class SessionSwarmService implements ISessionSwarmService {
   }
 }
 
-// Kept as a type-anchor so future maintenance imports the usage shape from here.
 export type _AgentRunUsage = TokenUsage;
 
 registerScopedService(

@@ -7,19 +7,21 @@
  * (`currentTurn`) is live-only service state — it is not persisted and resets
  * on resume, matching v1. The usage slice of `agent.status.updated` is
  * published here after each live record (replay stays silent, like v1's
- * restore). Bound at Agent scope.
+ * restore), and the `onDidRecord` event notifies agent-scoped consumers of the
+ * live record. Bound at Agent scope.
  */
 
 import { addUsage, type TokenUsage } from '#/app/llmProtocol/usage';
 import { Disposable } from '#/_base/di/lifecycle';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { Emitter, type Event } from '#/_base/event';
 
 import type { LLMRequestSource } from '#/agent/llmRequester/llmRequester';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
-import type { UsageStatus } from './usage';
+import type { UsageRecordedContext, UsageStatus } from './usage';
 import { IAgentUsageService } from './usage';
 import {
   copyUsage,
@@ -31,6 +33,9 @@ import {
 
 export class AgentUsageService extends Disposable implements IAgentUsageService {
   declare readonly _serviceBrand: undefined;
+
+  private readonly _onDidRecord = this._register(new Emitter<UsageRecordedContext>());
+  readonly onDidRecord: Event<UsageRecordedContext> = this._onDidRecord.event;
 
   private currentTurnId: number | undefined;
   private currentTurn: TokenUsage | undefined;
@@ -58,6 +63,7 @@ export class AgentUsageService extends Disposable implements IAgentUsageService 
     }
 
     this.eventBus?.publish({ type: 'agent.status.updated', usage: this.status() });
+    this._onDidRecord.fire({ model, usage: copyUsage(usage), source });
   }
 
   status(): UsageStatus {

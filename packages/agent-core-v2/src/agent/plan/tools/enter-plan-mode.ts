@@ -7,14 +7,13 @@
 
 import { z } from 'zod';
 
-import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
+import type { BuiltinTool, ToolExecution } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
-import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
+import { toInputJsonSchema } from '#/tool/input-schema';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentPlanService } from '#/agent/plan/plan';
 import DESCRIPTION from './enter-plan-mode.md?raw';
 
-// ── Input schema ─────────────────────────────────────────────────────
 
 export const EnterPlanModeInputSchema = z.object({}).strict();
 export type EnterPlanModeInput = z.infer<typeof EnterPlanModeInputSchema>;
@@ -34,7 +33,6 @@ export class EnterPlanModeTool implements BuiltinTool<EnterPlanModeInput> {
       description: 'Requesting to enter plan mode',
       approvalRule: this.name,
       execute: async () => {
-        // Guard: already in plan mode
         const before = await this.planMode.status();
         if (before !== null) {
           return {
@@ -50,7 +48,7 @@ export class EnterPlanModeTool implements BuiltinTool<EnterPlanModeInput> {
           return { isError: true, output: `Failed to enter plan mode: ${message}` };
         }
 
-        this.telemetry.track('plan_enter_resolved', { outcome: 'auto_approved' });
+        this.telemetry.track2('plan_enter_resolved', { outcome: 'auto_approved' });
         const after = await this.planMode.status();
         return { output: enteredPlanModeMessage(after?.path ?? null) };
       },

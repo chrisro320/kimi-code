@@ -1,5 +1,6 @@
 import type { TokenUsage } from '#/app/llmProtocol/usage';
 
+import { isAbortError } from '#/_base/utils/abort';
 import {
   type AgentTask,
   type AgentTaskInfoBase,
@@ -11,7 +12,6 @@ type SubagentCompletion = {
   readonly usage?: TokenUsage;
 };
 
-/** Handle to an agent run launched by the `Agent` tool (or swarm). */
 export type SubagentHandle = {
   readonly agentId: string;
   readonly profileName: string;
@@ -20,9 +20,7 @@ export type SubagentHandle = {
 
 export interface SubagentTaskInfo extends AgentTaskInfoBase {
   readonly kind: 'agent';
-  /** Agent identifier accepted by Agent(resume=...). */
   readonly agentId?: string;
-  /** Profile name of the agent. Wire DTO field name kept for compatibility. */
   readonly subagentType?: string;
 }
 
@@ -32,19 +30,10 @@ declare module '#/agent/task/types' {
   }
 }
 
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError';
-}
-
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * Create a `taskService.run()`-compatible executor that waits for an
- * agent-run completion promise.  Resolves with the agent's result on
- * success, throws on abort or failure.
- */
 export function createSubagentExecutor(
   handle: SubagentHandle,
   abortController: AbortController,

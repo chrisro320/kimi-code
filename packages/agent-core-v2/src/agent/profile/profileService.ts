@@ -17,7 +17,9 @@
  * / `warning` events now ride `IEventBus` (`agent.status.updated` canonical in
  * `usageOps`). `chdir` and
  * `emitStatusUpdated` run live-only after the dispatch, so `wire.replay`
- * rebuilds the Models silently.
+ * rebuilds the Models silently; the same live-only path mirrors the resolved
+ * model protocol into the ambient telemetry context (`provider_type` /
+ * `protocol`) whenever the model alias changes.
  * Bound at Agent scope.
  */
 
@@ -32,7 +34,7 @@ import { type KimiModelOverrides } from '#/app/model/modelOverrides';
 import { IModelResolver } from '#/app/model/modelResolver';
 import picomatch from 'picomatch';
 
-import { ErrorCodes, KimiError } from "#/errors";
+import { ErrorCodes, Error2 } from "#/errors";
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { resolveThinkingEffort, resolveThinkingKeep } from './thinking';
@@ -40,15 +42,16 @@ import type { LoopControl } from '#/agent/loop/configSection';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { isMcpToolName } from '#/agent/tool/toolName';
+import { isMcpToolName, type ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import type { ResolvedAgentProfile, SystemPromptContext } from '#/agent/profile/profile';
 
 import type { WarningEvent } from '@moonshot-ai/protocol';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import type { ToolSource } from '#/agent/tool/toolContract';
+import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { IAgentWireService } from '#/wire/tokens';
+import type { PayloadOf } from '#/wire/types';
 import type { IWireService } from '#/wire/wireService';
 import { IEventBus } from '#/app/event/eventBus';
 import { prepareSystemPromptContext } from './context';
@@ -72,21 +75,11 @@ import {
   ProfileModel,
   setActiveTools,
   type ActiveToolsState,
-  type ConfigUpdatePayload,
   type ProfileModelState,
 } from './profileOps';
 
-declare module '#/agent/wireRecord/wireRecord' {
-  interface WireRecordMap {
-    'tools.set_active_tools': {
-      names: readonly string[];
-    };
-  }
-}
-
 declare module '#/app/event/eventBus' {
   interface DomainEventMap {
-    // `warning` is owned by `profile` (the agents-md-oversized notice).
     warning: WarningEvent;
   }
 }
@@ -95,14 +88,9 @@ export class AgentProfileService implements IAgentProfileService {
   declare readonly _serviceBrand: undefined;
 
   private optionsValue: ProfileServiceOptions = {};
-  // Live overlay of ephemeral per-tool deltas (`addActiveTool` /
-  // `removeActiveTool`) on top of the persisted `ActiveToolsModel`. `undefined`
-  // means "no overlay — read the Model". Reset on every full `setActiveTools`.
   private activeToolNamesOverlay: readonly string[] | undefined;
   private agentsMdWarning: string | undefined;
 
-  // Effective active-tool set: the live overlay when present, else the persisted
-  // base rebuilt by `wire.replay`. `undefined` means every tool is active.
   private get activeToolNames(): ActiveToolsState {
     return (
       this.activeToolNamesOverlay ??
@@ -116,6 +104,7 @@ export class AgentProfileService implements IAgentProfileService {
     @IAgentWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IConfigService private readonly config: IConfigService,
     @IModelResolver private readonly modelFactory: IModelResolver,
     @IHostEnvironment private readonly env: IHostEnvironment,
@@ -159,8 +148,6 @@ export class AgentProfileService implements IAgentProfileService {
     if (profile === undefined) {
       throw new Error(`Unknown agent profile: "${input.profile}"`);
     }
-    // Resolve eagerly so an unknown model id fails the bind here rather than on
-    // the first turn.
     const model = this.modelFactory.resolve(input.model);
 
     const context = await this.buildSystemPromptContext(input.cwd);
@@ -190,10 +177,10 @@ export class AgentProfileService implements IAgentProfileService {
     const model = this.modelFactory.resolve(alias);
     if (this.profileName === undefined) {
       await this.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: alias });
-      this.telemetry.track('model_switch', { model: alias });
+      this.telemetry.track2('model_switch', { model: alias });
     } else if (this.modelAlias !== alias) {
       this.update({ modelAlias: alias });
-      this.telemetry.track('model_switch', { model: alias });
+      this.telemetry.track2('model_switch', { model: alias });
     }
     return {
       model: alias,
@@ -206,7 +193,7 @@ export class AgentProfileService implements IAgentProfileService {
     this.update({ thinkingLevel: level });
     const effort = this.thinkingLevel;
     if (effort !== previousEffort) {
-      this.telemetry.track('thinking_toggle', {
+      this.telemetry.track2('thinking_toggle', {
         enabled: effort !== 'off',
         effort,
         from: previousEffort,
@@ -283,7 +270,7 @@ export class AgentProfileService implements IAgentProfileService {
   getProvider(): Model {
     const model = this.resolveModel();
     if (model === undefined) {
-      throw new KimiError(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
+      throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
     }
     return model;
   }
@@ -379,21 +366,21 @@ export class AgentProfileService implements IAgentProfileService {
   addActiveTool(name: string): void {
     const activeToolNames = this.activeToolNames;
     if (activeToolNames === undefined || activeToolNames.includes(name)) return;
-    // Ephemeral overlay: not persisted; re-derived on resume by `userTool`.
     this.activeToolNamesOverlay = [...activeToolNames, name];
   }
 
   removeActiveTool(name: string): void {
     const activeToolNames = this.activeToolNames;
     if (activeToolNames === undefined || !activeToolNames.includes(name)) return;
-    // Ephemeral overlay: not persisted; re-derived on resume by `userTool`.
     this.activeToolNamesOverlay = activeToolNames.filter((candidate) => candidate !== name);
   }
 
   private resolveConfigPayload(
     changed: Omit<ProfileUpdateData, 'activeToolNames'>,
-  ): ConfigUpdatePayload {
-    const payload: { -readonly [K in keyof ConfigUpdatePayload]: ConfigUpdatePayload[K] } = {};
+  ): PayloadOf<typeof configUpdate> {
+    const payload: {
+      -readonly [K in keyof PayloadOf<typeof configUpdate>]: PayloadOf<typeof configUpdate>[K];
+    } = {};
     if (changed.cwd !== undefined) payload.cwd = changed.cwd;
     if (changed.modelAlias !== undefined) payload.modelAlias = changed.modelAlias;
     if (changed.profileName !== undefined) payload.profileName = changed.profileName;
@@ -413,12 +400,14 @@ export class AgentProfileService implements IAgentProfileService {
     if (changed.cwd !== undefined) {
       void this.optionsValue.chdir?.(changed.cwd);
     }
+    if (changed.modelAlias !== undefined) {
+      const protocol = this.tryResolveRawModel()?.protocol;
+      this.telemetryContext.set({ provider_type: protocol, protocol });
+    }
     this.emitStatusUpdated();
   }
 
   private setActiveTools(names: readonly string[]): void {
-    // Full replace: drop the ephemeral overlay (subsequent reads fall back to the
-    // Model) and persist the new base set through the wire.
     this.activeToolNamesOverlay = undefined;
     this.wire.dispatch(setActiveTools({ names: [...names] }));
   }
@@ -448,7 +437,7 @@ export class AgentProfileService implements IAgentProfileService {
   private get model(): string {
     const modelAlias = this.modelAlias;
     if (modelAlias === undefined) {
-      throw new KimiError(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
+      throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
     }
     return modelAlias;
   }
@@ -468,8 +457,6 @@ export class AgentProfileService implements IAgentProfileService {
   private get thinkingLevel(): ThinkingEffort {
     const stored = this.profileState.thinkingLevel;
     if (stored === 'off' && this.alwaysThinkingModel) {
-      // Re-run the resolver so the always_thinking clamp restores the
-      // configured effort (or the model default) instead of a stale 'off'.
       return resolveThinkingEffort(
         stored,
         this.config.get<ThinkingConfig>(THINKING_SECTION),

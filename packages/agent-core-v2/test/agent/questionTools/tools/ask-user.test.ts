@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { CoreErrors } from '#/_base/errors/codes';
-import { KimiError } from '#/_base/errors/errors';
+import { Error2 } from '#/_base/errors/errors';
 import {
   AskUserQuestionInputSchema,
   AskUserQuestionTool,
@@ -63,7 +63,7 @@ function makeTool(
   const request = vi.fn(options.request ?? (async () => ({ Postgres: true }) as QuestionResult));
   const telemetryTrack = vi.fn();
   const question = { request } as unknown as ISessionQuestionService;
-  const telemetry = { track: telemetryTrack } as unknown as ITelemetryService;
+  const telemetry = { track2: telemetryTrack } as unknown as ITelemetryService;
   let lastTask: QuestionBackgroundTask | undefined;
   const registerTask = vi.fn((task: QuestionBackgroundTask) => {
     lastTask = task;
@@ -338,7 +338,7 @@ describe('AskUserQuestionTool', () => {
   it('resolves question service error responses as dismissed answers', async () => {
     const { tool } = makeTool({
       request: async () => {
-        throw new KimiError(CoreErrors.codes.INTERNAL, 'question broker error');
+        throw new Error2(CoreErrors.codes.INTERNAL, 'question broker error');
       },
     });
 
@@ -391,7 +391,7 @@ describe('AskUserQuestionTool', () => {
   it('returns a distinct hard error when the host signals unsupported', async () => {
     const { tool } = makeTool({
       request: async () => {
-        throw new KimiError(
+        throw new Error2(
           CoreErrors.codes.NOT_IMPLEMENTED,
           'Client does not support questions',
         );
@@ -446,7 +446,6 @@ describe('AskUserQuestionTool', () => {
       expect(registerTask).toHaveBeenCalledOnce();
       expect(registerTask.mock.calls[0]![1]).toMatchObject({ detached: true });
       expect(getTask).toHaveBeenCalledWith('q_test_task_id');
-      // Non-blocking: the question service is not awaited inside the tool call.
       expect(request).not.toHaveBeenCalled();
     });
 

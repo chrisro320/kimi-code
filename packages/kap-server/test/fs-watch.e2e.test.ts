@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { pino } from 'pino';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket, type RawData } from 'ws';
 
 import { startServer, type RunningServer } from '../src/start';
@@ -48,6 +48,7 @@ afterEach(async () => {
     // ignore
   }
   server = undefined;
+  vi.unstubAllEnvs();
   rmSync(tmpDir, { recursive: true, force: true });
   rmSync(bridgeHome, { recursive: true, force: true });
 });
@@ -213,8 +214,15 @@ describe('WS fs watch (kap-server)', () => {
 
   it.skipIf(process.platform === 'win32')(
     'burst > 500 changes inside 200ms window → truncated:true',
-    { timeout: 5000 },
+    { timeout: 15000 },
     async () => {
+      // Chokidar cannot reliably deliver >500 events inside one 200ms window
+      // under CPU contention (parallel test files), which flaked this test.
+      // Shrink the window capacity instead: 600 files over 500ms windows
+      // guarantees a >100-event window even at ~240 events/s delivery, while
+      // the truncation path under test is identical.
+      vi.stubEnv('KIMI_CODE_FS_WATCH_DEBOUNCE_MS', '500');
+      vi.stubEnv('KIMI_CODE_FS_WATCH_MAX_CHANGES_PER_WINDOW', '100');
       const r = await boot();
       const sid = await createSession(r);
       const conn = await openConn(wsUrl(r));
@@ -234,7 +242,7 @@ describe('WS fs watch (kap-server)', () => {
       mkdirSync(burstDir, { recursive: true });
       for (let i = 0; i < 600; i++) writeFileSync(join(burstDir, `f${i}.txt`), `x${i}`);
 
-      const deadline = Date.now() + 4000;
+      const deadline = Date.now() + 12000;
       let sawTruncated = false;
       while (Date.now() < deadline) {
         let frame: WsFrame;
@@ -246,7 +254,7 @@ describe('WS fs watch (kap-server)', () => {
         if (frame.type !== 'event.fs.changed') continue;
         const payload = frame.payload as { truncated?: boolean; count?: number };
         if (payload.truncated === true) {
-          expect(payload.count).toBeGreaterThan(500);
+          expect(payload.count).toBeGreaterThan(100);
           sawTruncated = true;
           break;
         }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { join } from 'pathe';
@@ -37,13 +37,53 @@ describe('FileStorageService — file permissions', () => {
   });
 
   it.skipIf(isWin)('defaults to the process umask when modes are omitted', async () => {
-    // Backwards compatibility: an unconfigured FileStorageService must not
-    // start tightening permissions on its own — bootstrap opts into 0700/0600.
     const svc = new FileStorageService(dir);
     await svc.write('scope', 'k.json', encoder.encode('{}'));
     const fileStat = await stat(join(dir, 'scope', 'k.json'));
-    // Owner-read/write is always set; we only assert the file is readable by
-    // its owner (the lower bound) rather than pinning an exact mode.
     expect(fileStat.mode & 0o400).toBe(0o400);
+  });
+});
+
+describe('FileStorageService — error translation', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'fss-err-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps ENOENT semantics: read returns undefined, list returns []', async () => {
+    const svc = new FileStorageService(dir);
+    expect(await svc.read('scope', 'missing.json')).toBeUndefined();
+    expect(await svc.list('missing-scope')).toEqual([]);
+    await expect(svc.delete('scope', 'missing.json')).resolves.toBeUndefined();
+  });
+
+  it.skipIf(isWin)('translates non-ENOENT failures into StorageError(io_failed)', async () => {
+    const svc = new FileStorageService(dir);
+    await mkdir(join(dir, 'scope', 'adir'), { recursive: true });
+    await expect(svc.read('scope', 'adir')).rejects.toSatisfy((error: unknown) => {
+      expect(error).toMatchObject({ code: 'storage.io_failed' });
+      const io = error as { details?: Record<string, unknown>; cause?: unknown };
+      expect(io.details).toMatchObject({
+        path: join(dir, 'scope', 'adir'),
+        op: 'read',
+        errno: 'EISDIR',
+      });
+      expect(io.cause).toBeInstanceOf(Error);
+      return true;
+    });
+  });
+
+  it.skipIf(isWin)('translates write failures into StorageError(io_failed)', async () => {
+    const svc = new FileStorageService(dir);
+    await writeFile(join(dir, 'blocked'), 'x');
+    await expect(svc.write('blocked', 'k.json', encoder.encode('{}'))).rejects.toMatchObject({
+      code: 'storage.io_failed',
+      details: { op: 'write', errno: expect.any(String) },
+    });
   });
 });

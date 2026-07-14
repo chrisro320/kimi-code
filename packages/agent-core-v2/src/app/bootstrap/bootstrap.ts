@@ -3,13 +3,14 @@
  *
  * Defines the `IBootstrapService`, the snapshot of the world the process runs
  * in, resolved once at startup and frozen for the process: observed host facts
- * (`platform`, `arch`, `cwd`, `osHomeDir`, `getEnv`) and the app path layout
- * (`homeDir`, `configPath`, …). `resolveBootstrapOptions` is the single place
- * that reads `process.env` / `os.homedir()` / invocation input to resolve
- * the snapshot; everything downstream reads from `IBootstrapService` instead of
- * touching `process` directly. Bound at App scope. Also seeds the
- * `IFileSystemStorageService` with a `FileStorageService` rooted at `homeDir`
- * so the byte layer (and every Store above it) persists to disk.
+ * (`platform`, `arch`, `cwd`, `osHomeDir`, `getEnv`, `clientVersion`) and the
+ * app path layout (`homeDir`, `configPath`, …). `resolveBootstrapOptions` is
+ * the single place that reads `process.env` / `os.homedir()` / invocation
+ * input to resolve the snapshot; everything downstream reads from
+ * `IBootstrapService` instead of touching `process` directly. Bound at App
+ * scope. Also seeds the `IFileSystemStorageService` with a `FileStorageService`
+ * rooted at `homeDir` so the byte layer (and every Store above it) persists
+ * to disk.
  */
 
 import { mkdirSync } from 'node:fs';
@@ -35,18 +36,12 @@ export interface IBootstrapOptions {
   readonly arch: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly clientVersion: string;
 }
 
 export const IBootstrapOptions: ServiceIdentifier<IBootstrapOptions> =
   createDecorator<IBootstrapOptions>('bootstrapOptions');
 
-/**
- * Well-known top-level persistence areas. The bootstrap layer owns the mapping
- * from each semantic name to concrete backend addressing; business code passes
- * a scope string to `IFileSystemStorageService` / `IAtomicDocumentStore` / `IAppendLogStore`
- * without caring whether the byte layer talks to a filesystem, a database, or
- * a blob store.
- */
 export type PersistenceScopeName =
   | 'config'
   | 'sessions'
@@ -66,39 +61,18 @@ export interface IBootstrapService {
   readonly osHomeDir: string;
   readonly homeDir: string;
   readonly configPath: string;
+  readonly clientVersion: string;
   readonly sessionsDir: string;
   readonly blobsDir: string;
   readonly storeDir: string;
   readonly cacheDir: string;
   readonly logsDir: string;
   getEnv(name: string): string | undefined;
-  /**
-   * Scope string for a well-known top-level persistence area. Business code
-   * passes this to `IFileSystemStorageService` / `IAtomicDocumentStore` / `IAppendLogStore`
-   * — the backend layer converts it to concrete addressing.
-   */
   scope(name: PersistenceScopeName): string;
-  /**
-   * Scope string for a session's persistence root.
-   * Equivalent to `${scope('sessions')}/${workspaceId}/${sessionId}`.
-   */
   sessionScope(workspaceId: string, sessionId: string): string;
-  /**
-   * Scope string for a specific agent's persistence root under a session.
-   * Equivalent to `${sessionScope(wsId, sId)}/agents/${agentId}`.
-   */
   agentScope(workspaceId: string, sessionId: string, agentId: string): string;
-  /**
-   * File-only: absolute on-disk directory for a session.
-   * Prefer `sessionScope(...)` — this exists for legacy APIs (session logs,
-   * task output files). Non-file bootstraps may throw.
-   */
   sessionDir(workspaceId: string, sessionId: string): string;
-  /**
-   * File-only: absolute on-disk directory for a specific agent. Same caveat.
-   */
   agentHomedir(workspaceId: string, sessionId: string, agentId: string): string;
-  /** Key of the config document under `scope('config')` (file: `'config.toml'`). */
   readonly configKey: string;
 }
 
@@ -113,6 +87,7 @@ export interface BootstrapInput {
   readonly platform?: NodeJS.Platform;
   readonly arch?: string;
   readonly cwd?: string;
+  readonly clientVersion?: string;
 }
 
 export function resolveBootstrapOptions(input: BootstrapInput = {}): IBootstrapOptions {
@@ -128,6 +103,7 @@ export function resolveBootstrapOptions(input: BootstrapInput = {}): IBootstrapO
     arch: input.arch ?? process.arch,
     cwd: input.cwd ?? process.cwd(),
     env,
+    clientVersion: input.clientVersion ?? 'unknown',
   };
 }
 
@@ -156,9 +132,6 @@ function storageSeed(options: IBootstrapOptions): ScopeSeed {
 }
 
 function skillSeed(): ScopeSeed {
-  // The skill catalog Store is bound to the filesystem backend so skill
-  // discovery reads from disk. Tests rely on the in-memory backend registered
-  // in the skill domain (this `extra` seed overrides it in production).
   return [
     [
       ISkillDiscovery as ServiceIdentifier<unknown>,

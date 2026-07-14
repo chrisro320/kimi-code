@@ -9,8 +9,8 @@
  * `ContextModel` (see `contextOps.ts`): dispatching `swarm_mode.exit` pops the
  * reminder when it is the last message, both live and on replay — exactly like
  * v1's restore-time `popMatchedMessage`. The service only publishes the
- * live-only `context.spliced` event for that pop (so injector/micro-compaction
- * bookkeeping stays in step) and appends the exit reminder when nothing was
+ * live-only `context.spliced` event for that pop (so injector bookkeeping
+ * stays in step) and appends the exit reminder when nothing was
  * popped. Bound at Agent scope. The `AgentSwarm` tool self-registers via
  * `registerTool(...)` in `tools/agent-swarm.ts`.
  */
@@ -20,7 +20,6 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
-import { IAgentTurnService } from '#/agent/turn/turn';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
@@ -36,7 +35,6 @@ export class AgentSwarmService extends Disposable implements IAgentSwarmService 
     @IAgentWireService private readonly wire: IWireService,
     @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IAgentTurnService turnService: IAgentTurnService,
     @IEventBus private readonly eventBus: IEventBus,
   ) {
     super();

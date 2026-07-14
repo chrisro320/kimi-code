@@ -9,7 +9,7 @@ import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { IConfigRegistry, IConfigService } from '#/app/config/config';
 import { ConfigRegistry } from '#/app/config/configService';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import { kimiModelEnvOverlay, ENV_MODEL_ALIAS_KEY } from '#/app/model/envOverlay';
 import {
   IModelService,
@@ -177,8 +177,8 @@ function expectConfigInvalid(fn: () => unknown): void {
   try {
     fn();
   } catch (error) {
-    expect(error).toBeInstanceOf(KimiError);
-    expect((error as KimiError).code).toBe(ErrorCodes.CONFIG_INVALID);
+    expect(error).toBeInstanceOf(Error2);
+    expect((error as Error2).code).toBe(ErrorCodes.CONFIG_INVALID);
     return;
   }
   throw new Error('expected config.invalid');
@@ -255,8 +255,6 @@ describe('kimiModelEnvOverlay', () => {
   });
 
   it('honors an explicit baseUrl over the type default', () => {
-    // The KIMI_MODEL_BASE_URL binding is applied by the provider config section;
-    // emulate its effect by seeding the resolved provider with the bound baseUrl.
     const { effective } = applyKimiModelEnvOverlay(
       { KIMI_MODEL_NAME: 'env-model' },
       {
@@ -383,12 +381,6 @@ describe('kimiModelEnvOverlay', () => {
   });
 
   it('self-registers into ConfigRegistry without ModelService instantiation', () => {
-    // envOverlay.ts calls registerConfigOverlay(kimiModelEnvOverlay) at module
-    // load, so a freshly constructed ConfigRegistry drains it even though no
-    // Service (notably ModelService) has been instantiated. This guards the
-    // release-e2e wire-llm-request-trace scenario, where KIMI_MODEL_NAME must
-    // synthesize the env model (and its thinking capability) even when nothing
-    // resolves IModelService.
     const freshRegistry = new ConfigRegistry();
     expect(freshRegistry.listEffectiveOverlays()).toContain(kimiModelEnvOverlay);
   });

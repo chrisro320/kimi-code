@@ -23,13 +23,13 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 
 import { createTestAgent, mcpServices, type TestAgentContext } from '../../harness';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
+import { stubLoopWithHooks } from '../loop/stubs';
 import { stubToolResultTruncationService } from '../toolResultTruncation/stubs';
-import { stubTurnWithHooks } from '../turn/stubs';
 import { discoverTools, executeTool, fakeMcpClient } from './stubs';
 
 const MCP_OUTPUT_TRUNCATED_TEXT =
@@ -170,7 +170,7 @@ describe('AgentMcpService', () => {
     ix.set(IAgentToolRegistryService, new SyncDescriptor(AgentToolRegistryService));
     ix.set(IAgentToolExecutorService, new SyncDescriptor(AgentToolExecutorService));
     ix.stub(IAgentToolResultTruncationService, stubToolResultTruncationService());
-    ix.stub(IAgentTurnService, stubTurnWithHooks());
+    ix.stub(IAgentLoopService, stubLoopWithHooks());
     wire = disposables.add(new WireService({ logScope: 'mcp-test', logKey: 'wire.jsonl' }));
     ix.stub(IAgentWireService, wire);
   });
@@ -591,7 +591,7 @@ describe('AgentMcpService', () => {
     const { records, off } = collectDiscoveries();
     try {
       manager.connect('grafana');
-      expect(records).toHaveLength(0); // parked until restore
+      expect(records).toHaveLength(0);
       await wire.replay();
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
@@ -602,11 +602,9 @@ describe('AgentMcpService', () => {
       });
       expect(records[0]!['collisions']).toBeUndefined();
 
-      // identical content -> no second record
       manager.connect('grafana');
       expect(records).toHaveLength(1);
 
-      // allow-list change is a different gating decision -> record again
       manager.setResolved('grafana', client, await discoverTools(client), new Set(), rawTools);
       manager.connect('grafana');
       expect(records).toHaveLength(2);
@@ -631,7 +629,7 @@ describe('AgentMcpService', () => {
     const { records, off } = collectDiscoveries();
     try {
       manager.connect('grafana');
-      expect(records).toHaveLength(0); // parked, not yet durable
+      expect(records).toHaveLength(0);
       await wire.replay();
       expect(records).toHaveLength(1);
     } finally {
@@ -720,7 +718,7 @@ describe('AgentMcpService', () => {
     );
     createService(manager);
     manager.connect('graf.ana');
-    await wire.replay(); // restore; occupant discovery recorded (before we subscribe)
+    await wire.replay();
 
     const { records, off } = collectDiscoveries();
     try {
@@ -733,12 +731,12 @@ describe('AgentMcpService', () => {
         new Set(['query_range']),
         rawTools,
       );
-      manager.connect('graf_ana'); // collides with the occupant's qualified name
+      manager.connect('graf_ana');
       expect(records).toHaveLength(1);
       expect(records[0]!['collisions']).toHaveLength(1);
 
-      manager.disconnect('graf.ana'); // occupant gone
-      manager.connect('graf_ana'); // same rawTools/allow-list, collision flipped
+      manager.disconnect('graf.ana');
+      manager.connect('graf_ana');
       expect(records).toHaveLength(2);
       expect(records[1]!['collisions']).toBeUndefined();
     } finally {

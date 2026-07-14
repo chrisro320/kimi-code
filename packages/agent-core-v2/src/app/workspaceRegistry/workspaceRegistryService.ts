@@ -7,8 +7,14 @@
  * absent or malformed, it is rebuilt once from the legacy
  * `<homeDir>/session_index.jsonl` (one workspace per distinct absolute
  * `workDir`) and then persisted. All access is serialized through a
- * promise-chain mutex so load/rebuild/mutations never race. Bound at App
- * scope.
+ * promise-chain mutex so load/rebuild/mutations never race.
+ *
+ * `createOrTouch` is the single choke point every workspace/session creation
+ * funnels through, so it owns the root-existence contract: the root must be
+ * an existing directory on the host filesystem, otherwise it throws
+ * `fs.path_not_found` (mirrors v1's `WorkspaceRootNotFoundError`). The rebuild
+ * path bypasses the check on purpose — it catalogs where sessions *were*, not
+ * where new ones may open. Bound at App scope.
  */
 
 import { basename, isAbsolute } from 'pathe';
@@ -16,13 +22,13 @@ import { basename, isAbsolute } from 'pathe';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 
 import { IWorkspaceRegistry, type Workspace, type WorkspaceUpdate } from './workspaceRegistry';
 import { IWorkspacePersistence } from './workspacePersistence';
 
-// Legacy v1 session index, read only for the one-shot rebuild. Empty scope
-// resolves to `<homeDir>/<key>` (join skips empty segments).
 const SESSION_INDEX_SCOPE = '';
 const SESSION_INDEX_KEY = 'session_index.jsonl';
 
@@ -37,13 +43,13 @@ interface SessionIndexLine {
 export class WorkspaceRegistryService implements IWorkspaceRegistry {
   declare readonly _serviceBrand: undefined;
 
-  /** `undefined` until the first access loads/rebuilds the catalog. */
   private cache: Map<string, Workspace> | undefined;
   private opQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
     @IWorkspacePersistence private readonly store: IWorkspacePersistence,
     @IFileSystemStorageService private readonly storage: IFileSystemStorageService,
+    @IHostFileSystem private readonly hostFs: IHostFileSystem,
   ) {}
 
   list(): Promise<readonly Workspace[]> {
@@ -63,6 +69,19 @@ export class WorkspaceRegistryService implements IWorkspaceRegistry {
   createOrTouch(root: string, name?: string): Promise<Workspace> {
     return this.runExclusive(async () => {
       const cache = await this.ensureLoaded();
+      let stat;
+      try {
+        stat = await this.hostFs.stat(root);
+      } catch (error) {
+        const code = (unwrapErrorCause(error) as NodeJS.ErrnoException | undefined)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `workspace root ${root} does not exist`);
+        }
+        throw error;
+      }
+      if (!stat.isDirectory) {
+        throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `workspace root ${root} is not a directory`);
+      }
       const id = encodeWorkDirKey(root);
       const existing = cache.get(id);
       const now = Date.now();
@@ -174,14 +193,6 @@ function parseSessionIndexLine(line: string): SessionIndexLine | undefined {
   }
 }
 
-/**
- * Collapse registered workspaces that share a `root`. The persisted catalog
- * (v1-compatible `workspaces.json`) can hold legacy entries whose id was
- * computed by an older `encodeWorkDirKey` (e.g. realpath-based on Windows) for
- * the same folder, so one root may map to multiple ids. Prefer the entry whose
- * id matches the current canonical key so current sessions' `workspace_id`
- * still resolves and the same folder is not listed twice.
- */
 function dedupeByRoot(cache: ReadonlyMap<string, Workspace>): Workspace[] {
   const byRoot = new Map<string, Workspace>();
   for (const ws of cache.values()) {

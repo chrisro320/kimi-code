@@ -15,6 +15,8 @@ import type { IProcess } from '#/session/process/processRunner';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { TERMINAL_STATUSES } from '#/agent/task/types';
 import { ProcessTask } from '#/os/backends/node-local/tools/process-task';
 import {
   taskServices,
@@ -23,7 +25,7 @@ import {
   type TestAgentContext,
 } from '../../harness';
 import {
-  TASK_TEST_SESSION_SCOPE,
+  TASK_TEST_AGENT_SCOPE,
   createAgentTaskPersistence,
 } from './stubs';
 
@@ -44,7 +46,6 @@ function immediateProcess(exitCode: number, stdoutText = ''): IProcess {
   };
 }
 
-/** A process whose stdout and exit are driven by the test, for timing control. */
 function controllableProcess(): {
   proc: IProcess;
   pushStdout: (text: string) => void;
@@ -87,6 +88,31 @@ function registerForeground(
   });
 }
 
+async function drainPendingNotifications(
+  ctx: TestAgentContext,
+  background: IAgentTaskService,
+): Promise<void> {
+  const expectsNotification = background
+    .list(false)
+    .some(
+      (task) =>
+        TERMINAL_STATUSES.has(task.status) &&
+        task.detached !== false &&
+        task.terminalNotificationSuppressed !== true,
+    );
+  if (!expectsNotification) return;
+  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
+  await vi.waitFor(() => {
+    const delivered = ctx.allEvents.filter((e) => e.event === 'task.notified').length;
+    expect(delivered).toBeGreaterThanOrEqual(1);
+  });
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
+  });
+}
+
 describe('AgentTaskService — foreground persistence', () => {
   let sessionDir: string;
   let persistence: ReturnType<typeof createAgentTaskPersistence>;
@@ -102,6 +128,7 @@ describe('AgentTaskService — foreground persistence', () => {
 
   afterEach(async () => {
     try {
+      await drainPendingNotifications(ctx, background);
       await ctx.expectResumeMatches();
     } finally {
       await ctx.dispose();
@@ -110,7 +137,7 @@ describe('AgentTaskService — foreground persistence', () => {
   });
 
   const taskJsonPath = (taskId: string): string =>
-    join(sessionDir, TASK_TEST_SESSION_SCOPE, 'tasks', `${taskId}.json`);
+    join(sessionDir, TASK_TEST_AGENT_SCOPE, 'tasks', `${taskId}.json`);
 
   it('writes nothing to disk for a foreground task that does not spill or detach', async () => {
     const taskId = registerForeground(background, immediateProcess(0, 'hello\n'), 'echo', 'demo');
@@ -120,7 +147,6 @@ describe('AgentTaskService — foreground persistence', () => {
     expect(existsSync(taskJsonPath(taskId))).toBe(false);
     expect(existsSync(persistence.taskOutputFile(taskId))).toBe(false);
 
-    // Output is still readable from the in-memory ring buffer.
     const snapshot = await background.getOutputSnapshot(taskId, 1_000);
     expect(snapshot.fullOutputAvailable).toBe(false);
     expect(snapshot.preview).toContain('hello');
@@ -131,7 +157,7 @@ describe('AgentTaskService — foreground persistence', () => {
     const taskId = registerForeground(background, proc, 'stream', 'demo');
 
     pushStdout('before-detach\n');
-    await tick(); // buffered in memory, not yet on disk
+    await tick();
     expect(existsSync(persistence.taskOutputFile(taskId))).toBe(false);
 
     expect(background.detach(taskId)?.detached).toBe(true);
@@ -141,7 +167,6 @@ describe('AgentTaskService — foreground persistence', () => {
     finish(0);
     await background.wait(taskId);
 
-    // output.log is the complete, in-order record across the detach boundary.
     expect(await background.readOutput(taskId)).toBe('before-detach\nafter-detach\n');
     expect(existsSync(taskJsonPath(taskId))).toBe(true);
   });
@@ -152,10 +177,8 @@ describe('AgentTaskService — foreground persistence', () => {
 
     await background.wait(taskId);
 
-    // getOutputSnapshot drains the output write queue before reporting size.
     const snapshot = await background.getOutputSnapshot(taskId, 1_000);
 
-    // Spilled artifacts are persisted complete and NOT deleted on completion.
     expect(existsSync(persistence.taskOutputFile(taskId))).toBe(true);
     expect(existsSync(taskJsonPath(taskId))).toBe(true);
     expect(snapshot.fullOutputAvailable).toBe(true);

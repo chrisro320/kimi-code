@@ -43,20 +43,13 @@ export interface TerminalSpawnOptions {
 }
 
 export interface TerminalProcess {
-  readonly onData: Event<string>;
-  readonly onExit: Event<{ exitCode: number | null }>;
+  readonly onProcessData: Event<string>;
+  readonly onProcessExit: Event<{ exitCode: number | null }>;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(): void;
 }
 
-/**
- * App-scoped OS terminal process service.
- *
- * Owns the actual PTY process layer for the whole process. It does not know
- * about sessions, workspace paths, or output buffering; it only spawns and
- * exposes `TerminalProcess` handles directly via `node-pty`.
- */
 export interface IHostTerminalService {
   readonly _serviceBrand: undefined;
 

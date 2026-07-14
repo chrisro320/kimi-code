@@ -4,6 +4,8 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { MiniDb } from '@moonshot-ai/minidb';
+
 import { InstantiationType } from '#/_base/di/extensions';
 import {
   LifecycleScope,
@@ -66,6 +68,7 @@ describe('FileSessionIndex (legacy)', () => {
       stubPair(IBootstrapService, stubBootstrap(homeDir)),
       stubPair(IQueryStore, stubQueryStore()),
       stubPair(IFlagService, stubFlag(false)),
+      stubPair(ILogService, stubLog()),
     ]);
     disposeHost = () => {
       host.dispose();
@@ -158,13 +161,11 @@ describe('FileSessionIndex (legacy)', () => {
       updatedAt: 8,
       custom: { parent_session_id: 'parent', child_session_kind: 'child' },
     });
-    // A plain fork carries `parent_session_id` but no `child_session_kind` — excluded.
     await seedSession('fork', {
       createdAt: 4,
       updatedAt: 7,
       custom: { parent_session_id: 'parent' },
     });
-    // A grandchild points at `child-a`, not `parent` — excluded.
     await seedSession('grandchild', {
       createdAt: 5,
       updatedAt: 6,
@@ -268,8 +269,6 @@ describe('FileSessionIndex (read model)', () => {
     expect(first.items.map((s) => s.id)).toEqual(['active']);
     expect(first.items[0]?.title).toBe('hello');
 
-    // A second list is served from the read model: mutate the read model to
-    // prove the disk is not re-read.
     await queryStore.put(
       SESSION_COLLECTION,
       'active',
@@ -281,7 +280,6 @@ describe('FileSessionIndex (read model)', () => {
 
   it('get prefers the read model over disk', async () => {
     const store = build();
-    // Not seeded on disk — only present in the read model.
     await queryStore.put(SESSION_COLLECTION, 'warm', summary('warm', { title: 'cached' }));
     const got = await store.get('warm');
     expect(got?.title).toBe('cached');
@@ -298,7 +296,6 @@ describe('FileSessionIndex (read model)', () => {
       updatedAt: 8,
       custom: { parent_session_id: 'parent', child_session_kind: 'child' },
     });
-    // Plain fork (no kind) and a grandchild (different parent) are excluded.
     await seedSession('fork', {
       createdAt: 4,
       updatedAt: 7,
@@ -322,8 +319,38 @@ describe('FileSessionIndex (read model)', () => {
     const store = build();
     expect(await store.countActive(workspaceId)).toBe(1);
 
-    // Archive `a` through the read model (as SessionMetadata would).
     await queryStore.put(SESSION_COLLECTION, 'a', summary('a', { archived: true }));
     expect(await store.countActive(workspaceId)).toBe(0);
+  });
+
+  it('falls back to the legacy disk path when the query store is locked', async () => {
+    await seedSession('active', { title: 'from disk', createdAt: 1, updatedAt: 2 });
+
+    const lockHolder = await MiniDb.open({
+      dir: join(homeDir, 'cache', 'query-store'),
+      valueCodec: 'json',
+    });
+    const warnings: string[] = [];
+    const log = { ...stubLog(), warn: (msg: string) => { warnings.push(msg); } };
+    try {
+      const fileStorage = new FileStorageService(homeDir);
+      const host = createScopedTestHost([
+        stubPair(IFileSystemStorageService, fileStorage),
+        stubPair(IAtomicDocumentStore, new JsonAtomicDocumentStore(fileStorage)),
+        stubPair(IBootstrapService, stubBootstrap(homeDir)),
+        stubPair(ILogService, log),
+        stubPair(IFlagService, stubFlag(true)),
+      ]);
+      disposeHost = () => { host.dispose(); };
+      const store = host.app.accessor.get(ISessionIndex);
+      const page = await store.list({ workspaceId });
+      expect(page.items.map((s) => s.id)).toEqual(['active']);
+      expect(page.items[0]?.title).toBe('from disk');
+      expect(await store.get('active')).toMatchObject({ id: 'active', title: 'from disk' });
+      expect(await store.countActive(workspaceId)).toBe(1);
+      expect(warnings).toEqual(['query-store locked by another process; disabling read model']);
+    } finally {
+      await lockHolder.close();
+    }
   });
 });

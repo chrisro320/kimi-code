@@ -1,5 +1,6 @@
 import type { SkillListSession } from '../commands';
 
+import { createKimiCodeUserAgent } from '#/cli/version';
 import type { CoreHarness, CoreSession } from '#/core/index';
 import { OAUTH_LOGIN_REQUIRED_STARTUP_NOTICE } from '../constant/kimi-tui';
 import {
@@ -164,6 +165,7 @@ export class AuthFlowController {
         const tokenProvider = host.harness.auth.resolveOAuthTokenProvider(providerName, oauthRef);
         return tokenProvider.getAccessToken();
       },
+      userAgent: createKimiCodeUserAgent(),
     };
     const result = await refreshAllProviderModels(hostAdapter, { scope });
     if (result.changed.length > 0) {

@@ -25,19 +25,12 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
 import { ErrorCodes, toKimiErrorPayload, type KimiErrorPayload } from '#/errors';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
-import { IAgentTurnService, type Turn, type TurnResult } from '#/agent/turn/turn';
+import { IAgentLoopService, type Turn, type TurnResult } from '#/agent/loop/loop';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import type { AgentProfileSummaryPolicy } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import type { AgentRunHandle, AgentRunRequest } from './agentLifecycle';
 
-/**
- * Legacy `PromptOrigin` tag emitted when one agent submits a prompt to another
- * (the `Agent` tool, swarm scheduler, …). Wire shape kept unchanged
- * (`kind: 'system_trigger', name: 'subagent'`) so existing session recordings
- * replay against v2 without a protocol schema bump. Rename lives on a separate
- * wire-cleanup PR.
- */
 export const AGENT_RUN_PROMPT_ORIGIN: PromptOrigin = {
   kind: 'system_trigger',
   name: 'subagent',
@@ -47,19 +40,11 @@ const SUBAGENT_MAX_TOKENS_ERROR =
   'Subagent turn failed before completing its final summary: reason=max_tokens';
 
 export interface RunAgentTurnOptions {
-  /** When set, drives a continuation-prompt loop when the agent's summary is too short. */
   readonly summaryPolicy?: AgentProfileSummaryPolicy;
-  /** Cancellation signal. Aborting it cancels the agent's turn. */
   readonly signal: AbortSignal;
-  /** Fires once the turn's first request is committed (used by swarm to fan out). */
   readonly onReady?: () => void;
 }
 
-/**
- * Submit a prompt (or a retry) to `target` and resolve to the running `Turn`
- * plus a promise of the distilled summary/usage. Throws when the underlying
- * `IAgentPromptService.prompt/retry` refuses to launch a turn (busy / no head).
- */
 export async function runAgentTurn(
   target: IAgentScopeHandle,
   request: AgentRunRequest,
@@ -69,13 +54,13 @@ export async function runAgentTurn(
   const promptService = target.accessor.get(IAgentPromptService);
   const turn =
     request.kind === 'prompt'
-      ? await promptService.prompt({
+      ? await (await promptService.enqueue({ message: {
           role: 'user',
           content: [{ type: 'text', text: request.prompt }],
           toolCalls: [],
           origin: AGENT_RUN_PROMPT_ORIGIN,
-        })
-      : promptService.retry();
+        } })).launched
+      : await promptService.retry();
   if (turn === undefined) throw new Error('Agent turn could not be started');
 
   if (options.onReady !== undefined) {
@@ -93,9 +78,9 @@ async function awaitRun(
 ): Promise<{ summary: string; usage?: TokenUsage }> {
   const controller = new AbortController();
   const unlink = linkAbortSignal(options.signal, controller);
-  const turnService = target.accessor.get(IAgentTurnService);
+  const loop = target.accessor.get(IAgentLoopService);
   const cancelTurn = (reason: unknown): void => {
-    turnService.cancel(undefined, reason);
+    loop.cancel(undefined, reason);
   };
   let turnRef: Turn = turn;
   try {
@@ -150,12 +135,12 @@ async function distillSummary(
 
   const promptService = target.accessor.get(IAgentPromptService);
   for (let attempt = 0; attempt < policy.retries; attempt++) {
-    const turn = await promptService.prompt({
+    const turn = await (await promptService.enqueue({ message: {
       role: 'user',
       content: [{ type: 'text', text: policy.continuationPrompt }],
       toolCalls: [],
       origin: AGENT_RUN_PROMPT_ORIGIN,
-    });
+    } })).launched;
     if (turn === undefined) break;
     setTurn(turn);
     const result = await awaitTurn(turn, controller, cancelTurn);

@@ -128,11 +128,24 @@ export type LoopControl = z.infer<typeof LoopControlSchema>;
 export const BackgroundConfigSchema = z.object({
   maxRunningTasks: z.number().int().min(1).optional(),
   keepAliveOnExit: z.boolean().optional(),
+  /**
+   * When a foreground Bash command times out, move it to the background
+   * instead of killing it. Defaults to true when unset.
+   */
+  bashAutoBackgroundOnTimeout: z.boolean().optional(),
   killGracePeriodMs: z.number().int().min(0).optional(),
   printWaitCeilingS: z.number().int().min(1).optional(),
+  printBackgroundMode: z.enum(['exit', 'drain', 'steer']).optional(),
+  printMaxTurns: z.number().int().min(1).optional(),
 });
 
 export type BackgroundConfig = z.infer<typeof BackgroundConfigSchema>;
+
+export const SubagentConfigSchema = z.object({
+  timeoutMs: z.number().int().min(1).optional(),
+});
+
+export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
 
 export const ImageConfigSchema = z.object({
   /**
@@ -275,6 +288,7 @@ export const KimiConfigSchema = z.object({
   extraSkillDirs: z.array(z.string()).optional(),
   loopControl: LoopControlSchema.optional(),
   background: BackgroundConfigSchema.optional(),
+  subagent: SubagentConfigSchema.optional(),
   image: ImageConfigSchema.optional(),
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
@@ -290,6 +304,7 @@ const ThinkingConfigPatchSchema = ThinkingConfigSchema.partial();
 const PermissionConfigPatchSchema = PermissionConfigSchema.partial();
 const LoopControlPatchSchema = LoopControlSchema.partial();
 const BackgroundConfigPatchSchema = BackgroundConfigSchema.partial();
+const SubagentConfigPatchSchema = SubagentConfigSchema.partial();
 const ImageConfigPatchSchema = ImageConfigSchema.partial();
 const ModelCatalogConfigPatchSchema = ModelCatalogConfigSchema.partial();
 const ExperimentalConfigPatchSchema = ExperimentalConfigSchema;
@@ -317,6 +332,7 @@ export const KimiConfigPatchSchema = z
     extraSkillDirs: z.array(z.string()).optional(),
     loopControl: LoopControlPatchSchema.optional(),
     background: BackgroundConfigPatchSchema.optional(),
+    subagent: SubagentConfigPatchSchema.optional(),
     image: ImageConfigPatchSchema.optional(),
     modelCatalog: ModelCatalogConfigPatchSchema.optional(),
     experimental: ExperimentalConfigPatchSchema.optional(),

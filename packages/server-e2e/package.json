@@ -15,10 +15,7 @@
   },
   "type": "module",
   "imports": {
-    "#/*": [
-      "./src/*.ts",
-      "./src/*/index.ts"
-    ]
+    "#/*": "./src/*.ts"
   },
   "exports": {
     ".": {
@@ -43,6 +40,7 @@
   "devDependencies": {
     "@moonshot-ai/agent-core-v2": "workspace:^",
     "@moonshot-ai/kap-server": "workspace:^",
+    "@moonshot-ai/klient": "workspace:^",
     "@types/ws": "^8.18.0"
   }
 }

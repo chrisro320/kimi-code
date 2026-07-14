@@ -15,6 +15,7 @@ import {
 } from '../lib/workspaceOrder';
 import { mergeWorkspaces } from '../lib/mergeWorkspaces';
 import { mergeSnapshotMessages } from '../lib/snapshotMessages';
+import { mergeSnapshotSubagents } from '../lib/taskMerge';
 import { createCoalescedAsyncRunner } from '../lib/snapshotSync';
 import {
   loadUnread,
@@ -35,7 +36,11 @@ import { useSoundNotification } from './client/useSoundNotification';
 import { useTaskPoller } from './client/useTaskPoller';
 import { useModelProviderState } from './client/useModelProviderState';
 import { useSideChat } from './client/useSideChat';
-import { SESSIONS_INITIAL_PAGE_SIZE, useWorkspaceState } from './client/useWorkspaceState';
+import {
+  forgetLocalTurnState,
+  SESSIONS_INITIAL_PAGE_SIZE,
+  useWorkspaceState,
+} from './client/useWorkspaceState';
 
 const appearance = useAppearance();
 const notification = useNotification();
@@ -62,7 +67,7 @@ import type {
   ThinkingLevel,
 } from '../api/types';
 import { createInitialState, reduceAppEvent, type CompactionStatus, type KimiClientState } from '../api/daemon/eventReducer';
-import { toAppEvent } from '../api/daemon/mappers';
+import { isPlaceholderSessionUsage, toAppEvent } from '../api/daemon/mappers';
 
 import { messagesToTurns } from './messagesToTurns';
 import { latestTodos } from './latestTodos';
@@ -288,6 +293,13 @@ export interface ExtendedState extends KimiClientState {
    * prompt and connects without a credential.
    */
   dangerousBypassAuth: boolean;
+  /**
+   * Engine generation of the connected server: `'v2'` = kap-server /
+   * agent-core-v2, `'v1'` = an older (legacy) server binary. Read from `/meta`
+   * (`backend` field; older servers omit it ⇒ v1). Drives the dev-mode
+   * backend badge in the Sidebar.
+   */
+  backend: 'v1' | 'v2';
   workspaceName: string;
   connection: ConnectionState;
   permission: PermissionMode;
@@ -360,6 +372,7 @@ const rawState: ExtendedState = reactive({
   connected: false,
   serverVersion: '',
   dangerousBypassAuth: false,
+  backend: 'v1',
   workspaceName: 'kimi-web',
   connection: 'disconnected' as ConnectionState,
   permission: loadPermissionFromStorage(),
@@ -499,6 +512,10 @@ if (typeof document !== 'undefined') {
     }
   });
 }
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', recoverStaleConnection);
+  window.addEventListener('online', recoverStaleConnection);
+}
 
 // ---------------------------------------------------------------------------
 // rawState.activeSessionId — single mutation funnel.
@@ -567,12 +584,15 @@ function forgetSession(sessionId: string): void {
   delete rawState.messagesHasMoreBySession[sessionId];
   delete rawState.messagesLoadMoreErrorBySession[sessionId];
   delete epochBySession[sessionId];
+  sessionsRequiringSnapshot.delete(sessionId);
+  sessionsRetryingStaleSnapshot.delete(sessionId);
   sessionsKnownEmpty.delete(sessionId);
   // In-flight / queued prompt state: drop these too so a queued follow-up
   // can't be submitted to a session that was just archived when its turn later
   // goes idle (onSessionIdle drains queuedBySession[sid] without re-checking
   // that the session still exists).
   inFlightPromptSessions.delete(sessionId);
+  forgetLocalTurnState(sessionId);
   delete rawState.queuedBySession[sessionId];
   delete rawState.promptIdBySession[sessionId];
   delete rawState.sendingBySession[sessionId];
@@ -599,6 +619,10 @@ const fileDiffLoading = ref(false);
 // False until the very first load() settles (success OR failure). Gates the
 // global connecting-splash so a page refresh doesn't flash a half-empty app.
 const initialized = ref(false);
+// Short diagnostic shown on the connecting splash while the first-load /auth
+// gate keeps retrying (e.g. the daemon's error message). Null when no attempt
+// has failed yet or the last attempt got through.
+const connectIssue = ref<string | null>(null);
 
 /**
  * Fetch GET /sessions/{id}/status and fold the live model + context usage back
@@ -624,6 +648,38 @@ async function refreshSessionStatus(sessionId: string): Promise<void> {
   }));
   rawState.swarmModeBySession = { ...rawState.swarmModeBySession, [sessionId]: st.swarmMode };
   rawState.planModeBySession = { ...rawState.planModeBySession, [sessionId]: st.planMode };
+}
+
+/**
+ * Fetch GET /sessions/{id}/goal and fold the result into goalBySession — the
+ * recovery channel for the goal card after a full-page reload (the snapshot +
+ * WS-replay path never carries the historical `goal.updated`, since its seq is
+ * ≤ the snapshot watermark). Never throws — an old daemon without the /goal
+ * endpoint keeps any live-event state.
+ */
+async function refreshSessionGoal(sessionId: string): Promise<void> {
+  // A live `goal.updated` arriving during the request is newer than whatever
+  // the server read when handling it — never let this recovery write override
+  // such an event (it would resurrect a finished goal until the next reload).
+  // Track the per-session goal event version, not the goal entry itself:
+  // clear/complete events DELETE the entry, which would leave an
+  // undefined === undefined comparison blind to exactly the race that matters.
+  const versionBefore = rawState.goalVersionBySession[sessionId] ?? 0;
+  let goal: AppGoal | null;
+  try {
+    goal = await getKimiWebApi().getSessionGoal(sessionId);
+  } catch {
+    return; // goal endpoint missing/unreachable — keep what we have.
+  }
+  if ((rawState.goalVersionBySession[sessionId] ?? 0) !== versionBefore) {
+    return; // a live goal event won the race
+  }
+  // Mirror the reducer's goalUpdated branch: null (or a completed goal) clears
+  // the card, anything else replaces it.
+  const nextGoals = { ...rawState.goalBySession };
+  if (goal === null || goal.status === 'complete') delete nextGoals[sessionId];
+  else nextGoals[sessionId] = goal;
+  rawState.goalBySession = nextGoals;
 }
 
 /** Persist runtime controls to a session via POST /profile, then re-read
@@ -735,6 +791,7 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
     questionsBySession: rawState.questionsBySession,
     tasksBySession: rawState.tasksBySession,
     goalBySession: rawState.goalBySession,
+    goalVersionBySession: rawState.goalVersionBySession,
     lastSeqBySession: rawState.lastSeqBySession,
     compactionBySession: rawState.compactionBySession,
     config: rawState.config,
@@ -750,6 +807,7 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
   rawState.questionsBySession = next.questionsBySession;
   rawState.tasksBySession = next.tasksBySession;
   rawState.goalBySession = next.goalBySession;
+  rawState.goalVersionBySession = next.goalVersionBySession;
   rawState.lastSeqBySession = next.lastSeqBySession;
   rawState.compactionBySession = next.compactionBySession;
   rawState.config = next.config ?? null;
@@ -797,6 +855,11 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
 type PendingEvent = { appEvent: AppEvent; meta: { sessionId: string; seq: number } };
 
 function processEvent(appEvent: AppEvent, meta: { sessionId: string; seq: number }): void {
+  // Capture BEFORE applyEvent advances lastSeqBySession: turn-end side
+  // effects below only run when this event actually moves the durable cursor
+  // forward. A late duplicate idle (e.g. replayed after a snapshot already
+  // advanced past it) must not drain a second queued message.
+  const prevSeq = rawState.lastSeqBySession[meta.sessionId] ?? 0;
   // meta carries wire-level seq/sessionId so the reducer can advance
   // lastSeqBySession[sessionId] = seq. Compaction completion appends a
   // persistent divider marker in the reducer (TUI parity: the scrollback
@@ -846,9 +909,13 @@ function processEvent(appEvent: AppEvent, meta: { sessionId: string; seq: number
   // Turn-end: both 'idle' and 'aborted' mean the prompt is no longer in
   // flight, so both must flush in-flight/queued state. (Awaiting-* is still
   // in flight — it's waiting on the user — and must NOT flush.)
+  // Gated on the durable cursor advancing: a late duplicate of an idle we
+  // already consumed (directly or via a snapshot past it) must not run the
+  // side effects again — above all, it must not drain another queued message.
   if (
     appEvent.type === 'sessionStatusChanged' &&
-    (appEvent.status === 'idle' || appEvent.status === 'aborted')
+    (appEvent.status === 'idle' || appEvent.status === 'aborted') &&
+    meta.seq > prevSeq
   ) {
     onSessionIdle(appEvent.sessionId, appEvent.status);
   }
@@ -913,10 +980,12 @@ function connectEventsIfNeeded(): void {
       // so they are applied to the pre-snapshot array too rather than on top
       // of the fresh snapshot (which would duplicate text / tool output).
       enqueueEvent.flush();
-      // The server-announced cursor is only a hint; the snapshot fetch
-      // returns the authoritative {asOfSeq, epoch} and re-subscribes.
-      if (epoch !== undefined) epochBySession[sessionId] = epoch;
+      // The server-announced cursor is only a hint; keep the previous epoch
+      // until the snapshot arrives so seq values from two epochs are never
+      // compared with each other.
       void currentSeq;
+      void epoch;
+      sessionsRequiringSnapshot.add(sessionId);
       snapshotSyncRunner.request(sessionId);
     },
 
@@ -939,7 +1008,13 @@ function connectEventsIfNeeded(): void {
       // auto-dismiss timer: iOS Safari freezes timers while a tab is
       // backgrounded, so the toast would otherwise linger until a manual
       // refresh even though the reconnect already succeeded.
-      if (connected) dismissWsError();
+      if (connected) {
+        dismissWsError();
+        // A (re)connect can mean the backend was restarted — or switched, when
+        // the dev proxy was moved to the other engine. Re-read /meta so
+        // serverVersion / backend never go stale.
+        void workspaceState.refreshServerMeta();
+      }
     },
   });
 }
@@ -947,6 +1022,12 @@ function connectEventsIfNeeded(): void {
 // Journal epoch per session, learned from snapshots / resync frames. Not
 // reactive — only consulted when building the subscribe cursor.
 const epochBySession: Record<string, string> = {};
+// onResync resets the event projector, so that path must apply a snapshot even
+// if a newer global event advances the local cursor while the GET is in flight.
+const sessionsRequiringSnapshot = new Set<string>();
+// A normal foreground refresh may race one newer event. Retry once with a
+// fresh snapshot so volatile text missed during sleep is still restored.
+const sessionsRetryingStaleSnapshot = new Set<string>();
 
 // Sessions created locally in this client instance are known to be empty until
 // they receive their first message. This is more reliable than the daemon's
@@ -1176,9 +1257,12 @@ async function pullSessionWarnings(sessionId: string): Promise<void> {
 }
 
 async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionResult> {
+  // A snapshot that races a local turn start must not overwrite that turn.
+  const turnStartAtRequest = workspaceState.localTurnStartState(sessionId);
   try {
     const api = getKimiWebApi();
     const snap = await api.getSessionSnapshot(sessionId);
+    if (!rawState.sessions.some((session) => session.id === sessionId)) return 'ok';
 
     // Drain any queued streaming deltas before the snapshot replaces
     // messagesBySession[sessionId]. The snapshot is authoritative (it already
@@ -1187,12 +1271,43 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
     // the pre-snapshot array, which the snapshot then overwrites.
     enqueueEvent.flush();
 
+    // Do not let an old snapshot overwrite state that moved forward while the
+    // request was in flight. Retry once to recover volatile text at a fresh
+    // cursor; resync/LRU rebuilds must always apply because their projector or
+    // subscription was deliberately reset.
+    const currentSeq = rawState.lastSeqBySession[sessionId] ?? 0;
+    const knownEpoch = epochBySession[sessionId];
+    const mustApplySnapshot =
+      sessionsRequiringSnapshot.has(sessionId) || sessionsWithStaleCursor.has(sessionId);
+    if (
+      !mustApplySnapshot &&
+      knownEpoch !== undefined &&
+      knownEpoch === snap.epoch &&
+      currentSeq > snap.asOfSeq
+    ) {
+      if (sessionsRetryingStaleSnapshot.delete(sessionId)) return 'ok';
+      sessionsRetryingStaleSnapshot.add(sessionId);
+      snapshotSyncRunner.request(sessionId);
+      return 'ok';
+    }
+    if (!workspaceState.isLocalTurnSnapshotCurrent(sessionId, turnStartAtRequest)) {
+      workspaceState.afterLocalTurnStartsSettle(sessionId, () => {
+        snapshotSyncRunner.request(sessionId);
+      });
+      return 'ok';
+    }
+
+    const snapUsagePlaceholder = isPlaceholderSessionUsage(snap.session.usage);
     updateSession(sessionId, (s) => ({
       ...snap.session,
       model:
         snap.session.model && snap.session.model.length > 0
           ? snap.session.model
           : s.model,
+      // The wire session's usage is a placeholder (both engines return zeros
+      // for the heavy fields); keep the live usage folded in from /status and
+      // the WS status stream instead of zeroing it on every snapshot sync.
+      usage: snapUsagePlaceholder ? s.usage : snap.session.usage,
     }));
     // The snapshot only carries the most recent page; keep any older pages the
     // user already loaded so reopening does not reset scrollback.
@@ -1200,6 +1315,17 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
       sessionId,
       mergeSnapshotMessages(rawState.messagesBySession[sessionId] ?? [], snap.messages),
     );
+    // Seed the live subagent roster so swarm cards survive a page refresh
+    // (their member rows otherwise only exist from non-replayed WS events).
+    // loadTasksForSession's keepLiveSubagents preserves these across REST
+    // reloads; the roster stays authoritative until then.
+    rawState.tasksBySession = {
+      ...rawState.tasksBySession,
+      [sessionId]: mergeSnapshotSubagents(
+        snap.subagents,
+        rawState.tasksBySession[sessionId] ?? [],
+      ),
+    };
     rawState.messagesHasMoreBySession = {
       ...rawState.messagesHasMoreBySession,
       [sessionId]: snap.hasMoreMessages,
@@ -1231,6 +1357,15 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
       [sessionId]: snap.asOfSeq,
     };
     epochBySession[sessionId] = snap.epoch;
+    sessionsRequiringSnapshot.delete(sessionId);
+    sessionsRetryingStaleSnapshot.delete(sessionId);
+
+    // Resync replaces the missed event stream, so a terminal snapshot must
+    // also clear the local sending flag that normally ends on a WS idle event.
+    workspaceState.handleSessionSnapshot(
+      sessionId,
+      { inFlightTurn: snap.inFlightTurn, status: snap.session.status },
+    );
 
     connectEventsIfNeeded();
     if (eventConn) {
@@ -1241,6 +1376,12 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
       retainWsSubscription(sessionId);
     }
     sessionsWithStaleCursor.delete(sessionId);
+    // The snapshot carries placeholder usage, so a preserved cached value may
+    // itself be stale — resync / stale-socket recovery reach here without
+    // selectSession's sidecar refresh, and the volatile status frames that
+    // would update it were exactly what the resync replaced. Re-read /status
+    // so the ring converges on the live value.
+    if (snapUsagePlaceholder) void refreshSessionStatus(sessionId);
     void pullSessionWarnings(sessionId);
     return 'ok';
   } catch (err) {
@@ -1347,10 +1488,10 @@ async function reopenSession(sessionId: string): Promise<SyncSessionResult> {
     running task is its BTW side-channel agent should not look busy. When tasks
     have not been loaded yet — e.g. right after a page refresh — we trust the
     daemon-reported `running` status rather than hiding the spinner. */
-function isSessionEffectivelyRunning(sessionId: string): boolean {
-  const session = rawState.sessions.find((s) => s.id === sessionId);
+function isSessionEffectivelyRunning(session: AppSession | undefined): boolean {
   if (!session) return false;
   if (session.status !== 'running') return false;
+  const sessionId = session.id;
   const hiddenBtwAgentId = sideChat.sideChatTargetBySession.value[sessionId]?.agentId;
   const tasks = rawState.tasksBySession[sessionId] ?? [];
   const runningTasks = tasks.filter((t) => t.status === 'running');
@@ -1664,7 +1805,7 @@ const sessions = computed<Session[]>(() => {
       title: s.title,
       time: formatTime(s.updatedAt, s.status),
       status: s.status,
-      busy: isSessionEffectivelyRunning(s.id),
+      busy: isSessionEffectivelyRunning(s),
     }));
 });
 
@@ -1684,6 +1825,11 @@ const isSending = computed<boolean>(() => {
   if (!sid) return false;
   return rawState.sendingBySession[sid] ?? false;
 });
+
+// True while the empty-composer first prompt for the active workspace is being
+// created + submitted (before the session id exists). Drives the empty-session
+// "starting conversation…" loading state in ConversationPane / Composer.
+const isStartingFirstPrompt = computed<boolean>(() => workspaceState.isStartingFirstPrompt());
 
 const sideChat = useSideChat(rawState, {
   pushOperationFailure,
@@ -1767,6 +1913,7 @@ const loadMoreMessagesError = computed<boolean>(() => {
   return sid ? rawState.messagesLoadMoreErrorBySession[sid] ?? false : false;
 });
 const serverVersion = computed<string>(() => rawState.serverVersion);
+const backend = computed<'v1' | 'v2'>(() => rawState.backend);
 const dangerousBypassAuth = computed<boolean>(() => rawState.dangerousBypassAuth);
 
 /**
@@ -1870,7 +2017,8 @@ const activity = computed<ActivityState>(() => {
   const questionList = rawState.questionsBySession[sid] ?? [];
   if (questionList.length > 0) return 'awaiting-question';
 
-  if (isSessionEffectivelyRunning(sid)) {
+  const activeSession = rawState.sessions.find((s) => s.id === sid);
+  if (isSessionEffectivelyRunning(activeSession)) {
     return 'running';
   }
 
@@ -1944,7 +2092,11 @@ const status = computed<ConversationStatus>(() => {
 
   // Use the friendly displayName from the models list; fall back to stripping
   // the provider prefix (e.g. "moonshot/moonshot-v1-128k" → "moonshot-v1-128k").
-  const matched = modelProvider.models.value.find((m) => m.id === rawModel || m.model === rawModel);
+  // Prefer the exact id — model names can collide across providers, so a
+  // name-only match may resolve to the wrong provider's entry.
+  const matched =
+    modelProvider.models.value.find((m) => m.id === rawModel) ??
+    modelProvider.models.value.find((m) => m.model === rawModel);
   const displayModel =
     matched?.displayName ||
     matched?.model ||
@@ -2143,7 +2295,7 @@ const sessionsForView = computed<Session[]>(() => {
         title: s.title,
         time: formatTime(s.updatedAt, s.status),
         status: s.status,
-        busy: isSessionEffectivelyRunning(s.id),
+        busy: isSessionEffectivelyRunning(s),
         lastPrompt: s.lastPrompt,
         workspaceId,
         workspaceName: nameByWorkspaceId.get(workspaceId),
@@ -2165,7 +2317,7 @@ const workspaceGroups = computed<WorkspaceGroup[]>(() => {
       title: s.title,
       time: formatTime(s.updatedAt, s.status),
       status: s.status,
-      busy: isSessionEffectivelyRunning(s.id),
+      busy: isSessionEffectivelyRunning(s),
       updatedAt: s.updatedAt,
     };
     const list = byId.get(wid) ?? [];
@@ -2299,6 +2451,7 @@ const workspaceState = useWorkspaceState(rawState, {
   reopenSession,
   hasLoadedMessages,
   refreshSessionStatus,
+  refreshSessionGoal,
   persistSessionProfile,
   mergedWorkspaces,
   workspacesView,
@@ -2315,6 +2468,7 @@ const workspaceState = useWorkspaceState(rawState, {
   goalErrorMessage,
   resetFastMoon: appearance.resetFastMoon,
   initialized,
+  connectIssue,
   selectedDiffPath,
   fileDiffLines,
   fileDiffLoading,
@@ -2335,24 +2489,18 @@ function isUserWatching(sid: string): boolean {
 }
 
 function onSessionIdle(sid: string, status: 'idle' | 'aborted'): void {
-  // The turn finished — this session no longer has a prompt in flight.
-  inFlightPromptSessions.delete(sid);
-  rawState.sendingBySession = { ...rawState.sendingBySession, [sid]: false };
-  // Capture before the cleanup below drops it — it keys the completion
+  // Capture before finishPromptLocal drops it — it keys the completion
   // notification's dedup tag so each finished turn alerts once.
   const finishedPromptId = rawState.promptIdBySession[sid];
-  // Drop any cached prompt_id so a later skill activation (which has no
-  // prompt_id) doesn't accidentally reuse this stale id for :abort.
-  if (rawState.promptIdBySession[sid] !== undefined) {
-    const next = { ...rawState.promptIdBySession };
-    delete next[sid];
-    rawState.promptIdBySession = next;
-  }
+  // Shared finish cleanup: clears in-flight/sending/prompt-id and drains one
+  // queued message. The notification/sound/unread side effects below stay
+  // WS-event-only — the snapshot path (handleSessionSnapshot) must not cry
+  // wolf when opening a historical session.
+  workspaceState.finishPromptLocal(sid);
 
   // For the session on screen, refresh git status (edits the agent just made)
   // and runtime status (model/context usage may have changed this turn).
   if (sid === rawState.activeSessionId) {
-    appearance.resetFastMoon();
     void workspaceState.loadGitStatus(sid);
     void refreshSessionStatus(sid);
   } else if (status === 'idle') {
@@ -2384,25 +2532,6 @@ function onSessionIdle(sid: string, status: 'idle' | 'aborted'): void {
   // silent). Plays regardless of visibility so it also reaches a backgrounded tab.
   if (status === 'idle') {
     sound.maybePlayCompletionSound();
-  }
-
-  const queue = rawState.queuedBySession[sid] ?? [];
-  if (queue.length === 0) return;
-
-  const [next, ...rest] = queue;
-  rawState.queuedBySession = { ...rawState.queuedBySession, [sid]: rest };
-  // Flush the first queued message; on failure put it back at the head so a
-  // transient error doesn't silently drop the prompt.
-  if (next !== undefined) {
-    void workspaceState.submitPromptInternal(sid, next.text, next.attachments).then((ok) => {
-      if (!ok) {
-        const current = rawState.queuedBySession[sid] ?? [];
-        rawState.queuedBySession = {
-          ...rawState.queuedBySession,
-          [sid]: [next, ...current],
-        };
-      }
-    });
   }
 }
 
@@ -2507,9 +2636,11 @@ export function useKimiWebClient() {
     hasMoreMessages,
     loadMoreMessagesError,
     serverVersion,
+    backend,
     dangerousBypassAuth,
     clearDangerousBypassAuth,
     initialized,
+    connectIssue,
     permission,
     thinking,
     planMode,
@@ -2520,6 +2651,7 @@ export function useKimiWebClient() {
     questions,
     activity,
     isSending,
+    isStartingFirstPrompt,
     fastMoon: appearance.fastMoon,
 
     // Model + Provider reactive state

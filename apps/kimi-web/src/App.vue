@@ -46,10 +46,13 @@ import Icon from './components/ui/Icon.vue';
 import InternalBuildBanner from './components/InternalBuildBanner.vue';
 import { isMacosDesktop } from './lib/desktopFlag';
 
-// Hydrate the server-transport credential (fragment token or sessionStorage)
+// Hydrate the server-transport credential (fragment token or localStorage)
 // BEFORE the client connects, so the first REST/WS calls already carry it.
-const hasServerCredential = initServerAuth();
-const authRequired = ref(!hasServerCredential);
+initServerAuth();
+// Stays false until the server actually rejects us with 401/40101. Starting
+// from "no credential ⇒ prompt" flashed the token dialog for a frame in
+// `--dangerous-bypass-auth` mode, before /meta had advertised the bypass.
+const authRequired = ref(false);
 let offAuthRequired: (() => void) | null = null;
 
 const client = useKimiWebClient();
@@ -110,10 +113,8 @@ usePageTitle({ running, showAuthGate });
 // segment for the active model (effort models cycle through their declared
 // levels; boolean models flip on/off; unsupported stays off).
 function nextThinkingLevel(current: ThinkingLevel): ThinkingLevel {
-  const raw = client.status.value.modelId ?? client.status.value.model ?? '';
-  const model = client.models.value.find(
-    (m) => m.id === raw || m.model === raw || m.displayName === client.status.value.model,
-  );
+  // Identity is the model id — display/model names can collide across providers.
+  const model = client.models.value.find((m) => m.id === client.status.value.modelId);
   const segs = segmentsFor(model);
   // Coerce the stored level against the active model before indexing, so a
   // stale value (e.g. 'on' from a boolean model) doesn't resolve to index -1
@@ -136,17 +137,19 @@ function openOnboarding(): void {
 }
 
 onMounted(() => {
-  void client.load();
-  loadSidebarCollapsed();
-  // Capture-phase so Escape closes the side detail layer BEFORE the
-  // conversation pane's bubble-phase handler interrupts a running prompt.
-  document.addEventListener('keydown', onGlobalKeydown, true);
+  // Register the 401 listener before the first requests go out, so a token
+  // rejection during the initial load() can never be missed.
   offAuthRequired = onAuthRequired(() => {
     authRequired.value = true;
     // The server now demands a token, so any cached "bypass" state from a
     // previous mode is stale — drop it so the token prompt can show.
     client.clearDangerousBypassAuth();
   });
+  void client.load();
+  loadSidebarCollapsed();
+  // Capture-phase so Escape closes the side detail layer BEFORE the
+  // conversation pane's bubble-phase handler interrupts a running prompt.
+  document.addEventListener('keydown', onGlobalKeydown, true);
 });
 
 onUnmounted(() => {
@@ -266,9 +269,6 @@ const conversationPaneRef = ref<InstanceType<typeof ConversationPane> | null>(nu
 const showModelPicker = ref(false);
 const showProviders = ref(false);
 
-// Provider management (add / delete) is not shipped by the daemon yet — hide the
-// manager UI entry points for now. Re-enable once POST/DELETE /providers land.
-const PROVIDER_MANAGER_ENABLED = false;
 const showLogin = ref(false);
 const showAddWorkspace = ref(false);
 const showStatusPanel = ref(false);
@@ -473,13 +473,6 @@ function handleCommand(cmd: string): void {
     case '/undo':
       void client.undo();
       break;
-    case '/permission': {
-      // Cycle manual → auto → yolo → manual
-      const current = client.permission.value;
-      const next = current === 'manual' ? 'auto' : current === 'auto' ? 'yolo' : 'manual';
-      client.setPermission(next);
-      break;
-    }
     case '/plan':
       client.togglePlanMode();
       break;
@@ -493,17 +486,8 @@ function handleCommand(cmd: string): void {
       // No popover anchor from a slash command — step to the next level.
       client.setThinking(nextThinkingLevel(client.thinking.value));
       break;
-    case '/help':
-      client.dismissWarning(-1);
-      break;
     case '/status':
       showStatusPanel.value = true;
-      break;
-    case '/model':
-      void openModelPicker();
-      break;
-    case '/provider':
-      if (PROVIDER_MANAGER_ENABLED) void openProviders();
       break;
     case '/login':
       openLogin();
@@ -670,6 +654,7 @@ function openPr(url: string): void {
         :pending-by-session="client.pendingBySession.value"
         :unread-by-session="client.unreadBySession.value"
         :workspace-sort-mode="client.workspaceSortMode.value"
+        :backend="client.backend.value"
         @select="client.selectSession($event)"
         @create="handleCreateSession"
         @create-in-workspace="handleCreateSessionInWorkspace($event)"
@@ -739,6 +724,7 @@ function openPr(url: string): void {
       :search-files="client.searchFiles"
       :upload-image="client.uploadImage"
       :sending="client.isSending.value"
+      :starting="client.isStartingFirstPrompt.value"
       :fast-moon="client.fastMoon.value"
       :file-reload-key="client.activeSessionId.value"
       :session-loading="client.sessionLoading.value"
@@ -933,6 +919,7 @@ function openPr(url: string): void {
       :models="client.models.value"
       :config-saving="configSaving"
       :server-version="client.serverVersion.value"
+      :backend="client.backend.value"
       @set-color-scheme="client.setColorScheme($event)"
       @set-accent="client.setAccent($event)"
       @set-ui-font-size="client.setUiFontSize($event)"
@@ -986,12 +973,14 @@ function openPr(url: string): void {
 
     <!-- Global connecting splash on first load (until the daemon round-trips) -->
     <Transition name="gload-fade">
-      <GlobalLoading v-if="!client.initialized.value" />
+      <GlobalLoading v-if="!client.initialized.value" :issue="client.connectIssue.value" />
     </Transition>
 
-    <!-- First-run onboarding overlay (language + welcome greeting) -->
+    <!-- First-run onboarding overlay (language + welcome greeting). Held back
+         until the first load settled so it can't cover the connecting splash
+         (it teleports to <body> and would float above the retry error). -->
     <Onboarding
-      v-if="showOnboarding && !showAuthGate"
+      v-if="client.initialized.value && showOnboarding && !showAuthGate"
       @complete="completeOnboarding"
       @skip="completeOnboarding"
     />

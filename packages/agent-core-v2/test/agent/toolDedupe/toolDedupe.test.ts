@@ -10,23 +10,22 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import type { ExecutableTool, ExecutableToolContext, ExecutableToolResult, ToolExecution, ToolResult } from '#/agent/tool/toolContract';
-import type { ToolDidExecuteContext, ToolWillExecuteContext } from '#/agent/tool/toolHooks';
+import type { ExecutableTool, ExecutableToolContext, ExecutableToolResult, ToolExecution, ToolResult } from '#/tool/toolContract';
+import type { ToolDidExecuteContext, ToolBeforeExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentToolDedupeService, type ToolDedupeResult } from '#/agent/toolDedupe/toolDedupe';
 import { AgentToolDedupeService, __testing as toolDedupeTesting } from '#/agent/toolDedupe/toolDedupeService';
 import { IAgentToolExecutorService, type ToolExecutionResult } from '#/agent/toolExecutor/toolExecutor';
 import { AgentToolExecutorService } from '#/agent/toolExecutor/toolExecutorService';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
-import { IAgentTurnService } from '#/agent/turn/turn';
 import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
 import { IAgentWireService } from '#/wire/tokens';
 import { WireService } from '#/wire/wireServiceImpl';
 import { stubWireRecord } from '../contextMemory/stubs';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
+import { stubLoopWithHooks } from '../loop/stubs';
 import { registerToolResultTruncationServices } from '../toolResultTruncation/stubs';
-import { stubLoopWithHooks, stubTurnWithHooks } from '../turn/stubs';
 
 const { REMINDER_TEXT_1, REMINDER_TEXT_3, makeReminderText2 } = toolDedupeTesting;
 const ZERO_USAGE = emptyUsage();
@@ -54,22 +53,12 @@ interface Harness {
   readonly registry: IAgentToolRegistryService;
 }
 
-/**
- * Builds a container wired the same way the agent is: real executor + registry,
- * the dedupe plugin registered (and realized so its constructor installs the
- * loop / tool-executor hooks), recording telemetry, and stub loop / turn with
- * real hook slots. `ix.get(IAgentToolDedupeService)` is what forces the eager
- * plugin to construct and register its hooks.
- */
 function createHarness(telemetry: ITelemetryService = recordingTelemetry(telemetryEvents)): Harness {
   const loop = stubLoopWithHooks();
   const ix = createServices(disposables, {
     additionalServices: (reg) => {
       reg.defineInstance(ITelemetryService, telemetry);
       reg.defineInstance(IEventBus, noopEventBus);
-      // Seeds the real executor needs to derive its per-agent homedir (used by
-      // the tool-result budgeter). Dedupe outputs are small, so the budgeter
-      // never writes to disk; a fixed path is sufficient.
       const homedir = '/tmp/tool-dedupe-homedir';
       reg.defineInstance(ISessionContext, {
         _serviceBrand: undefined,
@@ -91,7 +80,6 @@ function createHarness(telemetry: ITelemetryService = recordingTelemetry(telemet
         agentHomedir: () => homedir,
       } as unknown as IBootstrapService);
       reg.defineInstance(IAgentLoopService, loop);
-      reg.defineInstance(IAgentTurnService, stubTurnWithHooks());
       reg.define(IAgentToolRegistryService, AgentToolRegistryService);
       reg.define(IAgentToolExecutorService, AgentToolExecutorService);
       registerToolResultTruncationServices(reg);
@@ -157,7 +145,7 @@ function beforeStep(
   step: number,
   signal = new AbortController().signal,
 ): Promise<void> {
-  return h.loop.hooks.beforeStep.run({ turnId, step, signal });
+  return h.loop.hooks.onWillBeginStep.run({ turnId, step, signal });
 }
 
 function afterStep(
@@ -166,13 +154,13 @@ function afterStep(
   step: number,
   signal = new AbortController().signal,
 ): Promise<void> {
-  return h.loop.hooks.afterStep.run({
+  return h.loop.hooks.onDidFinishStep.run({
     turnId,
     step,
     signal,
     usage: ZERO_USAGE,
     finishReason: 'completed',
-    continue: false,
+    stopTurn: false,
   });
 }
 
@@ -203,18 +191,17 @@ async function runStep(
   return results;
 }
 
-function dummyExecution(): ToolWillExecuteContext['execution'] {
+function dummyExecution(): ToolBeforeExecuteContext['execution'] {
   return { approvalRule: 'x', execute: async () => ({ output: '' }) };
 }
 
-/** Minimal `onWillExecuteTool` context — the dedupe handler reads only id/name/args. */
 function willCtx(
   id: string,
   name: string,
   args: unknown,
   turnId = 1,
   signal = new AbortController().signal,
-): ToolWillExecuteContext {
+): ToolBeforeExecuteContext {
   const tc = toolCall(id, name, args);
   return {
     turnId,
@@ -226,7 +213,6 @@ function willCtx(
   };
 }
 
-/** Minimal `onDidExecuteTool` context — the dedupe handler reads only id/name/args/result. */
 function didCtx(
   id: string,
   name: string,
@@ -253,21 +239,17 @@ describe('AgentToolDedupeService', () => {
       await beforeStep(h, 1, 1);
 
       const w1 = willCtx('c1', 'Read', { path: '/a' });
-      await h.executor.hooks.onWillExecuteTool.run(w1);
-      // First occurrence is the original — no synthetic decision.
+      await h.executor.hooks.onBeforeExecuteTool.run(w1);
       expect(w1.decision).toBeUndefined();
 
       const w2 = willCtx('c2', 'Read', { path: '/a' });
-      await h.executor.hooks.onWillExecuteTool.run(w2);
-      // Same-step dup gets a synthetic placeholder (non-error, empty string).
+      await h.executor.hooks.onBeforeExecuteTool.run(w2);
       expect(w2.decision?.syntheticResult).toEqual({ output: '' });
 
       const d1 = didCtx('c1', 'Read', { path: '/a' }, okResult('FILE_A'));
       await h.executor.hooks.onDidExecuteTool.run(d1);
       expect(d1.result).toEqual(okResult('FILE_A'));
 
-      // Finalize the dup with the placeholder it was handed — it resolves to the
-      // original's real result.
       const d2 = didCtx('c2', 'Read', { path: '/a' }, w2.decision!.syntheticResult!);
       await h.executor.hooks.onDidExecuteTool.run(d2);
       expect(d2.result).toEqual(okResult('FILE_A'));
@@ -278,9 +260,9 @@ describe('AgentToolDedupeService', () => {
       await beforeStep(h, 1, 1);
 
       const w1 = willCtx('c1', 'Bash', { cmd: 'x' });
-      await h.executor.hooks.onWillExecuteTool.run(w1);
+      await h.executor.hooks.onBeforeExecuteTool.run(w1);
       const w2 = willCtx('c2', 'Bash', { cmd: 'x' });
-      await h.executor.hooks.onWillExecuteTool.run(w2);
+      await h.executor.hooks.onBeforeExecuteTool.run(w2);
       expect(w2.decision?.syntheticResult).toEqual({ output: '' });
 
       const d1 = didCtx('c1', 'Bash', { cmd: 'x' }, errResult('boom'));
@@ -291,9 +273,6 @@ describe('AgentToolDedupeService', () => {
     });
 
     it('finalizes original before dup (provider order)', async () => {
-      // The loop guarantees finalize runs in provider order, so by the time a
-      // dup's finalize runs, the original's deferred is already resolved and
-      // both calls surface the original's real result.
       const h = createHarness();
       const tool = new EchoTool('Echo');
       h.registry.register(tool);
@@ -327,7 +306,7 @@ describe('AgentToolDedupeService', () => {
       expect(tool.calls).toHaveLength(1);
       expect(results.map((result) => result.output)).toEqual(['same', 'same']);
       expect(telemetryEvents).toContainEqual({
-        event: 'tool_call_dedupe_detected',
+        event: 'tool_call_dedup_detected',
         properties: expect.objectContaining({
           turn_id: 3,
           step_no: 1,
@@ -368,8 +347,8 @@ describe('AgentToolDedupeService', () => {
       registerRead(h);
       const last = await runStreak(h, 3);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain('repeating the exact same tool call');
-      expect(last.output as string).not.toContain('repeated_times');
+      expect(last.output as string).toContain('what new information you expect');
+      expect(last.output as string).not.toContain('Choose exactly one');
     });
 
     it('keeps injecting reminder1 at 4 consecutive', async () => {
@@ -377,7 +356,7 @@ describe('AgentToolDedupeService', () => {
       registerRead(h);
       const last = await runStreak(h, 4);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain('repeating the exact same tool call');
+      expect(last.output as string).toContain('what new information you expect');
     });
 
     it('injects reminder2 at exactly 5 consecutive', async () => {
@@ -385,9 +364,9 @@ describe('AgentToolDedupeService', () => {
       registerRead(h);
       const last = await runStreak(h, 5);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain('repeated_times: 5');
-      expect(last.output as string).toContain('tool: Read');
-      expect(last.output as string).toContain('arguments:');
+      expect(last.output as string).toContain('issued 5 times in a row');
+      expect(last.output as string).toContain('Choose exactly one of the following');
+      expect(last.output as string).toContain('Falsification check');
     });
 
     it.each([6, 7])('keeps injecting reminder2 at %i consecutive', async (streak) => {
@@ -395,8 +374,8 @@ describe('AgentToolDedupeService', () => {
       registerRead(h);
       const last = await runStreak(h, streak);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain(`repeated_times: ${String(streak)}`);
-      expect(last.output as string).toContain('tool: Read');
+      expect(last.output as string).toContain(`issued ${String(streak)} times in a row`);
+      expect(last.output as string).toContain('Choose exactly one of the following');
     });
 
     it('injects the dead-end reminder at exactly 8 consecutive', async () => {
@@ -404,19 +383,16 @@ describe('AgentToolDedupeService', () => {
       registerRead(h);
       const last = await runStreak(h, 8);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain('stuck in a dead end');
+      expect(last.output as string).toContain('without any further tool calls');
     });
 
     it('resets streak when a different call is interleaved', async () => {
       const h = createHarness();
       registerRead(h);
-      // 2× Read({p:1}) — should NOT trigger yet
       for (let i = 0; i < 2; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`a${String(i)}`, 'Read', { p: 1 })]);
       }
-      // 1× Read({p:2}) interrupts the streak
       await runStep(h, 1, 3, [toolCall('b1', 'Read', { p: 2 })]);
-      // Back to Read({p:1}); streak restarts → 1 occurrence, no reminder
       const [last] = await runStep(h, 1, 4, [toolCall('c1', 'Read', { p: 1 })]);
       expect(last!.result.output as string).not.toContain('<system-reminder>');
     });
@@ -424,33 +400,26 @@ describe('AgentToolDedupeService', () => {
     it('same-step dups inherit reminder1 when streak triggers on original', async () => {
       const h = createHarness();
       const tool = registerRead(h);
-      // Build streak up to 2 across previous steps.
       for (let i = 0; i < 2; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`p${String(i)}`, 'Read', { p: 1 })]);
       }
-      // Next step: same call appears twice. First is the original (triggers reminder1 at streak=3),
-      // second is a same-step dup that should inherit it without re-executing the tool.
       const callsBefore = tool.calls.length;
       const results = await runStep(h, 1, 3, [
         toolCall('orig', 'Read', { p: 1 }),
         toolCall('dup', 'Read', { p: 1 }),
       ]);
 
-      // Only the original executed in this step; the dup was short-circuited.
       expect(tool.calls.length).toBe(callsBefore + 1);
       const byId = new Map(results.map((result) => [result.toolCallId, result.result]));
       expect(byId.get('orig')!.output as string).toContain('<system-reminder>');
-      expect(byId.get('orig')!.output as string).toContain('repeating the exact same tool call');
+      expect(byId.get('orig')!.output as string).toContain('what new information you expect');
       expect(byId.get('dup')!.output as string).toContain('<system-reminder>');
-      expect(byId.get('dup')!.output as string).toContain('repeating the exact same tool call');
+      expect(byId.get('dup')!.output as string).toContain('what new information you expect');
     });
 
     it('same-step spam alone does not trigger reminder', async () => {
       const h = createHarness();
       registerRead(h);
-      // 8 occurrences of the same call within a single step, but no prior
-      // streak — the trigger is about sustained behaviour across steps, not
-      // intra-step spam. Same-step dedupe already short-circuits execution.
       const calls = Array.from({ length: 8 }, (_, i) =>
         toolCall(i === 0 ? 'orig' : `dup${String(i)}`, 'Read', { p: 1 }),
       );
@@ -465,13 +434,10 @@ describe('AgentToolDedupeService', () => {
       const h = createHarness();
       const tool = new EchoTool('X', () => ({ output: [{ type: 'text', text: 'hello' }] }));
       h.registry.register(tool);
-      // Build streak up to 2 prior steps then this one (streak=3).
       for (let i = 0; i < 2; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`p${String(i)}`, 'X', {})]);
       }
       const [final] = await runStep(h, 1, 3, [toolCall('final', 'X', {})]);
-      // The executor normalizes a text-only ContentPart[] into a joined string,
-      // so the appended reminder shows up as the concatenated text.
       expect(final!.result.output).toBe('hello' + REMINDER_TEXT_1);
     });
 
@@ -479,13 +445,11 @@ describe('AgentToolDedupeService', () => {
       const h = createHarness();
       const tool = new EchoTool('X', () => ({ output: [{ type: 'text', text: 'hello' }] }));
       h.registry.register(tool);
-      // Build streak up to 4 prior steps then this one (streak=5).
       for (let i = 0; i < 4; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`p${String(i)}`, 'X', { a: 1 })]);
       }
       const [final] = await runStep(h, 1, 5, [toolCall('final', 'X', { a: 1 })]);
-      // Text-only array is normalized to a joined string by the executor.
-      expect(final!.result.output).toBe('hello' + makeReminderText2('X', 5, { a: 1 }));
+      expect(final!.result.output).toBe('hello' + makeReminderText2(5));
     });
 
     it('pushes a new text part when trailing part is non-text', async () => {
@@ -494,16 +458,11 @@ describe('AgentToolDedupeService', () => {
         output: [{ type: 'image_url', imageUrl: { url: 'data:foo' } }],
       }));
       h.registry.register(tool);
-      // Build streak to 3.
       for (let i = 0; i < 2; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`p${String(i)}`, 'X', {})]);
       }
       const [final] = await runStep(h, 1, 3, [toolCall('final', 'X', {})]);
       const arr = final!.result.output as Array<{ type: string; text?: string }>;
-      // The executor prepends a non-text companion to media-only output before
-      // the dedupe hook runs, so the array is [companion, image_url, reminder];
-      // the dedupe-specific behavior is the trailing reminder text part it pushed
-      // because the trailing part was non-text.
       expect(arr.some((part) => part.type === 'image_url')).toBe(true);
       expect(arr.at(-1)).toEqual({ type: 'text', text: REMINDER_TEXT_1 });
     });
@@ -512,7 +471,6 @@ describe('AgentToolDedupeService', () => {
       const h = createHarness();
       const tool = new EchoTool('X', () => ({ output: 'boom', isError: true }));
       h.registry.register(tool);
-      // Build streak to 3.
       for (let i = 0; i < 2; i += 1) {
         await runStep(h, 1, i + 1, [toolCall(`p${String(i)}`, 'X', {})]);
       }
@@ -528,11 +486,11 @@ describe('AgentToolDedupeService', () => {
       await beforeStep(h, 1, 1);
 
       const w1 = willCtx('c1', 'Read', { a: 1, b: 2 });
-      await h.executor.hooks.onWillExecuteTool.run(w1);
+      await h.executor.hooks.onBeforeExecuteTool.run(w1);
       expect(w1.decision).toBeUndefined();
 
       const w2 = willCtx('c2', 'Read', { b: 2, a: 1 });
-      await h.executor.hooks.onWillExecuteTool.run(w2);
+      await h.executor.hooks.onBeforeExecuteTool.run(w2);
       expect(w2.decision?.syntheticResult).toEqual({ output: '' });
 
       const d1 = didCtx('c1', 'Read', { a: 1, b: 2 }, okResult('SAME'));
@@ -545,28 +503,19 @@ describe('AgentToolDedupeService', () => {
 
   describe('arg rewrite between checkSameStep and finalize', () => {
     it('resolves the dup deferred even when the original call args are rewritten before finalize', async () => {
-      // Models the loop contract: prepareToolExecution may return
-      // {updatedArgs}, in which case finalizeToolResult sees the rewritten
-      // args. The dedupe key is registered at onWillExecuteTool time under the
-      // LLM-issued args (keyed by call id), so the deferred is resolved under
-      // that same key regardless of the rewritten args seen at finalize time.
       const h = createHarness();
       await beforeStep(h, 1, 1);
 
       const w1 = willCtx('c1', 'Read', { path: '/a' });
-      await h.executor.hooks.onWillExecuteTool.run(w1);
+      await h.executor.hooks.onBeforeExecuteTool.run(w1);
       expect(w1.decision).toBeUndefined();
       const w2 = willCtx('c2', 'Read', { path: '/a' });
-      await h.executor.hooks.onWillExecuteTool.run(w2);
+      await h.executor.hooks.onBeforeExecuteTool.run(w2);
       expect(w2.decision?.syntheticResult).toEqual({ output: '' });
 
-      // Original finalize is called with REWRITTEN args (simulates a hook
-      // returning updatedArgs).
       const d1 = didCtx('c1', 'Read', { path: '/REWRITTEN' }, okResult('A'));
       await h.executor.hooks.onDidExecuteTool.run(d1);
 
-      // Dup's finalize must not hang — it should resolve via the deferred
-      // registered under the original-args key.
       const d2 = didCtx('c2', 'Read', { path: '/a' }, w2.decision!.syntheticResult!);
       await Promise.race([
         h.executor.hooks.onDidExecuteTool.run(d2),
@@ -585,24 +534,15 @@ describe('AgentToolDedupeService', () => {
     it('resolves leaked deferreds from a prior aborted step with an error result', async () => {
       const h = createHarness();
       await beforeStep(h, 1, 1);
-      // Register an original but never finalize it (simulates abort mid-step).
       const w1 = willCtx('leaked', 'Read', { p: 1 });
-      await h.executor.hooks.onWillExecuteTool.run(w1);
+      await h.executor.hooks.onBeforeExecuteTool.run(w1);
       expect(w1.decision).toBeUndefined();
-      // Register a dup that captures the leaked deferred.
       const w2 = willCtx('dup', 'Read', { p: 1 });
-      await h.executor.hooks.onWillExecuteTool.run(w2);
+      await h.executor.hooks.onBeforeExecuteTool.run(w2);
       const placeholder = w2.decision!.syntheticResult!;
       expect(placeholder).toEqual({ output: '' });
 
-      // Next step begins — the leaked deferred should resolve so an awaiter
-      // doesn't hang. (In production the dup's finalize would have already
-      // happened before beginStep, but defensively resolving leaked deferreds
-      // protects against any ordering bug.)
       await beforeStep(h, 1, 2);
-      // Finalize the dup that captured the leaked deferred. Since beginStep
-      // cleared the per-step maps, this is no longer tracked — it just returns
-      // the placeholder it was passed.
       const d2 = didCtx('dup', 'Read', { p: 1 }, placeholder);
       await h.executor.hooks.onDidExecuteTool.run(d2);
       expect(d2.result).toEqual(placeholder);
@@ -628,10 +568,8 @@ describe('AgentToolDedupeService', () => {
       h.registry.register(new EchoTool('Read'));
       const last = await runStreak(h, 8);
       expect(last.output as string).toContain('<system-reminder>');
-      expect(last.output as string).toContain('stuck in a dead end');
-      expect(last.output as string).toContain('Stop all function calls immediately');
-      // 8 is the reminder threshold, not yet force-stop. The executor always
-      // materializes `stopTurn` as a boolean, so a non-stopped result is `false`.
+      expect(last.output as string).toContain('Write your final response now');
+      expect(last.output as string).toContain('without any further tool calls');
       expect(last.isError).toBeUndefined();
       expect(stopTurnOf(last)).toBeFalsy();
     });
@@ -642,7 +580,7 @@ describe('AgentToolDedupeService', () => {
         const h = createHarness();
         h.registry.register(new EchoTool('Read'));
         const last = await runStreak(h, streak);
-        expect(last.output as string).toContain('stuck in a dead end');
+        expect(last.output as string).toContain('Write your final response now');
         expect(last.isError).toBeUndefined();
         expect(stopTurnOf(last)).toBeFalsy();
       },
@@ -652,8 +590,7 @@ describe('AgentToolDedupeService', () => {
       const h = createHarness();
       h.registry.register(new EchoTool('Read'));
       const last = await runStreak(h, 12);
-      expect(last.output as string).toContain('stuck in a dead end');
-      // The underlying tool succeeded — force-stop must not flip it to error.
+      expect(last.output as string).toContain('Write your final response now');
       expect(last.isError).toBeUndefined();
       expect(stopTurnOf(last)).toBe(true);
     });
@@ -681,10 +618,9 @@ describe('AgentToolDedupeService', () => {
         const [result] = await runStep(h, 1, i + 1, [toolCall(`c${String(i)}`, 'Read', { p: 1 })]);
         last = result!.result;
       }
-      // The underlying tool was an error — that must survive force-stop.
       expect(last!.isError).toBe(true);
       expect(stopTurnOf(last!)).toBe(true);
-      expect(last!.output as string).toContain('stuck in a dead end');
+      expect(last!.output as string).toContain('Write your final response now');
     });
   });
 
@@ -702,7 +638,7 @@ describe('AgentToolDedupeService', () => {
       );
 
       expect(telemetryEvents).toContainEqual({
-        event: 'tool_call_dedupe_detected',
+        event: 'tool_call_dedup_detected',
         properties: {
           turn_id: 7,
           step_no: 1,
@@ -711,6 +647,14 @@ describe('AgentToolDedupeService', () => {
           dup_type: 'same_step',
           args_hash: expect.any(String),
         },
+      });
+      expect(telemetryEvents).toContainEqual({
+        event: 'tool_call',
+        properties: expect.objectContaining({ tool_call_id: 'c1', dup_type: 'normal' }),
+      });
+      expect(telemetryEvents).toContainEqual({
+        event: 'tool_call',
+        properties: expect.objectContaining({ tool_call_id: 'c2', dup_type: 'same_step' }),
       });
     });
 
@@ -725,7 +669,7 @@ describe('AgentToolDedupeService', () => {
       await executeAll(h, [toolCall('c2', 'Read', { path: '/a' })], 7, signal);
 
       expect(telemetryEvents).toContainEqual({
-        event: 'tool_call_dedupe_detected',
+        event: 'tool_call_dedup_detected',
         properties: {
           turn_id: 7,
           step_no: 2,
@@ -734,6 +678,10 @@ describe('AgentToolDedupeService', () => {
           dup_type: 'cross_step',
           args_hash: expect.any(String),
         },
+      });
+      expect(telemetryEvents).toContainEqual({
+        event: 'tool_call',
+        properties: expect.objectContaining({ tool_call_id: 'c2', dup_type: 'cross_step' }),
       });
     });
 
@@ -747,7 +695,7 @@ describe('AgentToolDedupeService', () => {
       const [result] = await runStep(h, 7, 3, [toolCall('a2', 'Read', { path: '/a' })]);
 
       expect(result!.result.output as string).not.toContain('<system-reminder>');
-      expect(telemetryEvents.filter((e) => e.event === 'tool_call_dedupe_detected')).toHaveLength(0);
+      expect(telemetryEvents.filter((e) => e.event === 'tool_call_dedup_detected')).toHaveLength(0);
       expect(telemetryEvents.filter((e) => e.event === 'tool_call_repeat')).toHaveLength(0);
     });
 
@@ -819,7 +767,6 @@ describe('AgentToolDedupeService', () => {
       const counts = telemetryEvents
         .filter((e) => e.event === 'tool_call_repeat')
         .map((e) => e.properties?.['repeat_count']);
-      // Only the second Read({p:1}) is a repeat; the streak then breaks.
       expect(counts).toEqual([2]);
     });
 
@@ -835,7 +782,7 @@ describe('AgentToolDedupeService', () => {
 
       expect(firstInNewTurn!.result.output as string).not.toContain('<system-reminder>');
       expect(telemetryEvents.filter((e) => e.event === 'tool_call_repeat')).toHaveLength(0);
-      expect(telemetryEvents.filter((e) => e.event === 'tool_call_dedupe_detected')).toHaveLength(0);
+      expect(telemetryEvents.filter((e) => e.event === 'tool_call_dedup_detected')).toHaveLength(0);
     });
 
     it('runs with a no-op telemetry service', async () => {

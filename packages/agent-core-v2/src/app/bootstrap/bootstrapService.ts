@@ -33,6 +33,7 @@ export class BootstrapService implements IBootstrapService {
   readonly osHomeDir: string;
   readonly homeDir: string;
   readonly configPath: string;
+  readonly clientVersion: string;
   readonly sessionsDir: string;
   readonly blobsDir: string;
   readonly storeDir: string;
@@ -51,14 +52,12 @@ export class BootstrapService implements IBootstrapService {
     this.env = options.env;
     this.homeDir = options.homeDir;
     this.configPath = options.configPath;
+    this.clientVersion = options.clientVersion;
     this.sessionsDir = join(options.homeDir, 'sessions');
     this.blobsDir = join(options.homeDir, 'blobs');
     this.storeDir = join(options.homeDir, 'store');
     this.cacheDir = join(options.homeDir, 'cache');
     this.logsDir = join(options.homeDir, 'logs');
-    // The config document sits at `<homeDir>/<configKey>`; scope('config') is
-    // the empty string (join skips empty segments) so `<key>` addresses the
-    // homeDir directly.
     this.configKey = basename(options.configPath);
     this.scopes = {
       config: '',

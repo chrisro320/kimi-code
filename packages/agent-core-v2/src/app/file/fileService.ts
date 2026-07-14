@@ -12,26 +12,18 @@ import type { FileMeta } from '@moonshot-ai/protocol';
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import { registerErrorDomain, type ErrorDomain } from '#/_base/errors/codes';
-import { KimiError } from '#/_base/errors/errors';
+import { Error2 } from '#/_base/errors/errors';
 
-/** Hard upload cap mirrored from the v1 server (50 MiB). */
 export const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 export interface SaveOptions {
-  /** Display name override; defaults to the uploaded filename. */
   readonly name?: string;
-  /** MIME type; defaults to `application/octet-stream`. */
   readonly mimeType?: string;
-  /** Optional TTL in seconds; recorded as `expires_at` on the metadata. */
   readonly expiresInSec?: number;
 }
 
 export interface GetResult {
   readonly meta: FileMeta;
-  /**
-   * Open a fresh stream over the stored blob. `range` is inclusive and lets
-   * callers serve byte ranges without first buffering the whole file.
-   */
   readonly stream: (range?: FileReadRange) => Readable;
 }
 
@@ -50,9 +42,6 @@ export interface IFileService {
 
 export const IFileService: ServiceIdentifier<IFileService> = createDecorator<IFileService>('fileService');
 
-// ---------------------------------------------------------------------------
-// Error domain
-// ---------------------------------------------------------------------------
 
 export const FileErrors = {
   codes: {
@@ -77,7 +66,7 @@ export const FileErrors = {
 
 registerErrorDomain(FileErrors);
 
-export class FileError extends KimiError {
+export class FileError extends Error2 {
   constructor(
     code: (typeof FileErrors.codes)[keyof typeof FileErrors.codes],
     message: string,
@@ -101,5 +90,5 @@ export function fileTooLargeError(seen: number, limit: number): FileError {
 }
 
 export function isFileError(error: unknown, code: (typeof FileErrors.codes)[keyof typeof FileErrors.codes]): boolean {
-  return error instanceof KimiError && error.code === code;
+  return error instanceof Error2 && error.code === code;
 }

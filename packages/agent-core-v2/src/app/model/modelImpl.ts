@@ -15,9 +15,15 @@
  * wire I/O to `IProtocolAdapterRegistry.createChatProvider(...)` + kosong's
  * `generate(...)`. Phase 8 replaces the wire with native adapters; only this
  * file changes.
+ *
+ * Provider error translation also lives here: a 401 that survives a forced
+ * token refresh means the provider rejected the account itself, so it is
+ * surfaced as `PROVIDER_AUTH_ERROR` carrying the provider's message instead
+ * of a misleading re-login prompt.
  */
 
 import { AsyncEventQueue } from '#/_base/asyncEventQueue';
+import { isAbortError } from '#/_base/utils/abort';
 import { type ModelCapability } from '#/app/llmProtocol/capability';
 import { APIStatusError } from '#/app/llmProtocol/errors';
 import { type GenerationKwargs } from '#/app/llmProtocol/kimiOptions';
@@ -26,9 +32,10 @@ import { type GenerateCallbacks, type MaxCompletionTokensOptions, type ProviderR
 import { type ThinkingEffort } from '#/app/llmProtocol/thinkingEffort';
 import type { ChatProvider } from '#/app/llmProtocol/provider';
 import type { Protocol, ProtocolProviderOptions } from '#/app/protocol/protocol';
-import { generate } from '#/app/llmProtocol/generate';
+import { generate, type GenerateResult } from '#/app/llmProtocol/generate';
+import { sanitizeStatusErrorMessage, translateProviderError } from '#/app/protocol/errors';
 import { type ProtocolAdapterRegistry } from '#/app/protocol/protocolAdapterRegistry';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 
 import type { AuthProvider, LLMEvent, LLMRequestInput, Model } from './modelInstance';
 
@@ -37,7 +44,7 @@ export interface ModelImplInit {
   readonly name: string;
   readonly aliases: readonly string[];
   readonly protocol: Protocol;
-  readonly baseUrl: string;
+  readonly baseUrl?: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly capabilities: ModelCapability;
   readonly maxContextSize: number;
@@ -58,7 +65,7 @@ export class ModelImpl implements Model {
   readonly name: string;
   readonly aliases: readonly string[];
   readonly protocol: Protocol;
-  readonly baseUrl: string;
+  readonly baseUrl: string | undefined;
   readonly headers: Readonly<Record<string, string>>;
   readonly capabilities: ModelCapability;
   readonly maxContextSize: number;
@@ -75,12 +82,6 @@ export class ModelImpl implements Model {
   private readonly protocolRegistry: ProtocolAdapterRegistry;
   private readonly providerOptions: ProtocolProviderOptions;
 
-  /**
-   * Chain of transforms applied to the raw kosong `ChatProvider` before use.
-   * `withThinking` / `withMaxCompletionTokens` / `withGenerationKwargs`
-   * append to this chain; the actual `ChatProvider` is materialized lazily
-   * on the first `.request()` and cached.
-   */
   private readonly transforms: readonly ((p: ChatProvider) => ChatProvider)[];
   private cachedChatProvider: ChatProvider | undefined;
 
@@ -104,9 +105,6 @@ export class ModelImpl implements Model {
     this.transforms = transforms;
     this.alwaysThinking = init.alwaysThinking;
     this.providerName = init.providerName;
-    // thinkingEffort is materialized via `withThinking` — the transform chain
-    // owns the actual value applied to the underlying ChatProvider; we track
-    // the most recent effort on the wrapper so callers can inspect it.
     this.thinkingEffort = null;
   }
 
@@ -182,7 +180,6 @@ export class ModelImpl implements Model {
     });
   }
 
-  /** Materialize the transformed kosong ChatProvider. Cached per Model instance. */
   private resolveChatProvider(): ChatProvider {
     if (this.cachedChatProvider !== undefined) return this.cachedChatProvider;
     let provider = this.protocolRegistry.createChatProvider({
@@ -245,34 +242,38 @@ export class ModelImpl implements Model {
       },
     };
 
-    const result = await this.runWithAuthRefresh((auth) => {
-      requestStartedAt = Date.now();
-      return generate(
-        provider,
-        input.systemPrompt,
-        [...input.tools],
-        [...input.messages],
-        callbacks,
-        {
-          signal,
-          auth,
-          onRequestStart: () => {
-            requestStartedAt = Date.now();
+    let result: GenerateResult;
+    try {
+      result = await this.runWithAuthRefresh((auth) => {
+        requestStartedAt = Date.now();
+        return generate(
+          provider,
+          input.systemPrompt,
+          [...input.tools],
+          [...input.messages],
+          callbacks,
+          {
+            signal,
+            auth,
+            onRequestStart: () => {
+              requestStartedAt = Date.now();
+            },
+            onRequestSent: () => {
+              requestSentAt = Date.now();
+            },
+            onStreamEnd: (stats) => {
+              streamEndedAt = Date.now();
+              decodeStats = stats;
+            },
+            responseFormat: input.responseFormat,
           },
-          onRequestSent: () => {
-            requestSentAt = Date.now();
-          },
-          onStreamEnd: (stats) => {
-            streamEndedAt = Date.now();
-            decodeStats = stats;
-          },
-          responseFormat: input.responseFormat,
-        },
-      );
-    });
+        );
+      });
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted === true) throw error;
+      throw translateProviderError(error);
+    }
 
-    // Non-streaming providers still populate `result.message`; surface its
-    // content and tool calls as parts so downstream consumers see them.
     if (!streamedAnyPart) {
       for (const part of result.message.content) {
         firstChunkAt ??= Date.now();
@@ -322,7 +323,7 @@ export class ModelImpl implements Model {
     try {
       return await run(refreshedAuth);
     } catch (error) {
-      if (isUnauthorizedStatusError(error)) throw toLoginRequiredError(error);
+      if (isUnauthorizedStatusError(error)) throw toProviderAuthError(error);
       throw error;
     }
   }
@@ -336,11 +337,13 @@ function isUnauthorizedStatusError(error: unknown): error is APIStatusError {
   return error instanceof APIStatusError && error.statusCode === 401;
 }
 
-function toLoginRequiredError(error: APIStatusError): KimiError {
-  return new KimiError(
-    ErrorCodes.AUTH_LOGIN_REQUIRED,
-    'OAuth provider credentials were rejected. Send /login to login.',
+function toProviderAuthError(error: APIStatusError): Error2 {
+  const reason = sanitizeStatusErrorMessage(error.message);
+  return new Error2(
+    ErrorCodes.PROVIDER_AUTH_ERROR,
+    reason.length > 0 ? reason : 'OAuth provider credentials were rejected.',
     {
+      name: error.name,
       cause: error,
       details: {
         statusCode: error.statusCode,
@@ -402,19 +405,12 @@ export function buildStreamTiming(
   return timing;
 }
 
-/**
- * Simple bearer/api-key AuthProvider suitable for the flat-Model case.
- * Wraps a static or provider-backed token retriever with optional force-
- * refresh semantics.
- */
 export class StaticAuthProvider implements AuthProvider {
   readonly canRefresh = false;
 
   constructor(private readonly apiKey: string | undefined) {}
   async getAuth(): Promise<ProviderRequestAuth | undefined> {
     if (this.apiKey === undefined || this.apiKey.trim().length === 0) return undefined;
-    // kosong's provider adapters read the bearer/api token from `apiKey`
-    // (see `requireProviderApiKey`); a headers-only shape is rejected.
     return { apiKey: this.apiKey };
   }
 }

@@ -12,9 +12,15 @@
 import { createDecorator } from '#/_base/di/instantiation';
 import type { IDisposable } from '#/_base/di/lifecycle';
 
-export type TelemetryPropertyValue = unknown;
+import type {
+  StrictPropertyCheck,
+  TelemetryEventName,
+  TelemetryEventProperties,
+} from './events';
 
-export type TelemetryProperties = Readonly<Record<string, TelemetryPropertyValue>>;
+export type TelemetryPrimitive = string | number | boolean | null | undefined;
+
+export type TelemetryProperties = Readonly<Record<string, TelemetryPrimitive>>;
 
 export type TelemetryContextPatch = TelemetryProperties;
 
@@ -39,6 +45,10 @@ export interface ITelemetryService {
   readonly _serviceBrand: undefined;
 
   track(event: string, properties?: TelemetryProperties): void;
+  track2<K extends TelemetryEventName, E extends TelemetryEventProperties<K> = never>(
+    event: K,
+    properties?: StrictPropertyCheck<TelemetryEventProperties<K>, E>,
+  ): void;
   withContext(patch: TelemetryContextPatch): ITelemetryService;
   setContext(patch: TelemetryContextPatch): void;
   addAppender(appender: ITelemetryAppender): IDisposable;
@@ -57,14 +67,10 @@ export const nullTelemetryAppender: ITelemetryAppender = {
   shutdown: () => {},
 };
 
-/**
- * No-op `ITelemetryService` for callers that want to accept an optional
- * telemetry service (e.g. tools constructed outside DI in tests). Mirrors v1's
- * `noopTelemetryClient`.
- */
 export const noopTelemetryService: ITelemetryService = {
   _serviceBrand: undefined,
   track: () => {},
+  track2: () => {},
   withContext: () => noopTelemetryService,
   setContext: () => {},
   addAppender: () => ({ dispose: () => {} }),

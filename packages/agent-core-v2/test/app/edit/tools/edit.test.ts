@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { PathSecurityError } from '#/_base/tools/policies/path-access';
+import { PathSecurityError } from '#/tool/path-access';
 import { stubWorkspaceContext } from '../../../session/workspaceContext/stub-workspace-context';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices } from '#/_base/di/test';
@@ -24,9 +24,10 @@ import { IFileEditService } from '#/app/edit/fileEdit';
 import { FileEditService } from '#/app/edit/fileEditService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '#/agent/tool/toolContract';
+import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '#/tool/toolContract';
 
 const signal = new AbortController().signal;
 const PERMISSIVE_WORKSPACE = stubWorkspaceContext('/');
@@ -47,11 +48,6 @@ function createTestEnv(home = '/home'): IHostEnvironment {
   };
 }
 
-/**
- * Fake fs with spied `readText` / `writeText`. Defaults read to empty content
- * and write to a no-op; tests pass their own `vi.fn()` mocks to drive content
- * and assert on write calls.
- */
 function createSpiedEditFs(
   options: {
     readText?: ReturnType<typeof vi.fn>;
@@ -78,7 +74,7 @@ function buildTool(
       reg.define(IFileEditService, FileEditService);
     },
   });
-  return ix.createInstance(EditTool);
+  return new EditTool(ix.get(IFileEditService), env, workspace);
 }
 
 function isPromiseLike(
@@ -163,11 +159,7 @@ describe('EditTool', () => {
     expect(tool.description).toContain('`old_string` must be unique');
     expect(tool.description).toContain('only when they do not target the same file');
     expect(tool.description).toContain('DO NOT issue consecutive Edit calls on the same file');
-    // Editing files should go through Edit, not Write and not a Bash `sed`
-    // command. The prompt names both alternatives explicitly.
     expect(tool.description).toContain('DO NOT use Write or Bash `sed`');
-    // Parallel Edit calls on the same file are serialized and applied in
-    // response order; mismatched old_string fails explicitly.
     expect(tool.description).toContain('same-file edits in response order');
     expect(tool.description).toContain('old_string not found');
     expect(tool.parameters).toMatchObject({
@@ -476,17 +468,37 @@ describe('EditTool', () => {
     });
 
     expect(result.isError).toBe(true);
-    // Lockdown the negative side-effect: no write should have been issued.
     expect(writeText).not.toHaveBeenCalled();
   });
 
   it('errors with an is-not-a-file phrasing when the path resolves to a directory', async () => {
-    // The edit tool relies on readText to surface the directory error; an
-    // EISDIR-coded rejection maps to the "is not a file" output.
     const { fs } = createSpiedEditFs({
       readText: vi.fn().mockRejectedValue(
         Object.assign(new Error('EISDIR: illegal operation on a directory'), {
           code: 'EISDIR',
+        }),
+      ),
+    });
+    const tool = buildTool(fs, createTestEnv(), PERMISSIVE_WORKSPACE);
+
+    const result = await execute(tool, {
+      path: '/tmp/dir',
+      old_string: 'old',
+      new_string: 'new',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('is not a file');
+  });
+
+  it('maps a HostFsError-wrapped EISDIR to the is-not-a-file phrasing', async () => {
+    const { fs } = createSpiedEditFs({
+      readText: vi.fn().mockRejectedValue(
+        new HostFsError(OsFsErrors.codes.OS_FS_IS_DIRECTORY, 'read failed: path is a directory', {
+          details: { path: '/tmp/dir', op: 'read', errno: 'EISDIR' },
+          cause: Object.assign(new Error('EISDIR: illegal operation on a directory'), {
+            code: 'EISDIR',
+          }),
         }),
       ),
     });
@@ -539,8 +551,6 @@ describe('EditTool', () => {
   });
 
   it('allows absolute edits to a sibling dir that merely shares the work-dir prefix', async () => {
-    // /workspace-sneaky/* is outside /workspace — string prefix check must not
-    // mistake "shares a prefix" for "inside workspace".
     const writeText = vi.fn().mockResolvedValue(undefined);
     const { fs } = createSpiedEditFs({
       readText: vi.fn().mockResolvedValue('content'),
@@ -559,11 +569,8 @@ describe('EditTool', () => {
   });
 
   it('rejects editing a non-UTF-8 file and leaves its bytes untouched', async () => {
-    // Drives the real HostFileSystem + FileEditService (no fake fs) so the
-    // strict-decode path is exercised end-to-end against invalid bytes.
     const dir = await mkdtemp(join(tmpdir(), 'edit-strict-'));
     const file = join(dir, 'sample.txt');
-    // "hi " + 0xFF (invalid UTF-8) + "\n" + "foo"
     const original = Buffer.from([0x68, 0x69, 0x20, 0xff, 0x0a, 0x66, 0x6f, 0x6f]);
     await writeFile(file, original);
     try {
@@ -576,11 +583,7 @@ describe('EditTool', () => {
         replace_all: false,
       });
 
-      // Strict decoding must surface the invalid bytes as a failed edit...
       expect(result.ok).toBe(false);
-      // ...and must not have rewritten the file. The v2 lenient-decode bug
-      // silently rewrote 0xFF as EF BF BD even though the edit only touched
-      // 'foo'; locking the byte-for-byte invariant prevents a regression.
       const after = await readFile(file);
       expect(Buffer.compare(after, original)).toBe(0);
     } finally {

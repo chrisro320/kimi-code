@@ -9,22 +9,15 @@
 import type { ToolInputDisplay } from '@moonshot-ai/protocol';
 import { z } from 'zod';
 
-import type { BuiltinTool, ExecutableToolResult, ToolExecution } from '#/agent/tool/toolContract';
+import type { BuiltinTool, ExecutableToolResult, ToolExecution } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
-import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
+import { toInputJsonSchema } from '#/tool/input-schema';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentPlanService } from '#/agent/plan/plan';
 import type { PlanData } from '#/agent/plan/plan';
 import DESCRIPTION from './exit-plan-mode.md?raw';
 
-// ── Input schema ─────────────────────────────────────────────────────
 
-/**
- * User-selectable option surfaced at plan approval time. The LLM supplies
- * up to 3 of these when the plan contains multiple approaches; the host's
- * ApprovalRuntime presents them to the user and returns the chosen `label`
- * (or `{kind:'revise', feedback}` when the user asks for revisions).
- */
 export interface ExitPlanModeOption {
   label: string;
   description: string;
@@ -78,7 +71,6 @@ type ResolvePlanResult =
   | { readonly ok: true; readonly plan: string; readonly path?: string | undefined }
   | { readonly ok: false; readonly error: ExecutableToolResult };
 
-// ── Implementation ───────────────────────────────────────────────────
 
 export class ExitPlanModeTool implements BuiltinTool<ExitPlanModeInput> {
   readonly name = 'ExitPlanMode' as const;
@@ -133,14 +125,14 @@ export class ExitPlanModeTool implements BuiltinTool<ExitPlanModeInput> {
     const resolvedPlan = await this.resolvePlan();
     if (!resolvedPlan.ok) return resolvedPlan.error;
 
-    this.telemetry.track('plan_submitted', {
+    this.telemetry.track2('plan_submitted', {
       has_options: args.options !== undefined && args.options.length >= 2,
     });
 
     const failed = this.exitPlanMode();
     if (failed !== undefined) return failed;
 
-    this.telemetry.track('plan_resolved', { outcome: 'auto_approved' });
+    this.telemetry.track2('plan_resolved', { outcome: 'auto_approved' });
 
     return {
       isError: false,

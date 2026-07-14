@@ -4,16 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { resetUnexpectedErrorHandler, setUnexpectedErrorHandler } from '#/_base/errors/unexpectedError';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { defineModel } from '#/wire/model';
-import { defineOp } from '#/wire/op';
 import { IAgentWireService } from '#/wire/tokens';
 import type { PersistedRecord } from '#/wire/wireService';
 import { WireService } from '#/wire/wireServiceImpl';
@@ -24,11 +25,13 @@ const KEY = 'round-trip';
 const CounterModel = defineModel('compat.counter', () => ({ value: 0 }));
 const TagsModel = defineModel('compat.tags', () => ({ tags: [] as string[] }));
 
-const counterSet = defineOp(CounterModel, 'compat.counter.set', {
-  apply: (_s, p: { value: number }) => ({ value: p.value }),
+const counterSet = CounterModel.defineOp('compat.counter.set', {
+  schema: z.object({ value: z.number() }),
+  apply: (_s, p) => ({ value: p.value }),
 });
-const tagsAdd = defineOp(TagsModel, 'compat.tags.add', {
-  apply: (s, p: { tag: string }) => ({ tags: [...s.tags, p.tag] }),
+const tagsAdd = TagsModel.defineOp('compat.tags.add', {
+  schema: z.object({ tag: z.string() }),
+  apply: (s, p) => ({ tags: [...s.tags, p.tag] }),
 });
 
 const cleanups: string[] = [];
@@ -85,11 +88,8 @@ describe('wire.jsonl round-trip', () => {
     live.wire.dispatch(tagsAdd({ tag: 'a' }), tagsAdd({ tag: 'b' }));
     await live.log.flush();
 
-    // Read the bytes back through a fresh reader over the same on-disk storage.
     const records = await collect(makeReader(storage));
 
-    // Format zero-change: flat `{ type, ...payload }` (plus the engine-stamped
-    // `time`), no nested `payload` key.
     expect(records).toEqual([
       { type: 'compat.counter.set', value: 3, time: expect.any(Number) },
       { type: 'compat.tags.add', tag: 'a', time: expect.any(Number) },
@@ -99,15 +99,20 @@ describe('wire.jsonl round-trip', () => {
       expect('payload' in record).toBe(false);
     }
 
-    // Replay (with an injected unknown-type record) into a fresh service.
     const replayTarget = makeContainer(storage, 'replay-target');
     const withUnknown: PersistedRecord[] = [
       ...records,
       { type: 'compat.unknown.nope', foo: 1 },
     ];
-    await replayTarget.wire.replay(...withUnknown);
+    setUnexpectedErrorHandler(() => {});
+    let replayResult;
+    try {
+      replayResult = await replayTarget.wire.replay(...withUnknown);
+    } finally {
+      resetUnexpectedErrorHandler();
+    }
 
-    // Rebuilt state equals the live state; the unknown record was skipped.
+    expect(replayResult.unknownRecords).toBe(1);
     expect(replayTarget.wire.getModel(CounterModel)).toEqual(
       live.wire.getModel(CounterModel),
     );

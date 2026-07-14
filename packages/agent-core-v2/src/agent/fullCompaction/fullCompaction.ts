@@ -3,6 +3,7 @@ import type {
   CompactionSource,
 } from './types';
 import { createDecorator } from "#/_base/di/instantiation";
+import type { Event } from '#/_base/event';
 import type { Hooks } from '#/hooks';
 
 export interface FullCompactionInput {
@@ -25,8 +26,9 @@ export interface IAgentFullCompactionService {
 
   readonly hooks: Hooks<{
     onWillCompact: FullCompactionTask;
-    onDidFinishCompaction: FullCompactionTask;
   }>;
+
+  readonly onDidFinishCompaction: Event<FullCompactionTask>;
 }
 
 export const IAgentFullCompactionService = createDecorator<IAgentFullCompactionService>('agentFullCompactionService');

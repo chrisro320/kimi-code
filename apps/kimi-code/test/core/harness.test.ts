@@ -185,6 +185,7 @@ function makeFixture(options?: {
     const lifecycleAgents = {
       list: () => [main],
       getHandle: (id: string) => (id === 'main' ? main : undefined),
+      whenReady: async (id: string) => (id === 'main' ? main : undefined),
       onDidCreate: () => ({ dispose: () => {} }),
       onDidDispose: () => ({ dispose: () => {} }),
     };

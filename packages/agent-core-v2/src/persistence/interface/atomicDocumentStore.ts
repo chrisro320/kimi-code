@@ -14,6 +14,7 @@ import { type IDisposable } from '#/_base/di/lifecycle';
 import { type Event } from '#/_base/event';
 
 export interface DocumentCodec {
+  readonly format: string;
   encode(value: unknown): Uint8Array;
   decode(bytes: Uint8Array): unknown;
 }

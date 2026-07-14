@@ -17,13 +17,21 @@
  * Semantics mirror v1's `ContextMemory.appendLoopEvent`
  * (`packages/agent-core/src/agent/context/index.ts`) and the transcript
  * reducer (`packages/agent-core/src/services/message/transcript.ts`) exactly:
- *   - `step.begin`  → open an assistant message (`partial: true`); first close
- *                     any tool exchange left open by a previous step
+ *   - `step.begin`  → open an assistant message (`partial: true`); first settle
+ *                     the step left open by a failed attempt
  *   - `content.part`→ append to the open assistant's content
  *   - `tool.call`   → append to the open assistant's `toolCalls`, mark pending
  *   - `tool.result` → push a `tool` message (v1 `toolResultOutputForModel`
  *                     wrapping), clear its pending id
- *   - `step.end`    → close the assistant (`partial: undefined`)
+ *   - `step.end`    → settle the assistant
+ * "Settle" closes any tool exchange left open (interrupted result messages),
+ * then drops the partial assistant when it is empty (no content, no tool
+ * calls — an empty assistant only trips provider message validation) and
+ * seals it (`partial: undefined`) when it carries output. v1 never produced
+ * `step.begin` without `step.end` (its retries stayed inside one request), so
+ * the drop/seal rule is the v2 extension that makes loop-level retries — a
+ * retried attempt is its own `step.begin` — replay to the same history the
+ * live loop folded.
  * A `context.append_message` reduced while a tool exchange is still open is
  * deferred and flushed once the exchange closes, so strict-provider
  * assistant↔tool adjacency is preserved.
@@ -119,7 +127,6 @@ function bind(state: readonly ContextMessage[], ctx: FoldCtx): readonly ContextM
   return state;
 }
 
-/** Defer-aware `context.append_message` (matches v1 `ContextMemory.appendMessage`). */
 export function foldAppendMessage(
   state: readonly ContextMessage[],
   message: ContextMessage,
@@ -132,7 +139,6 @@ export function foldAppendMessage(
   return bind([...state, message], ctx);
 }
 
-/** Reduce one `context.append_loop_event` record into the history. */
 export function foldLoopEvent(
   state: readonly ContextMessage[],
   event: LoopRecordedEvent,
@@ -140,14 +146,14 @@ export function foldLoopEvent(
   const ctx = ctxOf(state);
   switch (event.type) {
     case 'step.begin': {
-      const closed = closePending(state, ctx);
+      const settled = settleOpenStep(state, ctx);
       const assistant: ContextMessage = { role: 'assistant', content: [], toolCalls: [], partial: true };
       ctx.openStepUuid = event.uuid;
-      return bind([...closed, assistant], ctx);
+      return bind([...settled, assistant], ctx);
     }
     case 'step.end': {
       ctx.openStepUuid = undefined;
-      const s = clearPartial(state);
+      const s = settleOpenStep(state, ctx);
       return bind(flushDeferred(s, ctx), ctx);
     }
     case 'content.part':
@@ -185,11 +191,6 @@ export function foldLoopEvent(
   }
 }
 
-/**
- * Clear fold bookkeeping after an op that invalidates any open exchange
- * (`context.undo` / `context.clear` / `context.apply_compaction`). Returns
- * the same state reference with a fresh fold ctx.
- */
 export function resetFold(state: readonly ContextMessage[]): readonly ContextMessage[] {
   foldCtxMap.set(state, { openStepUuid: undefined, pending: new Set(), deferred: [] });
   return state;
@@ -206,11 +207,19 @@ function appendToOpenAssistant(
   return next;
 }
 
-function clearPartial(state: readonly ContextMessage[]): readonly ContextMessage[] {
-  const index = findOpenAssistantIndex(state);
-  if (index === -1) return state;
-  const next = state.slice();
-  next[index] = { ...next[index]!, partial: undefined };
+function settleOpenStep(
+  state: readonly ContextMessage[],
+  ctx: FoldCtx,
+): readonly ContextMessage[] {
+  const closed = closePending(state, ctx);
+  const index = findOpenAssistantIndex(closed);
+  if (index === -1) return closed;
+  const open = closed[index]!;
+  if (open.content.length === 0 && open.toolCalls.length === 0) {
+    return [...closed.slice(0, index), ...closed.slice(index + 1)];
+  }
+  const next = closed.slice();
+  next[index] = { ...open, partial: undefined };
   return next;
 }
 

@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, normalize, resolve } from 'pathe';
 
 import { resolveKimiHome } from '#/app/bootstrap/bootstrap';
 import { McpServerConfigSchema, type McpServerConfig } from './config-schema';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import { z } from 'zod';
 
 const McpJsonFileSchema = z.object({
@@ -36,17 +36,6 @@ export interface LoadMcpServersInput {
   readonly homeDir?: string;
 }
 
-/**
- * Load MCP server declarations from the user-global `~/.kimi-code/mcp.json`,
- * the project-root `<project root>/.mcp.json`, and the project-local
- * `<cwd>/.kimi-code/mcp.json`. Entries in later files override earlier files
- * with the same key, so a repo can specialise or replace a shared definition,
- * and Kimi-specific project config wins over the Claude-compatible root file.
- *
- * Note: project-local entries may spawn stdio commands at session start, so
- * opening a session inside an untrusted checkout will execute whatever its
- * `mcp.json` declares. Only enable this in repos you trust.
- */
 export async function loadMcpServers(
   input: LoadMcpServersInput,
 ): Promise<Record<string, McpServerConfig>> {
@@ -94,7 +83,7 @@ async function readMcpJson(
     text = await readFile(filePath, 'utf-8');
   } catch (error: unknown) {
     if (isFileNotFound(error)) return {};
-    throw new KimiError(ErrorCodes.CONFIG_INVALID, `Failed to read ${filePath}: ${describeError(error)}`, {
+    throw new Error2(ErrorCodes.CONFIG_INVALID, `Failed to read ${filePath}: ${describeError(error)}`, {
       cause: error,
     });
   }
@@ -105,7 +94,7 @@ async function readMcpJson(
   try {
     data = JSON.parse(text);
   } catch (error: unknown) {
-    throw new KimiError(ErrorCodes.CONFIG_INVALID, `Invalid JSON in ${filePath}: ${describeError(error)}`, {
+    throw new Error2(ErrorCodes.CONFIG_INVALID, `Invalid JSON in ${filePath}: ${describeError(error)}`, {
       cause: error,
     });
   }
@@ -113,7 +102,7 @@ async function readMcpJson(
   try {
     return normalizeMcpServers(McpJsonFileSchema.parse(data).mcpServers, options);
   } catch (error: unknown) {
-    throw new KimiError(ErrorCodes.CONFIG_INVALID, `Invalid MCP server config in ${filePath}: ${describeError(error)}`, {
+    throw new Error2(ErrorCodes.CONFIG_INVALID, `Invalid MCP server config in ${filePath}: ${describeError(error)}`, {
       cause: error,
     });
   }

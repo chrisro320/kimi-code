@@ -36,6 +36,7 @@ export function recordingTelemetry(
             : { ...currentContext, ...properties },
       });
     },
+    track2: (event, properties) => service.track(event, properties as TelemetryProperties),
     withContext(patch: TelemetryContextPatch) {
       return recordingTelemetry(records, { ...currentContext, ...patch });
     },
@@ -54,10 +55,6 @@ export function recordingTelemetry(
   return service;
 }
 
-/**
- * Register an empty `ITelemetryService` placeholder. Tests that assert on
- * telemetry should register a spy via `additionalServices` instead.
- */
 export function registerTelemetryServices(reg: ServiceRegistration): void {
   reg.definePartialInstance(ITelemetryService, {});
 }

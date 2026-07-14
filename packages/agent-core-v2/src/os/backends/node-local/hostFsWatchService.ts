@@ -11,6 +11,7 @@ import { FSWatcher } from 'chokidar';
 import { Emitter, type Event } from '#/_base/event';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 
 import {
   type HostFsChange,
@@ -21,7 +22,6 @@ import {
   IHostFsWatchService,
 } from '#/os/interface/hostFsWatch';
 
-/** Suppress `.git` directories by default — they are high-volume noise. */
 const DEFAULT_IGNORED = (p: string): boolean => /(?:^|[/\\])\.git(?:$|[/\\])/.test(p);
 
 class HostFsWatchHandle implements IHostFsWatchHandle {
@@ -45,9 +45,8 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
       const mapped = mapChokidarEvent(eventName, absPath);
       if (mapped !== undefined) this.emitter.fire(mapped);
     });
-    this.watcher.on('error', () => {
-      // Best-effort: a watcher error must not crash the host. Higher layers
-      // can always re-subscribe if events stop arriving.
+    this.watcher.on('error', (error: unknown) => {
+      onUnexpectedError(error);
     });
     this.watcher.add(path);
   }

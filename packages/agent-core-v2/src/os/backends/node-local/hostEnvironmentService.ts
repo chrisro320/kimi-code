@@ -10,6 +10,7 @@
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { BugIndicatingError } from '#/_base/errors/errors';
 import { probeHostEnvironmentFromNode } from '#/_base/execEnv/environmentProbe';
 import { applyLoginShellPathFromNode } from '#/_base/execEnv/loginShellPath';
 
@@ -28,12 +29,6 @@ export class HostEnvironmentService implements IHostEnvironment {
   readonly ready: Promise<void>;
 
   constructor() {
-    // Enrich process.env.PATH from the user's login shell so spawned commands
-    // find user-installed tools (e.g. Homebrew's gh) even when kimi-code itself
-    // was launched without the full profile PATH. Both probes are memoised,
-    // independent, and run concurrently: the login-shell probe is a no-op on
-    // win32 (where probeHostEnvironment reads PATH to locate Git Bash), and on
-    // POSIX probeHostEnvironment does not consult PATH.
     this.ready = Promise.all([
       probeHostEnvironmentFromNode().then((info) => {
         this._info = info;
@@ -44,7 +39,7 @@ export class HostEnvironmentService implements IHostEnvironment {
 
   private require(field: keyof HostEnvironmentInfo): never | HostEnvironmentInfo[typeof field] {
     if (this._info === undefined) {
-      throw new Error(
+      throw new BugIndicatingError(
         `IHostEnvironment.${field} accessed before ready — await IHostEnvironment.ready first (composition root should do so before creating a Session scope).`,
       );
     }

@@ -9,6 +9,8 @@ import { IAgentContextProjectorService } from '#/agent/contextProjector/contextP
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { toProtocolMessage } from '#/agent/contextMemory/messageProjection';
 import type { Message } from '#/app/llmProtocol/message';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 
 const REPAIR_WARNING = 'repaired the request to keep it wire-valid';
 
@@ -42,11 +44,6 @@ function repairPayloads(warnings: WarningCall[]): Record<string, unknown>[] {
     .map((call) => call.payload as Record<string, unknown>);
 }
 
-// Tests for how the projector normalizes tool exchanges: results are pulled up
-// right after their call, messages that landed between a call and its results
-// are deferred to after the exchange, unanswered calls are closed with a
-// synthetic error result, stale duplicate results are dropped, and orphan
-// results are dropped in a real projection (but kept in a bare slice).
 
 const INTERRUPTED = 'Tool result is not available in the current context';
 
@@ -98,12 +95,15 @@ describe('projector tool-exchange normalization', () => {
   let disposables: DisposableStore;
   let projector: IAgentContextProjectorService;
   let warnings: WarningCall[];
+  let telemetryRecords: TelemetryRecord[];
 
   beforeEach(() => {
     disposables = new DisposableStore();
     warnings = [];
+    telemetryRecords = [];
     const ix = disposables.add(new TestInstantiationService());
     ix.set(ILogService, createCapturingLog(warnings));
+    ix.set(ITelemetryService, recordingTelemetry(telemetryRecords));
     ix.set(IAgentContextProjectorService, new SyncDescriptor(AgentContextProjectorService));
     projector = ix.get(IAgentContextProjectorService);
   });
@@ -205,8 +205,6 @@ describe('projector tool-exchange normalization', () => {
   });
 
   it('drops a stale duplicate result for an already-answered call', () => {
-    // The call is closed (synthetically) when the next assistant turn starts;
-    // the trailing duplicate result for the same call is dropped.
     const history = [
       user('go'),
       assistant('', ['c1']),
@@ -241,9 +239,6 @@ describe('projector tool-exchange normalization', () => {
   });
 
   it('drops a partial assistant exchange without stranding its results', () => {
-    // A partial assistant (stream interrupted) is removed before the exchange
-    // normalization, so its recorded results become orphans and are dropped,
-    // and no synthetic result is invented for its open calls.
     const history: ContextMessage[] = [
       user('go'),
       { ...assistant('', ['c1', 'c2']), partial: true },
@@ -254,7 +249,6 @@ describe('projector tool-exchange normalization', () => {
   });
 
   it('keeps a bare result slice with no preceding assistant (used for sizing)', () => {
-    // A leading result is kept rather than treated as an orphan.
     expect(shape([toolResult('c1', 'partial result')])).toEqual(['tool:c1']);
   });
 
@@ -319,6 +313,23 @@ describe('projector tool-exchange normalization', () => {
     const protocol = toProtocolMessage('session_1', 0, result, 0);
     expect(protocol.content).toEqual([
       { type: 'tool_result', tool_call_id: 'call_image', output: 'image result' },
+    ]);
+  });
+
+  it('passes raw media parts through as the tool_result output', () => {
+    const result: ContextMessage = {
+      role: 'tool',
+      content: [
+        { type: 'text', text: 'image result' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } },
+      ],
+      toolCalls: [],
+      toolCallId: 'call_media',
+    };
+
+    const protocol = toProtocolMessage('session_1', 0, result, 0);
+    expect(protocol.content).toEqual([
+      { type: 'tool_result', tool_call_id: 'call_media', output: result.content },
     ]);
   });
 
@@ -471,6 +482,127 @@ describe('projector tool-exchange normalization', () => {
       expect(repairPayloads(warnings).at(-1)).toEqual(
         expect.objectContaining({ assistantsMerged: 1 }),
       );
+    });
+
+    it('emits context_projection_repaired telemetry with the v1 wire keys when a repair occurs', () => {
+      project([
+        assistant('', ['c1', 'c2']),
+        reminder('host note'),
+        toolResult('c1', 'one'),
+        toolResult('c2', 'two'),
+      ]);
+      expect(telemetryRecords).toEqual([
+        {
+          event: 'context_projection_repaired',
+          properties: {
+            reordered: 2,
+            synthesized: 0,
+            dropped_orphan: 0,
+            duplicate_calls_dropped: 0,
+            duplicate_results_dropped: 0,
+            leading_dropped: 0,
+            assistants_merged: 0,
+            whitespace_dropped: 0,
+          },
+        },
+      ]);
+    });
+
+    it('does not emit context_projection_repaired on a clean projection or a trailing in-flight close', () => {
+      project([user('go'), assistant('', ['c1']), toolResult('c1', 'one'), user('next')]);
+      project([user('go'), assistant('', ['c1'])]);
+      expect(telemetryRecords).toEqual([]);
+    });
+  });
+
+  describe('projectMediaDegraded', () => {
+    function imageMessage(url: string): ContextMessage {
+      return {
+        role: 'user',
+        content: [{ type: 'image_url', imageUrl: { url } }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      };
+    }
+
+    it('keeps the two most recent media parts and replaces older ones with markers', () => {
+      const projected = projector.projectMediaDegraded([
+        imageMessage('data:image/png;base64,OLD1'),
+        user('middle'),
+        imageMessage('data:image/png;base64,OLD2'),
+        imageMessage('data:image/png;base64,KEEP1'),
+        imageMessage('data:image/png;base64,KEEP2'),
+      ]);
+
+      const urls = projected
+        .flatMap((message) => message.content)
+        .filter((part) => part.type === 'image_url')
+        .map((part) => part.imageUrl.url);
+      expect(urls).toEqual(['data:image/png;base64,KEEP1', 'data:image/png;base64,KEEP2']);
+      const markers = projected
+        .flatMap((message) => message.content)
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text);
+      expect(
+        markers.filter((text) => text.includes('dropped to fit the provider request size limit')),
+      ).toHaveLength(2);
+    });
+
+    it('returns the projected messages untouched when media fits within keep-recent', () => {
+      const projected = projector.projectMediaDegraded([
+        user('text'),
+        imageMessage('data:image/png;base64,AAAA'),
+      ]);
+      const allParts = projected.flatMap((message) => message.content);
+      expect(allParts.some((part) => part.type === 'image_url')).toBe(true);
+    });
+  });
+
+  describe('projectMediaStripped', () => {
+    function imageMessage(url: string): ContextMessage {
+      return {
+        role: 'user',
+        content: [{ type: 'image_url', imageUrl: { url } }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      };
+    }
+
+    it('replaces every media part with a text marker, keeping the surrounding text', () => {
+      const projected = projector.projectMediaStripped([
+        user('look at these'),
+        imageMessage('data:image/png;base64,AAAA'),
+        {
+          role: 'tool',
+          content: [
+            { type: 'text', text: '<image path="/tmp/shot.png">' },
+            { type: 'image_url', imageUrl: { url: 'data:image/avif;base64,BBBB' } },
+            { type: 'text', text: '</image>' },
+          ],
+          toolCalls: [],
+          toolCallId: 'c1',
+        },
+        {
+          role: 'user',
+          content: [{ type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,CCCC' } }],
+          toolCalls: [],
+          origin: { kind: 'user' },
+        },
+      ]);
+
+      const allParts = projected.flatMap((message) => message.content);
+      expect(allParts.some((part) => part.type === 'image_url')).toBe(false);
+      expect(allParts.some((part) => part.type === 'video_url')).toBe(false);
+      const texts = allParts.filter((part) => part.type === 'text').map((part) => part.text);
+      expect(texts).toContain('look at these');
+      expect(texts).toContain('<image path="/tmp/shot.png">');
+      expect(texts.some((text) => text.includes('the provider rejected this image'))).toBe(true);
+      expect(texts.some((text) => text.includes('dropped along with a rejected image'))).toBe(true);
+    });
+
+    it('returns the projected messages untouched when there is no media', () => {
+      const projected = projector.projectMediaStripped([user('just text')]);
+      expect(projected).toEqual(project([user('just text')]));
     });
   });
 });

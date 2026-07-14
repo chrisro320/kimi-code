@@ -28,8 +28,8 @@ vi.mock('node-pty', () => ({
 class FakeTerminalProcess implements TerminalProcess {
   private readonly dataEmitter = new Emitter<string>();
   private readonly exitEmitter = new Emitter<{ exitCode: number | null }>();
-  readonly onData = this.dataEmitter.event;
-  readonly onExit = this.exitEmitter.event;
+  readonly onProcessData = this.dataEmitter.event;
+  readonly onProcessExit = this.exitEmitter.event;
   readonly writes: string[] = [];
   readonly resizes: Array<[number, number]> = [];
   killed = false;
@@ -260,7 +260,6 @@ describe('SessionTerminalService', () => {
   });
 });
 
-// Sanity check for the App-scoped OS HostTerminalService.
 describe('HostTerminalService (App scope)', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -306,14 +305,14 @@ describe('HostTerminalService (App scope)', () => {
     });
 
     let receivedData = '';
-    proc.onData((data) => {
+    proc.onProcessData((data) => {
       receivedData += data;
     });
     for (const listener of dataListeners) listener('hello');
     expect(receivedData).toBe('hello');
 
     let receivedExit: { exitCode: number | null } | undefined;
-    proc.onExit((event) => {
+    proc.onProcessExit((event) => {
       receivedExit = event;
     });
     for (const listener of exitListeners) listener({ exitCode: 5 });

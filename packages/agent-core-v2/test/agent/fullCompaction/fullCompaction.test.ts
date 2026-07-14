@@ -15,7 +15,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
 import { UNKNOWN_CAPABILITY } from '#/app/llmProtocol/capability';
-import { APIConnectionError, APIContextOverflowError, APIStatusError } from '#/app/llmProtocol/errors';
+import {
+  APIConnectionError,
+  APIContextOverflowError,
+  APIRequestTooLargeError,
+  APIStatusError,
+} from '#/app/llmProtocol/errors';
 import { type Message, type StreamedMessagePart, type ToolCall } from '#/app/llmProtocol/message';
 import { generate as runKosongGenerate } from '#/app/llmProtocol/generate';
 import type { ChatProvider, StreamedMessage } from '#/app/llmProtocol/provider';
@@ -43,7 +48,7 @@ import {
   type ResolvedAgentProfile,
   type ToolExecution,
 } from '#/index';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentGoalService } from '#/agent/goal/goal';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
@@ -173,8 +178,6 @@ describe('FullCompaction', () => {
       textMessage('user', 'next prompt'),
     ];
 
-    // The only valid split is before the parallel exchange (after 'old assistant'),
-    // never between tool_a and tool_b — that would leave tool_b as an orphan.
     expect(strategy.computeCompactCount(messages, 'auto')).toBe(2);
   });
 
@@ -266,7 +269,6 @@ describe('FullCompaction', () => {
       const candidate = event as { type?: unknown; event?: unknown };
       return candidate.type === '[wire]' && candidate.event === 'full_compaction.complete';
     });
-    // The engine stamps `time` on every persisted record; the payload itself is empty.
     expect(completeEvent?.args).toEqual({ time: '<time>' });
     expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
       system: <system-prompt>
@@ -303,8 +305,8 @@ describe('FullCompaction', () => {
         compacted_count: 6,
         retry_count: 0,
         thinking_effort: 'off',
-        input_other: 1181,
-        output: 8,
+        input_tokens: 1181,
+        output_tokens: 8,
         input_cache_read: 0,
         input_cache_creation: 0,
       }),
@@ -364,7 +366,7 @@ describe('FullCompaction', () => {
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the active turn' }] });
     const approval = await ctx.takeApprovalRequest();
-    expect(ctx.get(IAgentTurnService).getActiveTurn()).toBeDefined();
+    expect(ctx.get(IAgentLoopService).status().activeTurnId).toBeDefined();
 
     await expect(ctx.rpc.beginCompaction({})).rejects.toMatchObject({
       code: 'compaction.unable',
@@ -379,7 +381,7 @@ describe('FullCompaction', () => {
     ctx.mockNextResponse({ type: 'text', text: 'Turn done.' });
     approval.respond({ decision: 'rejected', selectedLabel: 'reject' });
     await ctx.untilTurnEnd();
-    expect(ctx.get(IAgentTurnService).getActiveTurn()).toBeUndefined();
+    expect(ctx.get(IAgentLoopService).status().activeTurnId).toBeUndefined();
   });
 
   it('projects the compacted prefix before sending the summary request', async () => {
@@ -423,7 +425,7 @@ describe('FullCompaction', () => {
     ).toBe(false);
   });
 
-  it('force-refreshes OAuth credentials on compaction 401 and falls back to login_required when replay 401', async () => {
+  it('force-refreshes OAuth credentials on compaction 401 and treats replay 401 as provider auth error', async () => {
     const tokenCalls: Array<boolean | undefined> = [];
     const authKeys: string[] = [];
     const oauthOptions = oauthTestAgentOptions(async (options) => {
@@ -462,7 +464,7 @@ describe('FullCompaction', () => {
       expect.objectContaining({
         event: 'error',
         args: expect.objectContaining({
-          code: 'auth.login_required',
+          code: 'provider.auth_error',
           details: expect.objectContaining({
             statusCode: 401,
             requestId: 'req-compact-401',
@@ -631,6 +633,85 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
+  it('recovers from an image-format rejection with a media-stripped resend', async () => {
+    let attempts = 0;
+    let sawMedia = false;
+    let sawStrippedResend = false;
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      const hasMedia = history.some((message) =>
+        message.content.some((part) => part.type === 'image_url' || part.type === 'video_url'),
+      );
+      if (hasMedia) {
+        sawMedia = true;
+        throw new APIStatusError(400, 'unsupported image format: image/avif');
+      }
+      sawStrippedResend = true;
+      return textResult('Recovered compacted summary.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendRichToolExchange();
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const compacted = ctx.once('full_compaction.complete');
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await compacted;
+    await completed;
+
+    expect(attempts).toBe(2);
+    expect(sawMedia).toBe(true);
+    expect(sawStrippedResend).toBe(true);
+    await ctx.expectResumeMatches();
+  });
+
+  it('recovers from a request-body 413 with a media-degraded resend', async () => {
+    let attempts = 0;
+    let sawFullMedia = false;
+    let sawDegradedResend = false;
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      const mediaCount = history.reduce(
+        (count, message) =>
+          count +
+          message.content.filter((part) => part.type === 'image_url' || part.type === 'video_url')
+            .length,
+        0,
+      );
+      if (mediaCount > 2) {
+        sawFullMedia = true;
+        throw new APIRequestTooLargeError(413, 'Request Entity Too Large');
+      }
+      sawDegradedResend = true;
+      return textResult('Recovered compacted summary.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendRichToolExchange();
+    ctx.appendRichToolExchange();
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const compacted = ctx.once('full_compaction.complete');
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await compacted;
+    await completed;
+
+    expect(attempts).toBe(2);
+    expect(sawFullMedia).toBe(true);
+    expect(sawDegradedResend).toBe(true);
+    await ctx.expectResumeMatches();
+  });
+
   it('retries compaction responses with empty summaries before applying context', async () => {
     vi.useFakeTimers();
     const firstEmptySummary = deferred<void>();
@@ -660,9 +741,6 @@ describe('FullCompaction', () => {
     await completed;
 
     expect(attempts).toBe(3);
-    // Empty summaries are retried without shrinking the history; the recovered
-    // summary replaces the whole history with the real user messages plus the
-    // prefixed summary.
     expect(ctx.compactHistory()).toEqual([
       { role: 'user', text: 'old user one' },
       { role: 'user', text: 'recent user two' },
@@ -684,11 +762,6 @@ describe('FullCompaction', () => {
   });
 
   it('reduces the compacted prefix and retries when the model returns only thinking content', async () => {
-    // End-to-end through the real kosong generate(): a think-only stream (think
-    // parts, no text, no tool calls) makes generate() itself throw
-    // APIEmptyResponseError. Compaction must treat that like a truncated summary
-    // — shrink the compacted prefix and retry — rather than resend the identical
-    // request that produced no summary.
     vi.useFakeTimers();
     const firstThinkOnly = deferred<void>();
     const inputs: string[][] = [];
@@ -719,7 +792,6 @@ describe('FullCompaction', () => {
     await completed;
 
     expect(inputs).toHaveLength(2);
-    // The retry sends a strictly smaller input than the first attempt.
     expect(inputs[1]!.length).toBeLessThan(inputs[0]!.length);
     expect(ctx.compactHistory()).toEqual([
       { role: 'user', text: 'old user one' },
@@ -773,10 +845,6 @@ describe('FullCompaction', () => {
   });
 
   it('fails after exhausting retries when the model only ever returns thinking content', async () => {
-    // End-to-end through the real kosong generate(): every attempt is think-only,
-    // so generate() keeps throwing APIEmptyResponseError. Compaction shrinks the
-    // prefix on each retry but eventually exhausts MAX_COMPACTION_RETRY_ATTEMPTS
-    // and fails without ever applying a summary.
     vi.useFakeTimers();
     const records: TelemetryRecord[] = [];
     const inputs: string[][] = [];
@@ -799,9 +867,6 @@ describe('FullCompaction', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await failed;
 
-    // Each empty/think-only response drops the oldest item and resets the retry
-    // counter; once only one item remains, MAX_COMPACTION_RETRY_ATTEMPTS more
-    // retries run before failing. 3 drops + 5 retries = 8 generate calls.
     expect(inputs).toHaveLength(8);
     expect(inputs[1]!.length).toBeLessThan(inputs[0]!.length);
     expect(records).toContainEqual({
@@ -812,7 +877,6 @@ describe('FullCompaction', () => {
         error_type: 'APIEmptyResponseError',
       }),
     });
-    // No summary was ever applied; the original history is left intact.
     expect(ctx.compactHistory()).toEqual([
       { role: 'user', text: 'old user one' },
       { role: 'assistant', text: 'old assistant one' },
@@ -1009,10 +1073,6 @@ describe('FullCompaction', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await failed;
 
-    // The four-message compacted prefix shrinks on each truncated response.
-    // Once only one message remains, it cannot shrink further, so the
-    // CompactionTruncatedError fails immediately instead of falling through to
-    // generic retry attempts.
     expect(attempts).toBe(4);
     expect(ctx.newEvents()).toContainEqual(
       expect.objectContaining({
@@ -1021,7 +1081,7 @@ describe('FullCompaction', () => {
           code: 'compaction.failed',
           message:
             'CompactionTruncatedError: Compaction response was truncated before producing a complete summary.',
-          name: 'KimiError',
+          name: 'Error2',
         }),
       }),
     );
@@ -1449,8 +1509,6 @@ describe('FullCompaction', () => {
       variant: 'host',
     });
 
-    // ContextMemory records raw insertion order — the reminder sits where it
-    // was added, right after the still-open tool exchange.
     expect(ctx.context.get().map((m) => m.role)).toEqual([
       'user',
       'assistant',
@@ -1458,9 +1516,6 @@ describe('FullCompaction', () => {
       'assistant',
       'user',
     ]);
-    // The projector guarantees ordering for the model: the open calls are
-    // closed (synthetic results) and the reminder is placed after them, never
-    // between a tool call and its results.
     expect(ctx.project().map((m) => m.role)).toEqual([
       'user',
       'assistant',
@@ -1476,8 +1531,6 @@ describe('FullCompaction', () => {
     await ctx.rpc.beginCompaction({});
     await compacted;
 
-    // Compaction drops the in-flight tool exchange and the deferred reminder;
-    // only real user messages and the compaction summary remain.
     expect(ctx.context.get().map((m) => m.role)).toEqual([
       'user',
       'user',
@@ -1485,8 +1538,6 @@ describe('FullCompaction', () => {
     ]);
     expect(ctx.context.get().at(-1)?.origin).toEqual({ kind: 'compaction_summary' });
 
-    // The dropped tool calls no longer exist, so late tool results are orphans
-    // and do not change history.
     await ctx.dispatch({
       type: 'context.append_loop_event',
       event: {
@@ -1525,10 +1576,6 @@ describe('FullCompaction', () => {
       variant: 'host',
     });
 
-    // One tool result has landed but the second is still pending. Raw history
-    // keeps insertion order (reminder after the partial exchange); the
-    // projector keeps the real result, synthesizes the open one, and places the
-    // reminder after the closed exchange.
     expect(ctx.context.get().map((m) => m.role)).toEqual([
       'user',
       'assistant',
@@ -1552,8 +1599,6 @@ describe('FullCompaction', () => {
     await ctx.rpc.beginCompaction({});
     await compacted;
 
-    // Compaction drops the partially-resolved tool exchange and the deferred
-    // reminder; only real user messages and the compaction summary remain.
     expect(ctx.context.get().map((m) => m.role)).toEqual([
       'user',
       'user',
@@ -1561,8 +1606,6 @@ describe('FullCompaction', () => {
     ]);
     expect(ctx.context.get().at(-1)?.origin).toEqual({ kind: 'compaction_summary' });
 
-    // The dropped tool calls no longer exist, so a late tool result is an
-    // orphan and does not change history.
     await ctx.dispatch({
       type: 'context.append_loop_event',
       event: {
@@ -1788,8 +1831,6 @@ describe('FullCompaction', () => {
     expect(ctx.llmCalls).toHaveLength(2);
     const [compactionCall, answerCall] = ctx.llmCalls;
     const compactionTexts = compactionCall?.history.map(messageText) ?? [];
-    // The whole history is compacted, so the pending prompt is included in the
-    // compaction input and kept verbatim in the post-compaction replacement.
     expect(compactionTexts.some((text) => text.includes('keep-this-pending-verbatim'))).toBe(true);
     expect(compactionCall?.history.map((message) => message.role)).toEqual([
       'user',
@@ -1826,8 +1867,6 @@ describe('FullCompaction', () => {
     expect(ctx.llmCalls).toHaveLength(2);
     const [compactionCall, answerCall] = ctx.llmCalls;
     const compactionTexts = compactionCall?.history.map(messageText) ?? [];
-    // The whole history is compacted, so the pending prompt is included in the
-    // compaction input and kept verbatim in the post-compaction replacement.
     expect(compactionTexts.some((text) => text.includes('ratio-pending-verbatim'))).toBe(true);
     expect(compactionCall?.history.map((message) => message.role)).toEqual([
       'user',
@@ -2170,10 +2209,6 @@ describe('FullCompaction', () => {
     await ctx.untilTurnEnd();
 
     expect(callCount).toBe(3);
-    // The catalogued model declares no supportEfforts, so the Kimi provider
-    // normalizes to boolean thinking and reports 'on' rather than the
-    // requested 'high'. The stored thinkingLevel still carries 'high' across
-    // compaction, which is asserted through telemetry below.
     expect(providerThinkingEfforts).toEqual(['on', 'on', 'on']);
     expect(records).toContainEqual({
       event: 'compaction_finished',
@@ -2346,9 +2381,6 @@ describe('FullCompaction', () => {
       provider: CATALOGUED_PROVIDER,
       modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
     });
-    // Set maxOutputSize on the harness's internal kimiConfig. Keep it below
-    // the Kimi model context window so provider-side context clipping does not
-    // hide whether compaction passed this configured value through.
     const models = (ctx as unknown as MutableKimiConfig).kimiConfig.models;
     models![CATALOGUED_PROVIDER.model] = {
       ...models![CATALOGUED_PROVIDER.model]!,
@@ -2666,9 +2698,6 @@ function mockStreamedMessage(parts: readonly StreamedMessagePart[]): StreamedMes
   };
 }
 
-// Runs the REAL kosong generate() over a scripted provider stream so think-only
-// and empty responses exercise kosong's actual APIEmptyResponseError path rather
-// than a mocked generate function that throws directly.
 function realKosongGenerate(
   script: (attempt: number, history: readonly Message[]) => StreamedMessage,
 ): GenerateFn {
@@ -2756,9 +2785,6 @@ function messageText(message: Message | undefined): string {
 }
 
 function hookPayloadLoggerCommand(logPath: string): string {
-  // Write the hook script to a file and run it with node, instead of
-  // `node -e <json>`; cmd.exe on Windows mangles the escaped quotes in the
-  // inline form and corrupts the script before it can run.
   const scriptPath = `${logPath}.cjs`;
   const script = [
     "const fs = require('node:fs');",
@@ -2959,8 +2985,6 @@ describe('goal reminder re-injection after full compaction', () => {
     expect(floor).toBe(ctx.get(IAgentContextSizeService).get().size);
     expect(floor!).toBeGreaterThan(tokensAfter as number);
 
-    // V1-parity quirk (reproduced deliberately): after an idle manual compact,
-    // the next turn's per-turn injection adds a second copy of the reminder.
     ctx.mockNextResponse({ type: 'text', text: 'Reply after compaction.' });
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'next prompt' }] });
     await ctx.untilTurnEnd();
