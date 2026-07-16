@@ -340,13 +340,14 @@ describe("Kimi runtime (owns shared SDK sessions for Webviews)", () => {
     expect(session.setModels).toEqual(["new-model"]);
   });
 
-  it("updates SDK thinking when the resumed session has a different effort", async () => {
+  it("preserves the resumed session's thinking effort instead of reapplying the configured default", async () => {
     const { runtime, sdk } = createRuntime();
-    const session = sdk.addSession("saved-1", "/workspace", { thinkingEffort: "off" });
+    const session = sdk.addSession("saved-1", "/workspace", { thinkingEffort: "max" });
 
-    await runtime.openSession(openOptions({ sessionId: "saved-1", effort: "medium" }));
+    const opened = await runtime.openSession(openOptions({ sessionId: "saved-1", effort: "medium" }));
 
-    expect(session.setThinkingEfforts).toEqual(["medium"]);
+    expect(session.setThinkingEfforts).toEqual([]);
+    await expect(opened.session.getStatus()).resolves.toMatchObject({ thinkingEffort: "max" });
   });
 
   it("uses the yolo setting as the initial value for an unmarked resumed session", async () => {
