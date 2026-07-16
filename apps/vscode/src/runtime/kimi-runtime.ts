@@ -87,6 +87,7 @@ export class KimiRuntime {
       areSameFsPath(current.session.workDir, options.workDir)
     ) {
       await applySessionSettings(current.session, options, current.legacyApprovalFlags);
+      await current.announceStatus(options.webviewId);
       return current;
     }
 
@@ -129,6 +130,7 @@ export class KimiRuntime {
 
     runtime.subscribe(options.webviewId);
     this.sessionByView.set(options.webviewId, runtime.id);
+    await runtime.announceStatus(options.webviewId);
     return runtime;
   }
 
@@ -140,6 +142,7 @@ export class KimiRuntime {
     const existing = this.sessions.get(session.id);
     if (existing !== undefined && this.sessionByView.get(webviewId) === session.id) {
       existing.subscribe(webviewId);
+      await existing.announceStatus(webviewId);
       return existing;
     }
     await this.detachView(webviewId);
@@ -168,6 +171,7 @@ export class KimiRuntime {
     }
     runtime.subscribe(webviewId);
     this.sessionByView.set(webviewId, runtime.id);
+    await runtime.announceStatus(webviewId);
     return runtime;
   }
 

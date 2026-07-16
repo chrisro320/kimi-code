@@ -22,6 +22,7 @@ import type {
 } from "@moonshot-ai/kimi-code-sdk";
 import { describe, expect, it } from "vitest";
 
+import { Events } from "../shared/bridge";
 import { KimiRuntime, type OpenSessionOptions } from "../src/runtime/kimi-runtime";
 
 interface FakeSessionBoundary {
@@ -348,6 +349,37 @@ describe("Kimi runtime (owns shared SDK sessions for Webviews)", () => {
 
     expect(session.setThinkingEfforts).toEqual([]);
     await expect(opened.session.getStatus()).resolves.toMatchObject({ thinkingEffort: "max" });
+  });
+
+  it("announces the session's actual status to the attaching view so the display matches it", async () => {
+    const sdk = createFakeHarness();
+    const broadcasts: { event: string; data: unknown; webviewId?: string }[] = [];
+    const runtime = new KimiRuntime({
+      version: "0.6.0",
+      harness: sdk.harness,
+      broadcast: (event, data, webviewId) => {
+        broadcasts.push({ event, data, webviewId });
+      },
+      captureBaseline: () => undefined,
+      log: () => undefined,
+    });
+    sdk.addSession("saved-1", "/workspace", {
+      model: "kimi-test",
+      thinkingEffort: "max",
+      planMode: true,
+    });
+
+    await runtime.openSession(openOptions({ sessionId: "saved-1", effort: "medium" }));
+
+    expect(broadcasts).toContainEqual({
+      event: Events.StreamEvent,
+      data: {
+        type: "StatusUpdate",
+        payload: { model: "kimi-test", thinking_effort: "max", plan_mode: true },
+        _sessionId: "saved-1",
+      },
+      webviewId: "view-1",
+    });
   });
 
   it("uses the yolo setting as the initial value for an unmarked resumed session", async () => {

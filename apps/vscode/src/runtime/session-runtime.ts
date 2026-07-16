@@ -141,6 +141,30 @@ export class SessionRuntime {
     this.webviewIds.add(webviewId);
   }
 
+  /**
+   * Push the session's current status to a view. Called whenever a view
+   * opens or re-enters a session so the display (model, thinking effort,
+   * plan mode) matches engine truth instead of the global defaults.
+   */
+  async announceStatus(webviewId: string): Promise<void> {
+    this.ensureOpen();
+    const status = await this.session.getStatus();
+    if (this.closed || !this.webviewIds.has(webviewId)) return;
+    this.broadcast(
+      Events.StreamEvent,
+      {
+        type: "StatusUpdate",
+        payload: {
+          model: status.model,
+          thinking_effort: status.thinkingEffort,
+          plan_mode: status.planMode,
+        },
+        _sessionId: this.id,
+      },
+      webviewId,
+    );
+  }
+
   unsubscribeView(webviewId: string): void {
     this.webviewIds.delete(webviewId);
   }
