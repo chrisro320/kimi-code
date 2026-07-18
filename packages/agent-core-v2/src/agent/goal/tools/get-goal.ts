@@ -16,7 +16,8 @@ import { IAgentGoalService } from '#/agent/goal/goal';
 import DESCRIPTION from './get-goal.md?raw';
 import { goalResultForModel } from './serialize';
 
-export const GetGoalToolInputSchema = z.object({}).strict();
+// _unused keeps properties non-empty: some OpenAI-compatible relays hang on empty function schemas.
+export const GetGoalToolInputSchema = z.object({ _unused: z.string().optional() }).strict();
 export type GetGoalToolInput = z.infer<typeof GetGoalToolInputSchema>;
 
 export class GetGoalTool implements BuiltinTool<GetGoalToolInput> {

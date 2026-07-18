@@ -61,7 +61,8 @@ import CRON_LIST_DESCRIPTION from './cron-list.md?raw';
  * extras (e.g. an `active_only` borrowed from `TaskList`) instead of
  * silently ignoring them.
  */
-export const CronListInputSchema = z.object({}).strict();
+// _unused keeps properties non-empty: some OpenAI-compatible relays hang on empty function schemas.
+export const CronListInputSchema = z.object({ _unused: z.string().optional() }).strict();
 export type CronListInput = z.infer<typeof CronListInputSchema>;
 
 // ── Constants ────────────────────────────────────────────────────────
