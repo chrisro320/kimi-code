@@ -32,6 +32,7 @@ export const UpgradePreferencesSchema = z.object({
 
 export const StatuslineConfigSchema = z.object({
   enabled: z.boolean(),
+  command: z.string().optional(),
 });
 
 export const TuiConfigFileSchema = z.object({
@@ -56,6 +57,7 @@ export const TuiConfigFileSchema = z.object({
   statusline: z
     .object({
       enabled: z.boolean().optional(),
+      command: z.string().optional(),
     })
     .optional(),
 });
@@ -166,6 +168,7 @@ export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
     },
     statusline: {
       enabled: config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled,
+      command: config.statusline?.command?.trim() || undefined,
     },
   });
 }
@@ -190,6 +193,7 @@ auto_install = ${String(config.upgrade.autoInstall)} # true | false
 
 [statusline]
 enabled = ${String(config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled)} # true | false — quota + cache-hit status row at the bottom
+command = "${escapeTomlBasicString(config.statusline?.command ?? '')}" # optional shell command; overrides the built-in row with its stdout (stdin gets a JSON state payload)
 `;
 }
 

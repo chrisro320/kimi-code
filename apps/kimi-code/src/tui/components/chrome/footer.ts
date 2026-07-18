@@ -24,6 +24,11 @@ import {
   type GitStatusCache,
 } from '#/utils/git/git-status';
 import {
+  createCustomStatuslineCache,
+  type CustomStatuslineCache,
+  type CustomStatuslinePayload,
+} from '#/utils/statusline/custom-statusline';
+import {
   formatTokenCount,
   ratioSeverity,
   usagePercent,
@@ -243,12 +248,28 @@ function ttlCell(
   return `ttl ${chalk.hex(hex)(`${mm}:${ss}`)}`;
 }
 
+/** Builds the JSON payload piped to a `statusline.command` script's stdin. */
+export function buildCustomStatuslinePayload(state: AppState): CustomStatuslinePayload {
+  const report = state.managedUsage ?? null;
+  return {
+    weekly: report?.summary ?? null,
+    fiveHour: report !== null ? pickFiveHourWindow(report.limits) : null,
+    lastCacheHit: state.lastCacheHit ?? null,
+    sessionCacheHit: state.sessionCacheHit ?? null,
+    totalTokens: state.totalTokens ?? 0,
+    lastReplyAt: state.lastReplyAt ?? null,
+    streamingPhase: state.streamingPhase,
+  };
+}
+
 export function buildStatuslineRow(
   state: AppState,
   colors: ColorPalette,
   compact = false,
+  customLine?: string | null,
 ): string | null {
   if (state.statusline?.enabled !== true) return null;
+  if (state.statusline.command !== undefined) return customLine ?? null;
 
   const report = state.managedUsage ?? null;
   const weekly = report?.summary ?? null;
@@ -286,6 +307,8 @@ export class FooterComponent implements Component {
   private readonly onRefresh: () => void;
   private gitCache: GitStatusCache;
   private gitCacheWorkDir: string;
+  private customStatuslineCache: CustomStatuslineCache | null = null;
+  private customStatuslineCommand: string | undefined;
   private transientHint: string | null = null;
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
@@ -309,6 +332,7 @@ export class FooterComponent implements Component {
     this.gitCache = createGitStatusCache(state.workDir, { onChange: this.onRefresh });
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
+    this.syncCustomStatuslineCache(state);
     this.syncTtlTimer(state);
   }
 
@@ -320,6 +344,7 @@ export class FooterComponent implements Component {
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
     this.state = state;
+    this.syncCustomStatuslineCache(state);
     this.syncTtlTimer(state);
   }
 
@@ -472,12 +497,30 @@ export class FooterComponent implements Component {
    * when the statusline is disabled.
    */
   private renderStatuslineRow(state: AppState, colors: ColorPalette, width: number): string | null {
-    let statusRow = buildStatuslineRow(state, colors);
+    const customLine =
+      this.customStatuslineCache?.getLine(buildCustomStatuslinePayload(state)) ?? null;
+    let statusRow = buildStatuslineRow(state, colors, false, customLine);
     if (statusRow === null) return null;
     if (visibleWidth(statusRow) > width) {
-      statusRow = buildStatuslineRow(state, colors, true) ?? statusRow;
+      statusRow = buildStatuslineRow(state, colors, true, customLine) ?? statusRow;
     }
     return truncateToWidth(statusRow, width);
+  }
+
+  /**
+   * Recreate the custom-statusline cache whenever the configured command
+   * changes (including turning it on/off). Bare 'undefined' is the
+   * "not configured" sentinel so toggling back to the built-in row tears
+   * the cache down instead of leaking a stale spawn cadence.
+   */
+  private syncCustomStatuslineCache(state: AppState): void {
+    const command = state.statusline?.command;
+    if (command === this.customStatuslineCommand) return;
+    this.customStatuslineCommand = command;
+    this.customStatuslineCache =
+      command !== undefined
+        ? createCustomStatuslineCache(command, state.workDir, { onChange: this.onRefresh })
+        : null;
   }
 
   private syncGoalClock(goal: AppState['goal']): void {
