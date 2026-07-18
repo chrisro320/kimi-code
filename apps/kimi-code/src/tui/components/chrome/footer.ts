@@ -218,6 +218,19 @@ function formatHitRatio(value: number | null | undefined): string {
   return value === null || value === undefined ? '--' : `${String(Math.round(value * 100))}%`;
 }
 
+/** Statusline TTL countdown window (ms) — resets on each assistant reply. */
+const STATUSLINE_TTL_MS = 600_000;
+
+function ttlCell(lastReplyAt: number | undefined, colors: ColorPalette): string | null {
+  if (lastReplyAt === undefined) return null;
+  const remaining = Math.floor((STATUSLINE_TTL_MS - (Date.now() - lastReplyAt)) / 1000);
+  if (remaining <= 0) return null; // expired / before first reply → hide
+  const mm = String(Math.floor(remaining / 60));
+  const ss = String(remaining % 60).padStart(2, '0');
+  const hex = remaining > 120 ? colors.success : remaining > 30 ? colors.warning : colors.error;
+  return `ttl ${chalk.hex(hex)(`${mm}:${ss}`)}`;
+}
+
 export function buildStatuslineRow(
   state: AppState,
   colors: ColorPalette,
@@ -235,12 +248,15 @@ export function buildStatuslineRow(
   const tok = chalk.hex(colors.textDim)(`${formatTokenCount(state.totalTokens ?? 0)} tok`);
 
   const sep = chalk.hex(colors.textDim)(' │ ');
-  return [
+  const cells = [
     quotaCell('7d', weekly, colors, compact),
     quotaCell('5h', fiveHour, colors, compact),
     cache,
     tok,
-  ].join(sep);
+  ];
+  const ttl = ttlCell(state.lastReplyAt, colors);
+  if (ttl !== null) cells.push(ttl);
+  return cells.join(sep);
 }
 
 export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): string {
@@ -262,6 +278,8 @@ export class FooterComponent implements Component {
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
   private goalTimer: ReturnType<typeof setInterval> | null = null;
+  /** 1s ticker that re-renders the statusline TTL countdown while it's live. */
+  private ttlTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Non-terminal background-task counts split by kind so the footer can
    * render two distinct badges. `bashTasks` covers `bash-*` BPM tasks
@@ -279,6 +297,7 @@ export class FooterComponent implements Component {
     this.gitCache = createGitStatusCache(state.workDir, { onChange: this.onRefresh });
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
+    this.syncTtlTimer(state);
   }
 
   setState(state: AppState): void {
@@ -289,6 +308,7 @@ export class FooterComponent implements Component {
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
     this.state = state;
+    this.syncTtlTimer(state);
   }
 
   /**
@@ -471,10 +491,47 @@ export class FooterComponent implements Component {
     }
   }
 
+  /**
+   * Run a 1s ticker only while the TTL countdown is live (statusline enabled,
+   * a reply has landed, and the window hasn't elapsed) so the mm:ss ticks down
+   * smoothly; stop it once the window expires to avoid idle re-renders.
+   */
+  private syncTtlTimer(state: AppState): void {
+    const live =
+      state.statusline?.enabled === true &&
+      state.lastReplyAt !== undefined &&
+      Date.now() - state.lastReplyAt < STATUSLINE_TTL_MS;
+    if (live) {
+      if (this.ttlTimer !== null) return;
+      this.ttlTimer = setInterval(() => {
+        const s = this.state;
+        const stillLive =
+          s.statusline?.enabled === true &&
+          s.lastReplyAt !== undefined &&
+          Date.now() - s.lastReplyAt < STATUSLINE_TTL_MS;
+        if (!stillLive && this.ttlTimer !== null) {
+          clearInterval(this.ttlTimer); // window elapsed: final repaint + stop ticking
+          this.ttlTimer = null;
+        }
+        this.onRefresh();
+      }, 1_000);
+      this.ttlTimer.unref?.();
+      return;
+    }
+    if (this.ttlTimer !== null) {
+      clearInterval(this.ttlTimer);
+      this.ttlTimer = null;
+    }
+  }
+
   dispose(): void {
     if (this.goalTimer !== null) {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
+    }
+    if (this.ttlTimer !== null) {
+      clearInterval(this.ttlTimer);
+      this.ttlTimer = null;
     }
   }
 

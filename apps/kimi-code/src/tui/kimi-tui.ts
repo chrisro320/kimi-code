@@ -1572,7 +1572,16 @@ export class KimiTUI {
       'additionalDirs' in patch &&
       !sameStringArrays(this.state.appState.additionalDirs, patch.additionalDirs ?? []);
     const busyChanged = 'streamingPhase' in patch || 'isCompacting' in patch;
+    const prevPhase = this.state.appState.streamingPhase;
     Object.assign(this.state.appState, patch);
+    // Anchor the statusline TTL countdown to reply completion: a transition from
+    // an active streaming phase back to idle marks the end of an assistant reply.
+    if (
+      patch.streamingPhase === 'idle' &&
+      (prevPhase === 'thinking' || prevPhase === 'composing' || prevPhase === 'waiting')
+    ) {
+      this.state.appState.lastReplyAt = Date.now();
+    }
     if ('planMode' in patch) this.updateEditorBorderHighlight();
     this.state.footer.setState(this.state.appState);
     this.updateActivityPane();

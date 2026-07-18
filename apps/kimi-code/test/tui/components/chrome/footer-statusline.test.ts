@@ -62,6 +62,25 @@ describe('buildStatuslineRow', () => {
     expect(row).toContain('cache --/--');
   });
 
+  it('shows a TTL countdown after a recent reply and hides it once expired', () => {
+    const live = stripAnsi(
+      buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 60_000 }), currentTheme.palette) ??
+        '',
+    );
+    expect(live).toMatch(/ttl \d+:\d{2}/);
+    // No reply yet → no ttl cell.
+    const none = stripAnsi(
+      buildStatuslineRow(makeState({ lastReplyAt: undefined }), currentTheme.palette) ?? '',
+    );
+    expect(none).not.toContain('ttl ');
+    // Older than the 10-min window → hidden.
+    const expired = stripAnsi(
+      buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 700_000 }), currentTheme.palette) ??
+        '',
+    );
+    expect(expired).not.toContain('ttl ');
+  });
+
   it('returns null when the statusline is disabled', () => {
     expect(buildStatuslineRow(makeState({ statusline: { enabled: false } }), currentTheme.palette)).toBeNull();
   });

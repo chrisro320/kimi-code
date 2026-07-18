@@ -73,6 +73,8 @@ export interface AppState {
   lastCacheHit?: number | null;
   /** Total session tokens (all input kinds + output), for the statusline. */
   totalTokens?: number;
+  /** Epoch ms of the last assistant reply; anchors the statusline TTL countdown. */
+  lastReplyAt?: number;
   availableModels: Record<string, ModelAlias>;
   availableProviders: Record<string, ProviderConfig>;
   sessionTitle: string | null;
