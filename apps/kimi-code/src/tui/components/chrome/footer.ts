@@ -219,12 +219,24 @@ function formatHitRatio(value: number | null | undefined): string {
 }
 
 /** Statusline TTL countdown window (ms) — resets on each assistant reply. */
-const STATUSLINE_TTL_MS = 600_000;
+const STATUSLINE_TTL_MS = 300_000;
 
-function ttlCell(lastReplyAt: number | undefined, colors: ColorPalette): string | null {
-  if (lastReplyAt === undefined) return null;
-  const remaining = Math.floor((STATUSLINE_TTL_MS - (Date.now() - lastReplyAt)) / 1000);
-  if (remaining <= 0) return null; // expired / before first reply → hide
+/**
+ * Idle estimate of when the prompt cache goes cold. The window resets on each
+ * reply (`lastReplyAt`) and then ticks down *only while idle* — it is a "how
+ * long until my cache expires if I stay away" readout, not a pomodoro clock.
+ * While a turn is active the cache is being refreshed every request, so the
+ * cell freezes at the full window instead of counting down.
+ */
+function ttlCell(
+  lastReplyAt: number | undefined,
+  active: boolean,
+  colors: ColorPalette,
+): string | null {
+  if (lastReplyAt === undefined) return null; // no reply yet → hide
+  const elapsed = active ? 0 : Date.now() - lastReplyAt;
+  const remaining = Math.floor((STATUSLINE_TTL_MS - elapsed) / 1000);
+  if (remaining <= 0) return null; // expired → hide
   const mm = String(Math.floor(remaining / 60));
   const ss = String(remaining % 60).padStart(2, '0');
   const hex = remaining > 120 ? colors.success : remaining > 30 ? colors.warning : colors.error;
@@ -254,7 +266,7 @@ export function buildStatuslineRow(
     cache,
     tok,
   ];
-  const ttl = ttlCell(state.lastReplyAt, colors);
+  const ttl = ttlCell(state.lastReplyAt, state.streamingPhase !== 'idle', colors);
   if (ttl !== null) cells.push(ttl);
   return cells.join(sep);
 }
@@ -492,13 +504,15 @@ export class FooterComponent implements Component {
   }
 
   /**
-   * Run a 1s ticker only while the TTL countdown is live (statusline enabled,
-   * a reply has landed, and the window hasn't elapsed) so the mm:ss ticks down
-   * smoothly; stop it once the window expires to avoid idle re-renders.
+   * Run a 1s ticker only while the TTL countdown is live: statusline enabled, a
+   * reply has landed, the window hasn't elapsed, and the turn is idle. The cell
+   * freezes at the full window while a turn is active, so ticking then would
+   * just re-render the same value — only the idle count-down needs the ticker.
    */
   private syncTtlTimer(state: AppState): void {
     const live =
       state.statusline?.enabled === true &&
+      state.streamingPhase === 'idle' &&
       state.lastReplyAt !== undefined &&
       Date.now() - state.lastReplyAt < STATUSLINE_TTL_MS;
     if (live) {
@@ -507,6 +521,7 @@ export class FooterComponent implements Component {
         const s = this.state;
         const stillLive =
           s.statusline?.enabled === true &&
+          s.streamingPhase === 'idle' &&
           s.lastReplyAt !== undefined &&
           Date.now() - s.lastReplyAt < STATUSLINE_TTL_MS;
         if (!stillLive && this.ttlTimer !== null) {
