@@ -63,6 +63,7 @@ auto_install = false
       editorCommand: 'code --wait',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
+      statusline: { enabled: true },
     });
   });
 
@@ -87,6 +88,7 @@ command = "   "
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
+      statusline: { enabled: true },
     });
   });
 
@@ -129,6 +131,7 @@ command = "   "
       editorCommand: 'vim',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
+      statusline: { enabled: true },
     });
   });
 

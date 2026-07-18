@@ -25,9 +25,11 @@ import {
 } from '#/utils/git/git-status';
 import {
   formatTokenCount,
+  ratioSeverity,
   usagePercent,
   usagePercentFromRatio,
 } from '#/utils/usage/usage-format';
+import type { ManagedUsageRow } from '#/tui/components/messages/usage-panel';
 
 const MAX_CWD_SEGMENTS = 3;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
@@ -170,6 +172,75 @@ function formatContextStatus(usage: number, tokens?: number, maxTokens?: number)
     return `context: ${pct}% (${formatTokenCount(tokens)}/${formatTokenCount(maxTokens)})`;
   }
   return `context: ${String(usagePercentFromRatio(usage))}%`;
+}
+
+/**
+ * Statusline row (footer line 3): managed-plan quota + cache-hit + tokens, e.g.
+ *   `7d 56%(5d6h) │ 5h 7%(3h49m) │ cache 91%/83% │ 536k tok`
+ * Data is read from AppState snapshots populated by the kimi-tui background
+ * poller — this render path never touches the network. Returns null when the
+ * statusline is disabled. `compact` drops the reset-time hints for narrow
+ * terminals. Quota cells show `--` until the first poll lands / on error.
+ */
+function severityHex(ratio: number, colors: ColorPalette): string {
+  const sev = ratioSeverity(ratio);
+  return sev === 'danger' ? colors.error : sev === 'warn' ? colors.warning : colors.text;
+}
+
+function compactResetHint(hint: string | undefined): string {
+  if (hint === undefined) return '';
+  const body = hint.replace(/^resets in\s*/i, '').trim();
+  if (body.length === 0 || body.toLowerCase() === 'reset') return '';
+  return body.split(/\s+/).slice(0, 2).join('');
+}
+
+function quotaCell(
+  label: string,
+  row: ManagedUsageRow | null,
+  colors: ColorPalette,
+  compact: boolean,
+): string {
+  if (row === null) {
+    return `${label} ${chalk.hex(colors.textMuted)('--')}`;
+  }
+  const ratio = row.limit > 0 ? Math.max(0, Math.min(row.used / row.limit, 1)) : 0;
+  const pct = chalk.hex(severityHex(ratio, colors))(`${String(Math.round(ratio * 100))}%`);
+  const reset = compact ? '' : compactResetHint(row.resetHint);
+  const resetStr = reset.length > 0 ? chalk.hex(colors.textMuted)(`(${reset})`) : '';
+  return `${label} ${pct}${resetStr}`;
+}
+
+function pickFiveHourWindow(limits: readonly ManagedUsageRow[]): ManagedUsageRow | null {
+  return limits.find((l) => /\b5\s*h/i.test(l.label)) ?? limits[0] ?? null;
+}
+
+function formatHitRatio(value: number | null | undefined): string {
+  return value === null || value === undefined ? '--' : `${String(Math.round(value * 100))}%`;
+}
+
+export function buildStatuslineRow(
+  state: AppState,
+  colors: ColorPalette,
+  compact = false,
+): string | null {
+  if (state.statusline?.enabled !== true) return null;
+
+  const report = state.managedUsage ?? null;
+  const weekly = report?.summary ?? null;
+  const fiveHour = report !== null ? pickFiveHourWindow(report.limits) : null;
+
+  const cache =
+    `cache ${chalk.hex(colors.text)(formatHitRatio(state.lastCacheHit))}` +
+    `/${chalk.hex(colors.text)(formatHitRatio(state.sessionCacheHit))}`;
+  const tok = chalk.hex(colors.textDim)(`${formatTokenCount(state.totalTokens ?? 0)} tok`);
+
+  const sep = chalk.hex(colors.textDim)(' │ ');
+  return [
+    quotaCell('7d', weekly, colors, compact),
+    quotaCell('5h', fiveHour, colors, compact),
+    cache,
+    tok,
+  ].join(sep);
 }
 
 export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): string {
@@ -357,7 +428,24 @@ export class FooterComponent implements Component {
       line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
     }
 
-    return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
+    const rows = [truncateToWidth(line1, width), truncateToWidth(line2, width)];
+    const statusRow = this.renderStatuslineRow(state, colors, width);
+    if (statusRow !== null) rows.push(statusRow);
+    return rows;
+  }
+
+  /**
+   * Footer line 3 (statusline): full form first; if it overflows, retry in
+   * compact form (no reset hints); truncate as the final guard. Returns null
+   * when the statusline is disabled.
+   */
+  private renderStatuslineRow(state: AppState, colors: ColorPalette, width: number): string | null {
+    let statusRow = buildStatuslineRow(state, colors);
+    if (statusRow === null) return null;
+    if (visibleWidth(statusRow) > width) {
+      statusRow = buildStatuslineRow(state, colors, true) ?? statusRow;
+    }
+    return truncateToWidth(statusRow, width);
   }
 
   private syncGoalClock(goal: AppState['goal']): void {

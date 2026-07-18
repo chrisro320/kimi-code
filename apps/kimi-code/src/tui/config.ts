@@ -30,6 +30,10 @@ export const UpgradePreferencesSchema = z.object({
   autoInstall: z.boolean(),
 });
 
+export const StatuslineConfigSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export const TuiConfigFileSchema = z.object({
   theme: TuiThemeSchema.optional(),
   disable_paste_burst: z.boolean().optional(),
@@ -49,6 +53,11 @@ export const TuiConfigFileSchema = z.object({
       auto_install: z.boolean().optional(),
     })
     .optional(),
+  statusline: z
+    .object({
+      enabled: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export const TuiConfigSchema = z.object({
@@ -57,12 +66,17 @@ export const TuiConfigSchema = z.object({
   editorCommand: z.string().nullable(),
   notifications: NotificationsConfigSchema,
   upgrade: UpgradePreferencesSchema,
+  // Optional in the resolved type so existing AppState/TuiConfig fixtures stay
+  // valid; DEFAULT_TUI_CONFIG + normalizeTuiConfig always populate it, so the
+  // runtime value is never actually absent.
+  statusline: StatuslineConfigSchema.optional(),
 });
 
 export type TuiConfigFileShape = z.infer<typeof TuiConfigFileSchema>;
 export type TuiConfig = z.infer<typeof TuiConfigSchema>;
 export type NotificationsConfig = z.infer<typeof NotificationsConfigSchema>;
 export type UpgradePreferences = z.infer<typeof UpgradePreferencesSchema>;
+export type StatuslineConfig = z.infer<typeof StatuslineConfigSchema>;
 
 export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
   enabled: true,
@@ -73,12 +87,17 @@ export const DEFAULT_UPGRADE_PREFERENCES: UpgradePreferences = {
   autoInstall: true,
 };
 
+export const DEFAULT_STATUSLINE_CONFIG: StatuslineConfig = {
+  enabled: true,
+};
+
 export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   theme: 'auto',
   disablePasteBurst: false,
   editorCommand: null,
   notifications: DEFAULT_NOTIFICATIONS_CONFIG,
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
+  statusline: DEFAULT_STATUSLINE_CONFIG,
 });
 
 /**
@@ -145,6 +164,9 @@ export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
     upgrade: {
       autoInstall: config.upgrade?.auto_install ?? DEFAULT_UPGRADE_PREFERENCES.autoInstall,
     },
+    statusline: {
+      enabled: config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled,
+    },
   });
 }
 
@@ -165,6 +187,9 @@ notification_condition = "${config.notifications.condition}" # "unfocused" | "al
 
 [upgrade]
 auto_install = ${String(config.upgrade.autoInstall)} # true | false
+
+[statusline]
+enabled = ${String(config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled)} # true | false — quota + cache-hit status row at the bottom
 `;
 }
 
