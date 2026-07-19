@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   APIProviderRateLimitError,
@@ -613,7 +616,7 @@ export class SessionSubagentHost {
   }
 }
 
-export function runExternalSubagent(
+export async function runExternalSubagent(
   route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
   cwd: string,
   prompt: string,
@@ -621,17 +624,25 @@ export function runExternalSubagent(
   onStderr: (stderr: string) => void,
 ): Promise<SubagentCompletion> {
   signal.throwIfAborted();
+  let promptDirectory: string | undefined;
+  let promptFile: string | undefined;
+  if ((route.backend.args ?? []).some((arg) => arg.includes('{prompt_file}'))) {
+    promptDirectory = await mkdtemp(join(tmpdir(), 'kimi-subagent-'));
+    promptFile = join(promptDirectory, 'prompt.txt');
+    await writeFile(promptFile, prompt, 'utf8');
+  }
+
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(route.backend.command, materializeBackendArgs(route, cwd), {
+    child = spawn(route.backend.command, materializeBackendArgs(route, cwd, promptFile), {
       cwd,
       shell: false,
       stdio: 'pipe',
-      detached: process.platform !== 'win32',
       windowsHide: true,
     });
   } catch (error) {
-    return Promise.reject(error);
+    if (promptDirectory !== undefined) await rm(promptDirectory, { recursive: true, force: true });
+    throw error;
   }
 
   return new Promise<SubagentCompletion>((resolve, reject) => {
@@ -644,6 +655,7 @@ export function runExternalSubagent(
     const cleanup = (): void => {
       signal.removeEventListener('abort', onAbort);
       if (killTimer !== undefined) clearTimeout(killTimer);
+      if (promptDirectory !== undefined) void rm(promptDirectory, { recursive: true, force: true });
     };
     const settle = (error?: unknown): void => {
       if (settled) return;
@@ -674,25 +686,14 @@ export function runExternalSubagent(
       settle(error);
     });
     child.on('close', (code, closeSignal) => {
-      if (abortReason !== undefined) {
-        settle(abortReason);
-        return;
-      }
-      if (stdinError !== undefined) {
-        settle(stdinError);
-        return;
-      }
-      if (code === 0) {
-        settle();
-        return;
-      }
+      if (abortReason !== undefined) return settle(abortReason);
+      if (stdinError !== undefined) return settle(stdinError);
+      if (code === 0) return settle();
       const detail = stderr.trim();
       const suffix = detail.length > 0 ? `: ${detail}` : '';
-      settle(
-        new Error(
-          `External subagent backend "${route.backendName}" exited with ${code === null ? `signal ${closeSignal ?? 'unknown'}` : `code ${String(code)}`}${suffix}`,
-        ),
-      );
+      settle(new Error(
+        `External subagent backend "${route.backendName}" exited with ${code === null ? `signal ${closeSignal ?? 'unknown'}` : `code ${String(code)}`}${suffix}`,
+      ));
     });
     child.stdin.on('error', (error) => {
       stdinError = error;
@@ -700,7 +701,8 @@ export function runExternalSubagent(
     });
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
-    child.stdin.end(prompt);
+    if (promptFile === undefined) child.stdin.end(prompt);
+    else child.stdin.end();
   });
 }
 

@@ -41,9 +41,9 @@ export function validateBackendTemplate(name: string, backend: SubagentBackend):
   for (const arg of backend.args ?? []) {
     const placeholders = arg.match(/\{[^}]+\}/g) ?? [];
     for (const placeholder of placeholders) {
-      if (placeholder !== '{model}' && placeholder !== '{cwd}') {
+      if (placeholder !== '{model}' && placeholder !== '{cwd}' && placeholder !== '{prompt_file}') {
         throw new Error(
-          `Subagent backend "${name}" uses unsupported template placeholder ${placeholder}. Only {model} and {cwd} are allowed.`,
+          `Subagent backend "${name}" uses unsupported template placeholder ${placeholder}. Only {model}, {cwd}, and {prompt_file} are allowed.`,
         );
       }
     }
@@ -53,10 +53,14 @@ export function validateBackendTemplate(name: string, backend: SubagentBackend):
 export function materializeBackendArgs(
   route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
   cwd: string,
+  promptFile = '',
 ): string[] {
   const model = route.modelAlias ?? '';
   return (route.backend.args ?? []).map((arg) =>
-    arg.replaceAll('{model}', model).replaceAll('{cwd}', cwd),
+    arg
+      .replaceAll('{model}', model)
+      .replaceAll('{cwd}', cwd)
+      .replaceAll('{prompt_file}', promptFile),
   );
 }
 
