@@ -6,6 +6,10 @@ import { currentTheme } from '#/tui/theme';
 
 const ENTER = '\r';
 const DOWN = '\u001B[B';
+const UP = '\u001B[A';
+const CLEAR_LINE = '\u0015';
+const DELETE = 'd';
+const CONFIRM = 'y';
 const ESCAPE = '\u001B';
 
 interface TestPicker {
@@ -36,12 +40,14 @@ function makeConfig() {
       routing: {
         coder: { backend: 'kimi', model: 'fast' },
       },
+      pools: {
+        coder: [{ backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 }],
+      },
     },
   } as const;
 }
 
-function makeHost() {
-  const config = makeConfig();
+function makeHost(config: ReturnType<typeof makeConfig> | Record<string, unknown> = makeConfig()) {
   const session = {
     reloadSession: vi.fn(async () => ({})),
   };
@@ -132,6 +138,155 @@ describe('handleSubagentCommand', () => {
     await vi.waitFor(() => {
       expect(harness.setConfig).toHaveBeenCalledWith({
         subagent: { routing: { coder: { backend: 'claude', model: 'strong' } } },
+      });
+    });
+  });
+
+  it('manages coder pool members without changing the single-route picker', async () => {
+    const { host, harness, session } = makeHost();
+    await handleSubagentCommand(host, 'coder');
+    expect(picker(host).render(100).join('\n')).toContain('Manage coder pool');
+    picker(host).handleInput(UP);
+    picker(host).handleInput(ENTER);
+    expect(picker(host, 1).render(100).join('\n')).toContain('Add route');
+    picker(host, 1).handleInput(DOWN);
+    picker(host, 1).handleInput(ENTER);
+
+    const addPicker = picker(host, 2);
+    addPicker.handleInput(DOWN);
+    addPicker.handleInput(ENTER);
+    expect(picker(host, 3).render(100).join('\n')).toContain('Coder pool weight');
+    picker(host, 3).handleInput(CLEAR_LINE);
+    picker(host, 3).handleInput('2');
+    picker(host, 3).handleInput(ENTER);
+    expect(picker(host, 4).render(100).join('\n')).toContain('Coder pool max concurrency');
+    picker(host, 4).handleInput(ENTER);
+
+    await vi.waitFor(() => {
+      expect(harness.setConfig).toHaveBeenCalledWith({
+        subagent: {
+          pools: {
+            coder: [
+              { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
+              { backend: 'kimi', model: 'strong', weight: 2, maxConcurrency: 1 },
+            ],
+          },
+        },
+      });
+    });
+    expect(session.reloadSession).toHaveBeenCalled();
+  });
+
+  it('adds a backend-only CLI route without a model picker', async () => {
+    const { host, harness } = makeHost();
+    await handleSubagentCommand(host, 'coder');
+    picker(host).handleInput(UP);
+    picker(host).handleInput(ENTER);
+    picker(host, 1).handleInput(DOWN);
+    picker(host, 1).handleInput(ENTER);
+    const addPicker = picker(host, 2);
+    addPicker.handleInput(DOWN);
+    addPicker.handleInput(DOWN);
+    addPicker.handleInput(DOWN);
+    addPicker.handleInput(ENTER);
+    expect(picker(host, 3).render(100).join('\n')).toContain('Coder pool weight');
+    picker(host, 3).handleInput(ENTER);
+    picker(host, 4).handleInput(ENTER);
+
+    await vi.waitFor(() => {
+      expect(harness.setConfig).toHaveBeenCalledWith({
+        subagent: {
+          pools: {
+            coder: [
+              { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
+              { backend: 'grok', weight: 1, maxConcurrency: 1 },
+            ],
+          },
+        },
+      });
+    });
+  });
+
+  it('rejects a duplicate coder pool route', async () => {
+    const { host, harness } = makeHost();
+    await handleSubagentCommand(host, 'coder');
+    picker(host).handleInput(UP);
+    picker(host).handleInput(ENTER);
+    picker(host, 1).handleInput(DOWN);
+    picker(host, 1).handleInput(ENTER);
+    picker(host, 2).handleInput(ENTER);
+    picker(host, 3).handleInput(ENTER);
+    picker(host, 4).handleInput(ENTER);
+
+    await vi.waitFor(() => {
+      expect(host.showError).toHaveBeenCalledWith('Coder pool already contains route kimi/fast.');
+    });
+    expect(harness.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects final coder pool route removal', async () => {
+    const { host, harness } = makeHost();
+    await handleSubagentCommand(host, 'coder');
+    picker(host).handleInput(UP);
+    picker(host).handleInput(ENTER);
+    expect(picker(host, 1).render(100).join('\n')).toContain('Add route');
+    picker(host, 1).handleInput(ENTER);
+    picker(host, 2).handleInput(DOWN);
+    picker(host, 2).handleInput(ENTER);
+    expect(host.showError).toHaveBeenCalledWith('Cannot remove the final coder pool route. Add another route first.');
+    expect(harness.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('edits and removes an existing coder pool route', async () => {
+    const config = {
+      ...makeConfig(),
+      subagent: {
+        ...makeConfig().subagent,
+        pools: {
+          coder: [
+            { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
+            { backend: 'grok', weight: 1, maxConcurrency: 1 },
+          ],
+        },
+      },
+    };
+    const edit = makeHost(config);
+    await handleSubagentCommand(edit.host, 'coder');
+    picker(edit.host).handleInput(UP);
+    picker(edit.host).handleInput(ENTER);
+    picker(edit.host, 1).handleInput(ENTER);
+    picker(edit.host, 2).handleInput(ENTER);
+    picker(edit.host, 3).handleInput(CLEAR_LINE);
+    picker(edit.host, 3).handleInput('3');
+    picker(edit.host, 3).handleInput(ENTER);
+    picker(edit.host, 4).handleInput(ENTER);
+    await vi.waitFor(() => {
+      expect(edit.harness.setConfig).toHaveBeenCalledWith({
+        subagent: {
+          pools: {
+            coder: [
+              { backend: 'kimi', model: 'fast', weight: 3, maxConcurrency: 1 },
+              { backend: 'grok', weight: 1, maxConcurrency: 1 },
+            ],
+          },
+        },
+      });
+    });
+
+    const remove = makeHost(config);
+    await handleSubagentCommand(remove.host, 'coder');
+    picker(remove.host).handleInput(UP);
+    picker(remove.host).handleInput(ENTER);
+    picker(remove.host, 1).handleInput(DELETE);
+    expect(picker(remove.host, 1).render(100).join('\n')).toContain('Y confirm');
+    picker(remove.host, 1).handleInput(CONFIRM);
+    await vi.waitFor(() => {
+      expect(remove.harness.setConfig).toHaveBeenCalledWith({
+        subagent: {
+          pools: {
+            coder: [{ backend: 'grok', weight: 1, maxConcurrency: 1 }],
+          },
+        },
       });
     });
   });

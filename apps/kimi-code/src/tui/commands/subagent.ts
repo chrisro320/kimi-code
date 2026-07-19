@@ -1,11 +1,17 @@
 import type { KimiConfig } from '@moonshot-ai/kimi-code-sdk';
 
 import { ChoicePickerComponent, type ChoiceOption } from '../components/dialogs/choice-picker';
+import {
+  CoderPoolManagerComponent,
+  type CoderPoolRoute,
+} from '../components/dialogs/coder-pool-manager';
+import { NumericInputDialogComponent } from '../components/dialogs/numeric-input-dialog';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { SlashCommandHost } from './dispatch';
 
 const DEFAULT_PROFILES = ['coder', 'coder-ex', 'debugger', 'explore', 'frontend-artist', 'reviewer'] as const;
 const INTERNAL_BACKEND = 'kimi';
+const MANAGE_POOL = 'manage-pool';
 
 type RouteChoice =
   | { readonly kind: 'model'; readonly alias: string }
@@ -85,7 +91,27 @@ function profileDescription(config: KimiConfig, profile: ProfileName): string {
 
 function showRoutePicker(host: SlashCommandHost, config: KimiConfig, profile: ProfileName): void {
   const current = config.subagent?.routing?.[profile];
-  const options: ChoiceOption[] = [
+  const options: ChoiceOption[] = profile === 'coder'
+    ? [
+        {
+          value: MANAGE_POOL,
+          label: 'Manage coder pool',
+          description: `${String(config.subagent?.pools?.['coder']?.length ?? 0)} configured route(s)`,
+        },
+        ...Object.keys(config.models ?? {}).toSorted().map((alias) => ({
+          value: `model:${alias}`,
+          label: `Model: ${alias}`,
+          description: config.models?.[alias]?.displayName ?? 'Use Kimi Code internal subagent runtime',
+        })),
+        ...Object.entries(config.subagent?.backends ?? {}).toSorted(([a], [b]) => a.localeCompare(b)).map(([name, backend]) => ({
+          value: `backend:${name}`,
+          label: `CLI: ${name}`,
+          description: `${backend.command} ${backend.args?.join(' ') ?? ''}`.trim(),
+          tone: 'danger' as const,
+          descriptionTone: 'warning' as const,
+        })),
+      ]
+    : [
     ...Object.keys(config.models ?? {}).toSorted().map((alias) => ({
       value: `model:${alias}`,
       label: `Model: ${alias}`,
@@ -121,6 +147,10 @@ function showRoutePicker(host: SlashCommandHost, config: KimiConfig, profile: Pr
       currentValue,
       onSelect: (value) => {
         host.restoreEditor();
+        if (profile === 'coder' && value === MANAGE_POOL) {
+          showCoderPoolManager(host, config);
+          return;
+        }
         const choice = parseRouteChoice(value);
         if (choice.kind === 'model') {
           void saveRoute(host, config, profile, { backend: INTERNAL_BACKEND, model: choice.alias });
@@ -176,6 +206,192 @@ function showExternalModelPicker(
       },
     }),
   );
+}
+
+function showCoderPoolManager(host: SlashCommandHost, config: KimiConfig): void {
+  const routes = (config.subagent?.pools?.['coder'] ?? []) as readonly CoderPoolRoute[];
+  host.mountEditorReplacement(
+    new CoderPoolManagerComponent({
+      routes,
+      onAdd: () => showPoolRoutePicker(host, config),
+      onEdit: (index) => showPoolMemberActions(host, config, index),
+      onRemove: (index) => void removePoolRoute(host, config, index),
+      onClose: () => host.restoreEditor(),
+    }),
+  );
+}
+
+function showPoolRoutePicker(host: SlashCommandHost, config: KimiConfig): void {
+  const options: ChoiceOption[] = [
+    ...Object.keys(config.models ?? {}).toSorted().map((alias) => ({
+      value: `model:${alias}`,
+      label: `Model: ${alias}`,
+      description: config.models?.[alias]?.displayName ?? 'Use Kimi Code internal subagent runtime',
+    })),
+    ...Object.entries(config.subagent?.backends ?? {}).toSorted(([a], [b]) => a.localeCompare(b)).map(([name, backend]) => ({
+      value: `backend:${name}`,
+      label: `CLI: ${name}`,
+      description: `${backend.command} ${backend.args?.join(' ') ?? ''}`.trim(),
+      tone: 'danger' as const,
+      descriptionTone: 'warning' as const,
+    })),
+  ];
+  if (options.length === 0) {
+    host.showError('No configured models or subagent backends are available.');
+    return;
+  }
+  host.mountEditorReplacement(
+    new ChoicePickerComponent({
+      title: 'Add coder pool route',
+      hint: '↑↓ navigate · Enter select · Esc cancel',
+      options,
+      onSelect: (value) => {
+        host.restoreEditor();
+        const choice = parseRouteChoice(value);
+        if (choice.kind === 'model') {
+          showPoolRouteSettings(host, config, { backend: INTERNAL_BACKEND, model: choice.alias });
+          return;
+        }
+        const backend = config.subagent?.backends?.[choice.name];
+        if (backend === undefined) {
+          host.showError(`Subagent backend "${choice.name}" is no longer configured.`);
+          return;
+        }
+        if ((backend.args ?? []).some((arg) => arg.includes('{model}'))) {
+          showPoolExternalModelPicker(host, config, choice.name);
+        } else {
+          showPoolRouteSettings(host, config, { backend: choice.name });
+        }
+      },
+      onCancel: () => host.restoreEditor(),
+    }),
+  );
+}
+
+function showPoolExternalModelPicker(host: SlashCommandHost, config: KimiConfig, backendName: string): void {
+  const aliases = Object.keys(config.models ?? {}).toSorted();
+  if (aliases.length === 0) {
+    host.showError(`Backend "${backendName}" requires {model}, but no model aliases are configured.`);
+    return;
+  }
+  host.mountEditorReplacement(
+    new ChoicePickerComponent({
+      title: `Select model for coder CLI: ${backendName}`,
+      hint: '↑↓ navigate · Enter select · Esc cancel',
+      options: aliases.map((alias) => ({
+        value: alias,
+        label: alias,
+        description: config.models?.[alias]?.displayName,
+      })),
+      onSelect: (model) => {
+        host.restoreEditor();
+        showPoolRouteSettings(host, config, { backend: backendName, model });
+      },
+      onCancel: () => host.restoreEditor(),
+    }),
+  );
+}
+
+function showPoolRouteSettings(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  route: CoderPoolRoute,
+  replaceIndex?: number,
+): void {
+  showPoolNumericSetting(host, config, route, 'weight', route.weight ?? 1, false, replaceIndex);
+}
+
+function showPoolNumericSetting(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  route: CoderPoolRoute,
+  field: 'weight' | 'maxConcurrency',
+  value: number,
+  integer: boolean,
+  replaceIndex?: number,
+): void {
+  const nextField = field === 'weight' ? 'maxConcurrency' : undefined;
+  host.mountEditorReplacement(
+    new NumericInputDialogComponent({
+      title: `Coder pool ${field === 'weight' ? 'weight' : 'max concurrency'}`,
+      description: field === 'weight' ? 'Higher weight receives more dispatches.' : 'Maximum simultaneous workers for this route.',
+      initialValue: value,
+      integer,
+      onDone: (result) => {
+        if (result.kind === 'cancel') {
+          host.restoreEditor();
+          return;
+        }
+        host.restoreEditor();
+        const updated = field === 'weight' ? { ...route, weight: result.value } : { ...route, maxConcurrency: result.value };
+        if (nextField === undefined) {
+          const routes = [...(config.subagent?.pools?.['coder'] ?? [])];
+          if (replaceIndex === undefined) routes.push(updated);
+          else routes[replaceIndex] = updated;
+          void savePoolRoutes(host, config, routes);
+        } else {
+          showPoolNumericSetting(host, config, updated, nextField, updated.maxConcurrency ?? 1, true, replaceIndex);
+        }
+      },
+    }),
+  );
+}
+
+function showPoolMemberActions(host: SlashCommandHost, config: KimiConfig, index: number): void {
+  const route = (config.subagent?.pools?.['coder'] ?? [])[index] as CoderPoolRoute | undefined;
+  if (route === undefined) return;
+  host.mountEditorReplacement(
+    new ChoicePickerComponent({
+      title: `Manage coder route: ${route.backend}${route.model === undefined ? '' : `/${route.model}`}`,
+      hint: '↑↓ navigate · Enter select · Esc cancel',
+      options: [
+        { value: 'edit', label: 'Edit weight and concurrency' },
+        { value: 'remove', label: 'Remove route', tone: 'danger' },
+      ],
+      onSelect: (action) => {
+        host.restoreEditor();
+        if (action === 'edit') showPoolNumericSetting(host, config, route, 'weight', route.weight ?? 1, false, index);
+        else void removePoolRoute(host, config, index);
+      },
+      onCancel: () => host.restoreEditor(),
+    }),
+  );
+}
+
+async function removePoolRoute(host: SlashCommandHost, config: KimiConfig, index: number): Promise<void> {
+  const routes = [...(config.subagent?.pools?.['coder'] ?? [])];
+  if (routes.length <= 1) {
+    host.showError('Cannot remove the final coder pool route. Add another route first.');
+    return;
+  }
+  routes.splice(index, 1);
+  await savePoolRoutes(host, config, routes);
+}
+
+async function savePoolRoutes(host: SlashCommandHost, _config: KimiConfig, routes: readonly CoderPoolRoute[]): Promise<void> {
+  const seen = new Set<string>();
+  for (const route of routes) {
+    const key = `${route.backend}\u0000${route.model ?? ''}`;
+    if (seen.has(key)) {
+      host.showError(`Coder pool already contains route ${route.backend}${route.model === undefined ? '' : `/${route.model}`}.`);
+      return;
+    }
+    seen.add(key);
+  }
+  try {
+    await host.harness.setConfig({ subagent: { pools: { coder: [...routes] } } });
+    const session = host.session;
+    if (session !== undefined) {
+      await session.reloadSession();
+      await host.reloadCurrentSessionView(session, 'Coder pool saved and applied.');
+    }
+    const refreshed = await host.harness.getConfig({ reload: true });
+    host.setAppState({ availableModels: refreshed.models ?? {}, availableProviders: refreshed.providers ?? {} });
+    host.refreshSlashCommandAutocomplete();
+    host.showStatus('Coder pool saved to config.toml.', 'success');
+  } catch (error) {
+    host.showError(`Failed to save coder pool: ${formatErrorMessage(error)}`);
+  }
 }
 
 function parseRouteChoice(value: string): RouteChoice {
