@@ -1,4 +1,4 @@
-Launch a subagent to handle a task. The subagent runs as a same-process loop instance with its own context and wire file. Delegating also keeps the bulk of intermediate file contents out of your own context — you get a conclusion back instead of a pile of dumps.
+Launch a subagent to handle a task. By default it runs as a same-process loop instance with its own context and wire file; configuration may route a subagent type to an external command backend instead. Delegating also keeps the bulk of intermediate work out of your own context — you get a conclusion back instead of a pile of dumps.
 
 Writing the prompt:
 - The subagent starts with zero context — it has not seen this conversation. Brief it like a colleague who just walked into the room: state the goal, list what you already know, hand over the specifics.

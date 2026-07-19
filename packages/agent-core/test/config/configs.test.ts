@@ -213,6 +213,44 @@ describe('harness config TOML loader', () => {
     expect(config.raw?.['notifications']).toEqual({ claim_stale_after_ms: 15000 });
   });
 
+  it('round-trips nested subagent routing and command backends', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'subagent-routing.toml');
+    const toml = `
+[providers.local]
+type = "openai"
+
+[models.fast]
+provider = "local"
+model = "fast-model"
+max_context_size = 128000
+
+[subagent.routing.coder]
+backend = "custom-cli"
+model = "fast"
+
+[subagent.backends.custom-cli]
+command = "custom-agent"
+args = ["--model", "{model}", "--cwd", "{cwd}"]
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.subagent).toEqual({
+      routing: { coder: { backend: 'custom-cli', model: 'fast' } },
+      backends: {
+        'custom-cli': {
+          command: 'custom-agent',
+          args: ['--model', '{model}', '--cwd', '{cwd}'],
+        },
+      },
+    });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[subagent.routing.coder]');
+    expect(text).toContain('[subagent.backends.custom-cli]');
+    expect(parseConfigString(text, configPath).subagent).toEqual(config.subagent);
+  });
+
   it('round-trips the [image] section', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'image-round-trip.toml');

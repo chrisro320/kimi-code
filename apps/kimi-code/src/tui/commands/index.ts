@@ -22,6 +22,7 @@ export {
   showPermissionPicker,
   showSettingsSelector,
 } from './config';
+export { handleSubagentCommand } from './subagent';
 export { handleSwarmCommand } from './swarm';
 export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
 export { handlePluginsCommand } from './plugins';

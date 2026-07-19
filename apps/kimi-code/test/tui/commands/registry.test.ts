@@ -162,6 +162,7 @@ describe('built-in slash command registry', () => {
         'mcp',
         'model',
         'new',
+        'subagent',
         'permission',
         'plan',
         'reload',
@@ -177,6 +178,12 @@ describe('built-in slash command registry', () => {
         'yolo',
       ]),
     );
+  });
+
+  it('keeps subagent routing idle-only', () => {
+    const subagent = findBuiltInSlashCommand('subagent');
+    expect(subagent).toBeDefined();
+    expect(resolveSlashCommandAvailability(subagent!, '')).toBe('idle-only');
   });
 
   it('keeps TUI reload always available and full reload idle-only', () => {

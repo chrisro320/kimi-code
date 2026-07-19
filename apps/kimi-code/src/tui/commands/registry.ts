@@ -185,6 +185,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'always',
   },
   {
+    name: 'subagent',
+    aliases: [],
+    description: 'Configure the model or external CLI for subagents',
+    priority: 100,
+    argumentHint: '[profile]',
+    availability: 'idle-only',
+  },
+  {
     name: 'effort',
     aliases: ['thinking'],
     description: 'Switch thinking effort',

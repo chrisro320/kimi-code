@@ -148,12 +148,32 @@ export const BackgroundConfigSchema = z.object({
 
 export type BackgroundConfig = z.infer<typeof BackgroundConfigSchema>;
 
+export const SubagentBackendSchema = z.object({
+  /** Executable to launch directly, never through a shell. */
+  command: z.string().min(1),
+  /** Arguments may contain only {model} and {cwd} placeholders. */
+  args: z.array(z.string()).optional(),
+});
+
+export type SubagentBackend = z.infer<typeof SubagentBackendSchema>;
+
+export const SubagentRoutingSchema = z.object({
+  /** `kimi` (or omitted) uses the in-process subagent. */
+  backend: z.string().min(1).optional(),
+  /** Model alias used by this subagent type. */
+  model: z.string().min(1).optional(),
+});
+
+export type SubagentRouting = z.infer<typeof SubagentRoutingSchema>;
+
 export const SubagentConfigSchema = z.object({
   /**
    * Per-subagent (`Agent` / `AgentSwarm`, foreground and background) timeout
    * in milliseconds. `0` means no timeout. Defaults to 2 hours when unset.
    */
   timeoutMs: z.number().int().min(0).optional(),
+  routing: z.record(z.string().min(1), SubagentRoutingSchema).optional(),
+  backends: z.record(z.string().min(1), SubagentBackendSchema).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;

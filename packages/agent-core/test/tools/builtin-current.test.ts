@@ -366,6 +366,7 @@ describe('current builtin collaboration tools', () => {
       prompt_template: 'Review {{item}}',
       items: ['src/a.ts', 'src/b.ts'],
       subagent_type: 'explore',
+      model: 'fast-model',
     };
 
     expect(AgentSwarmToolInputSchema.safeParse(input).success).toBe(true);
@@ -385,11 +386,9 @@ describe('current builtin collaboration tools', () => {
       type: 'object',
       properties: {
         subagent_type: { type: 'string' },
+        model: { type: 'string' },
       },
     });
-    expect(Object.keys(tool.parameters['properties'] as Record<string, unknown>).at(-1)).toBe(
-      'resume_agent_ids',
-    );
 
     const result = await executeTool(tool, context(input, 'call_swarm'));
 
@@ -406,6 +405,7 @@ describe('current builtin collaboration tools', () => {
           description: 'Review files #1 (explore)',
           swarmIndex: 1,
           swarmItem: 'src/a.ts',
+          modelAlias: 'fast-model',
           runInBackground: false,
           signal,
           timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -419,6 +419,7 @@ describe('current builtin collaboration tools', () => {
           description: 'Review files #2 (explore)',
           swarmIndex: 2,
           swarmItem: 'src/b.ts',
+          modelAlias: 'fast-model',
           runInBackground: false,
           signal,
           timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -541,6 +542,7 @@ describe('current builtin collaboration tools', () => {
     const input = {
       description: 'Finish review',
       subagent_type: 'explore',
+      model: 'swarm-model',
       prompt_template: 'Review {{item}}',
       items: ['src/new.ts'],
       resume_agent_ids: {
@@ -627,6 +629,7 @@ describe('current builtin collaboration tools', () => {
           description: 'Finish review #3 (explore)',
           swarmIndex: 3,
           swarmItem: 'src/new.ts',
+          modelAlias: 'swarm-model',
           runInBackground: false,
           signal,
           timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -822,6 +825,58 @@ describe('current builtin collaboration tools', () => {
       '</agent_swarm_result>',
     ].join('\n'));
     expect(result.isError).toBeUndefined();
+  });
+
+  it('AgentSwarm omits resume hint when only external subagents are incomplete', async () => {
+    const host = mockSubagentHost({
+      runQueued: vi.fn().mockResolvedValue([
+        {
+          task: {
+            kind: 'spawn',
+            data: { kind: 'spawn', index: 1, item: 'src/a.ts', prompt: 'Review src/a.ts' },
+            profileName: 'coder',
+            parentToolCallId: 'call_swarm',
+            prompt: 'Review src/a.ts',
+            description: 'Review files #1 (coder)',
+            runInBackground: false,
+          },
+          agentId: 'agent-coder-1',
+          status: 'completed',
+          result: 'done',
+        },
+        {
+          task: {
+            kind: 'spawn',
+            data: { kind: 'spawn', index: 2, item: 'src/b.ts', prompt: 'Review src/b.ts' },
+            profileName: 'coder',
+            parentToolCallId: 'call_swarm',
+            prompt: 'Review src/b.ts',
+            description: 'Review files #2 (coder)',
+            runInBackground: false,
+          },
+          agentId: 'external-cli-123',
+          status: 'failed',
+          error: 'External backend failed.',
+        },
+      ]),
+    });
+    const tool = new AgentSwarmTool(host, mockSwarmMode());
+
+    const result = await executeTool(
+      tool,
+      context(
+        {
+          description: 'Review files',
+          prompt_template: 'Review {{item}}',
+          items: ['src/a.ts', 'src/b.ts'],
+        },
+        'call_swarm',
+      ),
+    );
+
+    expect(result.output).not.toContain('<resume_hint>');
+    expect(result.output).not.toContain('resume_agent_ids');
+    expect(result.output).toContain('agent_id="external-cli-123"');
   });
 
   it('AgentSwarm reports partial aborted subagents inside the XML result', async () => {

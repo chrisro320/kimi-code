@@ -50,6 +50,7 @@ type BaseQueuedSubagentTask<T> = {
   readonly swarmItem?: string;
   readonly runInBackground: boolean;
   readonly timeout?: number;
+  readonly modelAlias?: string;
   readonly signal?: AbortSignal;
 };
 
@@ -324,6 +325,7 @@ export class SubagentBatch<T> {
         const spawnOptions: SpawnSubagentOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
+          modelAlias: task.modelAlias,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);

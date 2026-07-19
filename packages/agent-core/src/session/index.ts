@@ -1107,6 +1107,7 @@ export class Session {
 }
 
 export * from './subagent-host';
+export * from './subagent-routing';
 export * from './store';
 
 function initCompletionReminder(agentsMd: string): string {

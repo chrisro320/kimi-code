@@ -7,6 +7,7 @@ import {
   type QueuedSubagentTask,
   type SessionSubagentHost,
 } from '../../../session/subagent-host';
+import { isExternalSubagentId } from '../../../session/subagent-routing';
 import { ToolAccesses } from '../../../loop/tool-access';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -30,6 +31,14 @@ export const AgentSwarmToolInputSchema = z
       .optional()
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
+      ),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Model alias used for item-based new spawns only. Resume entries ignore this parameter and align to the parent agent\'s current model when they continue.',
       ),
     prompt_template: z
       .string()
@@ -147,6 +156,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
+        modelAlias: spec.kind === 'spawn' ? args.model : undefined,
         signal,
         timeout: this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS,
       };
@@ -240,9 +250,12 @@ function renderSwarmResults(results: readonly SwarmRunResult[]): string {
   const completed = results.filter((result) => result.status === 'completed').length;
   const failed = results.filter((result) => result.status === 'failed').length;
   const aborted = results.filter((result) => result.status === 'aborted').length;
-  const shouldRenderResumeHint =
-    results.some((result) => result.status !== 'completed') &&
-    results.some((result) => result.agentId !== undefined);
+  const shouldRenderResumeHint = results.some(
+    (result) =>
+      result.status !== 'completed' &&
+      result.agentId !== undefined &&
+      !isExternalSubagentId(result.agentId),
+  );
   const lines = [
     '<agent_swarm_result>',
     `<summary>${renderSwarmSummary(completed, failed, aborted)}</summary>`,

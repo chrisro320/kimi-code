@@ -1,3 +1,6 @@
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+
 import {
   APIProviderRateLimitError,
   isProviderRateLimitError,
@@ -28,6 +31,13 @@ import {
   type SubagentSuspendedEvent,
   type QueuedSubagentTask,
 } from './subagent-batch';
+import {
+  EXTERNAL_SUBAGENT_ID_PREFIX,
+  isExternalSubagentId,
+  materializeBackendArgs,
+  resolveSubagentRoute,
+  type ResolvedSubagentRoute,
+} from './subagent-routing';
 import SUMMARY_CONTINUATION_PROMPT from './summary-continuation.md?raw';
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -121,6 +131,7 @@ export interface RunSubagentOptions {
 export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
+  readonly modelAlias?: string;
 }
 
 type SubagentCompletion = {
@@ -154,6 +165,14 @@ export class SessionSubagentHost {
 
     const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
     const profile = this.resolveProfile(parent, options.profileName);
+    const route = resolveSubagentRoute(
+      this.session.options.config ?? { providers: {} },
+      profile.name,
+      options.modelAlias,
+    );
+    if (route.kind === 'external') {
+      return this.spawnExternal(parent, profile.name, route, options);
+    }
     const { id, agent } = await this.session.createAgent(
       { type: 'sub', generate: parent.rawGenerate },
       { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
@@ -161,7 +180,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
-        await this.configureChild(parent, agent, profile);
+        await this.configureChild(parent, agent, profile, route.modelAlias);
         return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
@@ -176,8 +195,47 @@ export class SessionSubagentHost {
     };
   }
 
+  private spawnExternal(
+    parent: Agent,
+    profileName: string,
+    route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+    options: SpawnSubagentOptions,
+  ): SubagentHandle {
+    const id = `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
+    const completion = this.runWithActiveChild(id, options, async (runOptions) => {
+      this.emitSubagentSpawned(parent, id, profileName, runOptions);
+      try {
+        await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
+        runOptions.signal.throwIfAborted();
+        this.emitSubagentStarted(parent, id);
+        runOptions.onReady?.();
+        const result = await runExternalSubagent(route, parent.config.cwd, runOptions.prompt, runOptions.signal, (stderr) => {
+          this.session.log.warn('external subagent stderr', {
+            subagentId: id,
+            backend: route.backendName,
+            stderr,
+          });
+        });
+        parent.emitEvent({
+          type: 'subagent.completed',
+          subagentId: id,
+          resultSummary: result,
+        });
+        this.triggerSubagentStop(parent, profileName, result);
+        return { result };
+      } catch (error) {
+        this.emitSubagentFailed(parent, id, runOptions, error);
+        throw error;
+      }
+    });
+    return { agentId: id, profileName, resumed: false, completion };
+  }
+
   async resume(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
+    if (isExternalSubagentId(agentId)) {
+      throw new Error(`External subagent "${agentId}" cannot be resumed.`);
+    }
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
@@ -194,6 +252,9 @@ export class SessionSubagentHost {
 
   async retry(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
+    if (isExternalSubagentId(agentId)) {
+      throw new Error(`External subagent "${agentId}" cannot be retried or resumed.`);
+    }
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       try {
@@ -400,11 +461,11 @@ export class SessionSubagentHost {
     parent: Agent,
     child: Agent,
     profile: ResolvedAgentProfile,
+    modelAlias?: string,
   ): Promise<void> {
-    // A subagent always inherits the parent agent's model.
     child.config.update({
       cwd: parent.config.cwd,
-      modelAlias: parent.config.modelAlias,
+      modelAlias: modelAlias ?? parent.config.modelAlias,
       thinkingEffort: parent.config.thinkingEffort,
     });
 
@@ -544,6 +605,139 @@ export class SessionSubagentHost {
       subagentId: childId,
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+export function runExternalSubagent(
+  route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+  cwd: string,
+  prompt: string,
+  signal: AbortSignal,
+  onStderr: (stderr: string) => void,
+): Promise<string> {
+  signal.throwIfAborted();
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(route.backend.command, materializeBackendArgs(route, cwd), {
+      cwd,
+      shell: false,
+      stdio: 'pipe',
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let abortReason: unknown;
+    let stdinError: unknown;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+    };
+    const settle = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (stderr.length > 0) onStderr(stderr);
+      if (error !== undefined) reject(error);
+      else resolve(stdout);
+    };
+    const kill = (): void => {
+      killTimer ??= killExternalProcess(child);
+    };
+    const onAbort = (): void => {
+      abortReason = signal.reason ?? new Error('Aborted');
+      kill();
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', (error) => {
+      if (abortReason !== undefined || stdinError !== undefined) return;
+      settle(error);
+    });
+    child.on('close', (code, closeSignal) => {
+      if (abortReason !== undefined) {
+        settle(abortReason);
+        return;
+      }
+      if (stdinError !== undefined) {
+        settle(stdinError);
+        return;
+      }
+      if (code === 0) {
+        settle();
+        return;
+      }
+      const detail = stderr.trim();
+      const suffix = detail.length > 0 ? `: ${detail}` : '';
+      settle(
+        new Error(
+          `External subagent backend "${route.backendName}" exited with ${code === null ? `signal ${closeSignal ?? 'unknown'}` : `code ${String(code)}`}${suffix}`,
+        ),
+      );
+    });
+    child.stdin.on('error', (error) => {
+      stdinError = error;
+      if (abortReason === undefined) kill();
+    });
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    child.stdin.end(prompt);
+  });
+}
+
+function killExternalProcess(child: ChildProcessWithoutNullStreams): ReturnType<typeof setTimeout> {
+  if (process.platform === 'win32') {
+    killProcessTreeWindows(child, false);
+  } else {
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGTERM');
+      else child.kill('SIGTERM');
+    } catch {
+      try {
+        child.kill('SIGTERM');
+      } catch {}
+    }
+  }
+  const timer = setTimeout(() => {
+    if (process.platform === 'win32') {
+      killProcessTreeWindows(child, true);
+      return;
+    }
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch {}
+  }, 100);
+  timer.unref();
+  return timer;
+}
+
+function killProcessTreeWindows(child: ChildProcessWithoutNullStreams, force: boolean): void {
+  if (child.pid === undefined) return;
+  const args = force
+    ? ['/T', '/F', '/PID', String(child.pid)]
+    : ['/T', '/PID', String(child.pid)];
+  try {
+    const killer = spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+    killer.once('error', () => {});
+  } catch {
+    try {
+      child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    } catch {}
   }
 }
 

@@ -1,0 +1,184 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import type { KimiConfig } from '../../src/config';
+import type { Session } from '../../src/session';
+import { runExternalSubagent, SessionSubagentHost } from '../../src/session/subagent-host';
+import {
+  materializeBackendArgs,
+  resolveSubagentRoute,
+  type ResolvedSubagentRoute,
+} from '../../src/session/subagent-routing';
+
+const config: KimiConfig = {
+  providers: { local: { type: 'openai' } },
+  models: {
+    fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+    precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
+  },
+  subagent: {
+    routing: {
+      coder: { model: 'fast' },
+      explore: { backend: 'custom-cli', model: 'precise' },
+    },
+    backends: {
+      'custom-cli': {
+        command: 'custom-agent',
+        args: ['--model', '{model}', '--cwd={cwd}'],
+      },
+    },
+  },
+};
+
+describe('resolveSubagentRoute', () => {
+  it('falls back to internal parent inheritance when no route exists', () => {
+    expect(resolveSubagentRoute(config, 'plan')).toEqual({
+      kind: 'internal',
+      modelAlias: undefined,
+    });
+  });
+
+  it('resolves per-type models and allows a swarm override', () => {
+    expect(resolveSubagentRoute(config, 'coder')).toEqual({
+      kind: 'internal',
+      modelAlias: 'fast',
+    });
+    expect(resolveSubagentRoute(config, 'coder', 'precise')).toEqual({
+      kind: 'internal',
+      modelAlias: 'precise',
+    });
+  });
+
+  it('resolves external backend args without a shell', () => {
+    const route = resolveSubagentRoute(config, 'explore');
+    expect(route.kind).toBe('external');
+    if (route.kind !== 'external') throw new Error('expected external route');
+    expect(materializeBackendArgs(route, '/workspace/project')).toEqual([
+      '--model',
+      'precise',
+      '--cwd=/workspace/project',
+    ]);
+  });
+
+  it('rejects unknown model aliases, backends, and placeholders', () => {
+    expect(() => resolveSubagentRoute(config, 'coder', 'missing')).toThrow(
+      'not defined in config.models',
+    );
+    expect(() =>
+      resolveSubagentRoute(
+        { ...config, subagent: { routing: { coder: { backend: 'missing' } } } },
+        'coder',
+      ),
+    ).toThrow('not defined in subagent.backends');
+    expect(() =>
+      resolveSubagentRoute(
+        {
+          ...config,
+          subagent: {
+            routing: { coder: { backend: 'bad' } },
+            backends: { bad: { command: 'bad', args: ['{prompt}'] } },
+          },
+        },
+        'coder',
+      ),
+    ).toThrow('unsupported template placeholder');
+  });
+});
+
+describe('runExternalSubagent', () => {
+  const nodeRoute: Extract<ResolvedSubagentRoute, { kind: 'external' }> = {
+    kind: 'external',
+    backendName: 'node',
+    backend: {
+      command: process.execPath,
+      args: [
+        '-e',
+        "process.stdin.setEncoding('utf8');let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{process.stderr.write('diagnostic');process.stdout.write(process.cwd()+'\\n'+input)})",
+      ],
+    },
+    modelAlias: undefined,
+  };
+
+  it('passes prompt on stdin and returns only stdout from the configured cwd', async () => {
+    const stderr: string[] = [];
+    const result = await runExternalSubagent(
+      nodeRoute,
+      process.cwd(),
+      'hello external',
+      new AbortController().signal,
+      (chunk) => stderr.push(chunk),
+    );
+    expect(result).toBe(`${process.cwd()}\nhello external`);
+    expect(stderr).toEqual(['diagnostic']);
+  });
+
+  it('reports non-zero exits and aborts a running process', async () => {
+    const failing = {
+      ...nodeRoute,
+      backend: {
+        command: process.execPath,
+        args: ['-e', "process.stderr.write('bad exit');process.exit(7)"],
+      },
+    };
+    await expect(
+      runExternalSubagent(failing, process.cwd(), '', new AbortController().signal, () => {}),
+    ).rejects.toThrow('exited with code 7: bad exit');
+
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      const controller = new AbortController();
+      const hanging = {
+        ...nodeRoute,
+        backend: { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] },
+      };
+      const running = runExternalSubagent(
+        hanging,
+        process.cwd(),
+        '',
+        controller.signal,
+        () => {},
+      );
+      controller.abort(new Error('cancelled'));
+      await expect(running).rejects.toThrow('cancelled');
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('waits for close and rejects when a backend exits while stdin is still writing', async () => {
+    const earlyExit = {
+      ...nodeRoute,
+      backend: {
+        command: process.execPath,
+        args: ['-e', "process.stderr.write('closed early');process.exit(0)"],
+      },
+    };
+    const stderr: string[] = [];
+
+    await expect(
+      runExternalSubagent(
+        earlyExit,
+        process.cwd(),
+        'x'.repeat(16 * 1024 * 1024),
+        new AbortController().signal,
+        (chunk) => stderr.push(chunk),
+      ),
+    ).rejects.toMatchObject({ code: 'EPIPE' });
+    expect(stderr).toEqual(['closed early']);
+  });
+
+  it('rejects resume and retry for opaque external ids', async () => {
+    const host = new SessionSubagentHost({} as Session, 'main');
+    const options = {
+      parentToolCallId: 'call',
+      prompt: 'continue',
+      description: 'continue external',
+      runInBackground: false,
+      signal: new AbortController().signal,
+    };
+    await expect(host.resume('external-cli-123', options)).rejects.toThrow('cannot be resumed');
+    await expect(host.retry('external-cli-123', options)).rejects.toThrow(
+      'cannot be retried or resumed',
+    );
+  });
+});
