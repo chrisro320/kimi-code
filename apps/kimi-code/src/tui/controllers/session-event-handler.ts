@@ -1119,6 +1119,7 @@ export class SessionEventHandler {
     const { state } = this.host;
     let bashTasks = 0;
     let agentTasks = 0;
+    const trackedAgentIds = new Set<string>();
     for (const info of this.backgroundTasks.values()) {
       if (
         info.status === 'completed' ||
@@ -1131,9 +1132,13 @@ export class SessionEventHandler {
       }
       if (info.kind === 'agent') {
         agentTasks += 1;
+        if (info.agentId !== undefined) trackedAgentIds.add(info.agentId);
       } else {
         bashTasks += 1;
       }
+    }
+    for (const meta of this.subAgentEventHandler.backgroundAgentMetadata.values()) {
+      if (!trackedAgentIds.has(meta.agentId)) agentTasks += 1;
     }
     state.footer.setBackgroundCounts({ bashTasks, agentTasks });
     state.ui.requestRender();
