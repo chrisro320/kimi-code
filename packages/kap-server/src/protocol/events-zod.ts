@@ -775,6 +775,12 @@ export const subagentSuspendedEventSchema = z.object({
   reason: z.string(),
 }) satisfies z.ZodType<SubagentSuspendedEvent>;
 
+export const subagentProgressEventSchema = z.object({
+  type: z.literal('subagent.progress'),
+  subagentId: z.string(),
+  usage: tokenUsageSchema,
+});
+
 export const subagentCompletedEventSchema = z.object({
   type: z.literal('subagent.completed'),
   subagentId: z.string(),
@@ -924,6 +930,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   subagentSpawnedEventSchema,
   subagentStartedEventSchema,
   subagentSuspendedEventSchema,
+  subagentProgressEventSchema,
   subagentCompletedEventSchema,
   subagentFailedEventSchema,
   compactionStartedEventSchema,

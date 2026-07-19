@@ -87,6 +87,18 @@ export class SubAgentEventHandler {
       return true;
     }
 
+    if (event.type === 'agent.status.updated') {
+      const totalUsage = event.usage?.total ?? event.usage?.currentTurn;
+      const backgroundMeta = this.backgroundAgentMetadata.get(childAgentId);
+      if (backgroundMeta !== undefined && totalUsage !== undefined) {
+        this.backgroundAgentMetadata.set(childAgentId, {
+          ...backgroundMeta,
+          tokens: totalUsage.inputOther + totalUsage.output + totalUsage.inputCacheRead + totalUsage.inputCacheCreation,
+        });
+        this.deps.syncBackgroundAgentBadge();
+      }
+    }
+
     const toolCall = this.host.streamingUI.getToolComponent(parentToolCallId);
     if (toolCall === undefined) return true;
     toolCall.setSubagentMeta(childAgentId, info.name);
@@ -123,10 +135,9 @@ export class SubAgentEventHandler {
       });
     } else if (event.type === 'agent.status.updated') {
       const usageObj = event.usage;
-      const totalUsage = usageObj?.total ?? usageObj?.currentTurn;
       toolCall.updateSubagentMetrics({
         contextTokens: event.contextTokens,
-        usage: totalUsage,
+        usage: usageObj?.total ?? usageObj?.currentTurn,
       });
     }
     return true;
@@ -142,6 +153,9 @@ export class SubAgentEventHandler {
         return;
       case 'subagent.suspended':
         this.handleSubagentSuspended(event);
+        return;
+      case 'subagent.progress':
+        this.handleSubagentProgress(event);
         return;
       case 'subagent.completed':
         this.handleSubagentCompleted(event);
@@ -270,6 +284,19 @@ export class SubAgentEventHandler {
     const info = this.subagentInfo.get(event.subagentId);
     if (info === undefined) return;
     if (!info.runInBackground) this.handleForegroundSubagentSuspended(event, info);
+  }
+
+  private handleSubagentProgress(
+    event: SubagentLifecycleEventOf<'subagent.progress'>,
+  ): void {
+    const meta = this.backgroundAgentMetadata.get(event.subagentId);
+    if (meta === undefined) return;
+    const usage = event.usage;
+    this.backgroundAgentMetadata.set(event.subagentId, {
+      ...meta,
+      tokens: usage.inputOther + usage.output + usage.inputCacheRead + usage.inputCacheCreation,
+    });
+    this.deps.syncBackgroundAgentBadge();
   }
 
   private handleSubagentCompleted(
@@ -659,6 +686,7 @@ function isSubagentLifecycleEvent(event: Event): event is SubagentLifecycleEvent
     event.type === 'subagent.spawned' ||
     event.type === 'subagent.started' ||
     event.type === 'subagent.suspended' ||
+    event.type === 'subagent.progress' ||
     event.type === 'subagent.completed' ||
     event.type === 'subagent.failed'
   );

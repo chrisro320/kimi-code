@@ -131,6 +131,14 @@ export interface BackgroundAgentMetadata {
   readonly agentName?: string;
   readonly description?: string;
   readonly startedAtMs?: number;
+  readonly tokens?: number;
+}
+
+export interface ActiveBackgroundAgentStatus {
+  readonly agentId: string;
+  readonly agentName: string;
+  readonly startedAtMs: number;
+  readonly tokens?: number;
 }
 
 export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed';

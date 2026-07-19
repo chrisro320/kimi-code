@@ -77,6 +77,7 @@ import type { StreamingUIController } from './streaming-ui';
 import type { TasksBrowserController } from './tasks-browser';
 import { SubAgentEventHandler } from './subagent-event-handler';
 import type {
+  ActiveBackgroundAgentStatus,
   AppState,
   LivePaneState,
   QueuedMessage,
@@ -269,6 +270,7 @@ export class SessionEventHandler {
       case 'subagent.spawned':
       case 'subagent.started':
       case 'subagent.suspended':
+      case 'subagent.progress':
       case 'subagent.completed':
       case 'subagent.failed':
         this.subAgentEventHandler.handleLifecycleEvent(event); break;
@@ -1137,10 +1139,17 @@ export class SessionEventHandler {
         bashTasks += 1;
       }
     }
+    const activeAgents: ActiveBackgroundAgentStatus[] = [];
     for (const meta of this.subAgentEventHandler.backgroundAgentMetadata.values()) {
       if (!trackedAgentIds.has(meta.agentId)) agentTasks += 1;
+      activeAgents.push({
+        agentId: meta.agentId,
+        agentName: meta.agentName ?? 'agent',
+        startedAtMs: meta.startedAtMs ?? Date.now(),
+        tokens: meta.tokens,
+      });
     }
-    state.footer.setBackgroundCounts({ bashTasks, agentTasks });
+    state.footer.setBackgroundCounts({ bashTasks, agentTasks, activeAgents });
     state.ui.requestRender();
   }
 }

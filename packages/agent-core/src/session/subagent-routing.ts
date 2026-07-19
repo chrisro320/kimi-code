@@ -70,55 +70,136 @@ export function wrapExternalSubagentPrompt(profileName: string, prompt: string):
 
 export interface ExternalSubagentCompletion {
   readonly result: string;
-  readonly usage?: {
-    readonly inputOther: number;
-    readonly output: number;
-    readonly inputCacheRead: number;
-    readonly inputCacheCreation: number;
-  };
+  readonly usage?: ExternalSubagentUsage;
 }
 
-export function parseExternalSubagentOutput(stdout: string): ExternalSubagentCompletion {
-  const fallback = { result: stdout };
-  const text = stdout.trim();
-  if (text.length === 0) return fallback;
+export interface ExternalSubagentUsage {
+  readonly inputOther: number;
+  readonly output: number;
+  readonly inputCacheRead: number;
+  readonly inputCacheCreation: number;
+}
+
+export interface ExternalSubagentStreamUpdate {
+  readonly result?: string;
+  readonly resultDelta?: string;
+  readonly usage?: ExternalSubagentUsage;
+  readonly usageKey?: string;
+  readonly finalUsage?: boolean;
+}
+
+export function parseExternalSubagentStreamLine(line: string): ExternalSubagentStreamUpdate | undefined {
+  const text = line.trim();
+  if (text.length === 0) return undefined;
 
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    return fallback;
+    return undefined;
   }
-  if (typeof payload !== 'object' || payload === null) return fallback;
+  if (typeof payload !== 'object' || payload === null) return undefined;
 
   const record = payload as Record<string, unknown>;
+  const type = typeof record['type'] === 'string' ? record['type'] : undefined;
+  if (type === 'text' && typeof record['data'] === 'string') {
+    return { resultDelta: record['data'] };
+  }
+
+  if (type === 'assistant') {
+    const message = asRecord(record['message']);
+    const usage = parseExternalUsage(message?.['usage']);
+    if (usage === undefined) return undefined;
+    return {
+      usage,
+      usageKey: typeof message?.['id'] === 'string' ? message['id'] : undefined,
+    };
+  }
+
   const result =
     typeof record['result'] === 'string'
       ? record['result']
-      : typeof record['text'] === 'string'
+      : type === undefined && typeof record['text'] === 'string'
         ? record['text']
         : undefined;
-  if (result === undefined) return fallback;
+  const usage = parseExternalUsage(record['usage']);
+  if (result === undefined && usage === undefined) return undefined;
+  return {
+    result,
+    usage,
+    finalUsage: type === 'result' || type === 'end',
+  };
+}
 
-  const usage = record['usage'];
-  if (typeof usage !== 'object' || usage === null) return { result };
-  const usageRecord = usage as Record<string, unknown>;
+export function parseExternalSubagentOutput(stdout: string): ExternalSubagentCompletion {
+  const text = stdout.trim();
+  if (text.length === 0) return { result: stdout };
+
+  const usageByKey = new Map<string, ExternalSubagentUsage>();
+  let anonymousUsage: ExternalSubagentUsage | undefined;
+  let finalUsage: ExternalSubagentUsage | undefined;
+  let result: string | undefined;
+  let resultFromDeltas = '';
+  let parsedLine = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    const update = parseExternalSubagentStreamLine(line);
+    if (update === undefined) continue;
+    parsedLine = true;
+    if (update.result !== undefined) result = update.result;
+    if (update.resultDelta !== undefined) resultFromDeltas += update.resultDelta;
+    if (update.usage !== undefined) {
+      if (update.finalUsage === true) {
+        finalUsage = update.usage;
+      } else if (update.usageKey !== undefined) {
+        usageByKey.set(update.usageKey, update.usage);
+      } else {
+        anonymousUsage = update.usage;
+      }
+    }
+  }
+
+  if (!parsedLine) return { result: stdout };
+  const usage = finalUsage ?? sumExternalUsage([...usageByKey.values(), ...(anonymousUsage === undefined ? [] : [anonymousUsage])]);
+  return {
+    result: result ?? resultFromDeltas,
+    ...(usage === undefined ? {} : { usage }),
+  };
+}
+
+function parseExternalUsage(value: unknown): ExternalSubagentUsage | undefined {
+  const record = asRecord(value);
+  if (record === undefined) return undefined;
   const number = (key: string): number | undefined =>
-    typeof usageRecord[key] === 'number' && Number.isFinite(usageRecord[key])
-      ? usageRecord[key]
+    typeof record[key] === 'number' && Number.isFinite(record[key])
+      ? record[key]
       : undefined;
   const inputOther = number('input_tokens');
   const output = number('output_tokens');
-  if (inputOther === undefined || output === undefined) return { result };
+  if (inputOther === undefined || output === undefined) return undefined;
   return {
-    result,
-    usage: {
-      inputOther,
-      output,
-      inputCacheRead: number('cache_read_input_tokens') ?? 0,
-      inputCacheCreation: number('cache_creation_input_tokens') ?? 0,
-    },
+    inputOther,
+    output,
+    inputCacheRead: number('cache_read_input_tokens') ?? 0,
+    inputCacheCreation: number('cache_creation_input_tokens') ?? 0,
   };
+}
+
+function sumExternalUsage(usages: readonly ExternalSubagentUsage[]): ExternalSubagentUsage | undefined {
+  if (usages.length === 0) return undefined;
+  return usages.reduce<ExternalSubagentUsage>(
+    (total, usage) => ({
+      inputOther: total.inputOther + usage.inputOther,
+      output: total.output + usage.output,
+      inputCacheRead: total.inputCacheRead + usage.inputCacheRead,
+      inputCacheCreation: total.inputCacheCreation + usage.inputCacheCreation,
+    }),
+    { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined;
 }
 
 export function isExternalSubagentId(agentId: string): boolean {

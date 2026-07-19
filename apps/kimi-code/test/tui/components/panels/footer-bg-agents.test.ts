@@ -86,6 +86,26 @@ describe('FooterComponent — background task / agent badges', () => {
     expect(after).not.toMatch(/agents? running/);
   });
 
+  it('streams active agent elapsed time and tokens on the statusline', () => {
+    const footer = new FooterComponent(baseState({ statusline: { enabled: true } }));
+    footer.setBackgroundCounts({
+      bashTasks: 0,
+      agentTasks: 1,
+      activeAgents: [{
+        agentId: 'external-claudecode-1',
+        agentName: 'claudecode',
+        startedAtMs: Date.now() - 12_000,
+        tokens: 3_276,
+      }],
+    });
+    const rows = footer.render(160).map(strip);
+    expect(rows.at(-1)).toContain('claudecode 12s · 3.2k tok');
+
+    footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0, activeAgents: [] });
+    expect(footer.render(160).map(strip).at(-1)).not.toContain('claudecode');
+    footer.dispose();
+  });
+
   it('clamps negative counts to 0', () => {
     const footer = new FooterComponent(baseState());
     footer.setBackgroundCounts({ bashTasks: -5, agentTasks: -2 });

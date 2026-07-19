@@ -15,7 +15,7 @@ import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
 import { currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
-import type { AppState } from '#/tui/types';
+import type { ActiveBackgroundAgentStatus, AppState } from '#/tui/types';
 import {
   createGitStatusCache,
   formatGitBadgeBase,
@@ -233,6 +233,20 @@ const STATUSLINE_TTL_MS = 300_000;
  * While a turn is active the cache is being refreshed every request, so the
  * cell freezes at the full window instead of counting down.
  */
+function formatAgentElapsed(startedAtMs: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${String(minutes)}m ${String(seconds % 60)}s` : `${String(seconds)}s`;
+}
+
+function formatActiveAgentStatus(agent: ActiveBackgroundAgentStatus, colors: ColorPalette): string {
+  const metrics = [
+    formatAgentElapsed(agent.startedAtMs),
+    agent.tokens === undefined ? undefined : `${formatTokenCount(agent.tokens)} tok`,
+  ].filter((part): part is string => part !== undefined).join(' · ');
+  return chalk.hex(colors.primary)(`${agent.agentName} ${metrics}`);
+}
+
 function ttlCell(
   lastReplyAt: number | undefined,
   active: boolean,
@@ -324,6 +338,8 @@ export class FooterComponent implements Component {
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  private activeBackgroundAgents: readonly ActiveBackgroundAgentStatus[] = [];
+  private backgroundAgentTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
@@ -367,9 +383,15 @@ export class FooterComponent implements Component {
    * count produces its own bracketed badge on line 1; zeros hide them
    * independently.
    */
-  setBackgroundCounts(counts: { bashTasks: number; agentTasks: number }): void {
+  setBackgroundCounts(counts: {
+    bashTasks: number;
+    agentTasks: number;
+    activeAgents?: readonly ActiveBackgroundAgentStatus[];
+  }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+    this.activeBackgroundAgents = counts.activeAgents ?? [];
+    this.syncBackgroundAgentTimer();
   }
 
   invalidate(): void {}
@@ -497,12 +519,18 @@ export class FooterComponent implements Component {
    * when the statusline is disabled.
    */
   private renderStatuslineRow(state: AppState, colors: ColorPalette, width: number): string | null {
+    if (state.statusline?.enabled !== true) return null;
     const customLine =
       this.customStatuslineCache?.getLine(buildCustomStatuslinePayload(state)) ?? null;
-    let statusRow = buildStatuslineRow(state, colors, false, customLine);
+    const agentCells = this.activeBackgroundAgents.map((agent) => formatActiveAgentStatus(agent, colors));
+    const appendAgents = (base: string | null): string | null => {
+      const cells = [...(base === null ? [] : [base]), ...agentCells];
+      return cells.length === 0 ? null : cells.join(chalk.hex(colors.textDim)(' │ '));
+    };
+    let statusRow = appendAgents(buildStatuslineRow(state, colors, false, customLine));
     if (statusRow === null) return null;
     if (visibleWidth(statusRow) > width) {
-      statusRow = buildStatuslineRow(state, colors, true, customLine) ?? statusRow;
+      statusRow = appendAgents(buildStatuslineRow(state, colors, true, customLine)) ?? statusRow;
     }
     return truncateToWidth(statusRow, width);
   }
@@ -552,6 +580,19 @@ export class FooterComponent implements Component {
    * freezes at the full window while a turn is active, so ticking then would
    * just re-render the same value — only the idle count-down needs the ticker.
    */
+  private syncBackgroundAgentTimer(): void {
+    if (this.activeBackgroundAgents.length > 0) {
+      if (this.backgroundAgentTimer !== null) return;
+      this.backgroundAgentTimer = setInterval(() => this.onRefresh(), 1_000);
+      this.backgroundAgentTimer.unref?.();
+      return;
+    }
+    if (this.backgroundAgentTimer !== null) {
+      clearInterval(this.backgroundAgentTimer);
+      this.backgroundAgentTimer = null;
+    }
+  }
+
   private syncTtlTimer(state: AppState): void {
     const live =
       state.statusline?.enabled === true &&
@@ -590,6 +631,10 @@ export class FooterComponent implements Component {
     if (this.ttlTimer !== null) {
       clearInterval(this.ttlTimer);
       this.ttlTimer = null;
+    }
+    if (this.backgroundAgentTimer !== null) {
+      clearInterval(this.backgroundAgentTimer);
+      this.backgroundAgentTimer = null;
     }
   }
 

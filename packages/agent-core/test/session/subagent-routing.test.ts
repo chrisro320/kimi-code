@@ -152,6 +152,72 @@ describe('runExternalSubagent', () => {
     expect(parseExternalSubagentOutput('plain output')).toEqual({ result: 'plain output' });
   });
 
+  it('parses Claude and Grok streaming JSON output', () => {
+    const claude = [
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id: 'msg-1',
+          usage: {
+            input_tokens: 2,
+            cache_creation_input_tokens: 40,
+            cache_read_input_tokens: 10,
+            output_tokens: 3,
+          },
+        },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id: 'msg-2',
+          usage: {
+            input_tokens: 4,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 50,
+            output_tokens: 5,
+          },
+        },
+      }),
+      JSON.stringify({
+        type: 'result',
+        result: 'claude streamed',
+        usage: {
+          input_tokens: 6,
+          cache_creation_input_tokens: 40,
+          cache_read_input_tokens: 60,
+          output_tokens: 8,
+        },
+      }),
+    ].join('\n');
+    expect(parseExternalSubagentOutput(claude)).toEqual({
+      result: 'claude streamed',
+      usage: {
+        inputOther: 6,
+        output: 8,
+        inputCacheRead: 60,
+        inputCacheCreation: 40,
+      },
+    });
+
+    const grok = [
+      JSON.stringify({ type: 'text', data: 'grok ' }),
+      JSON.stringify({ type: 'text', data: 'streamed' }),
+      JSON.stringify({
+        type: 'end',
+        usage: { input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 7 },
+      }),
+    ].join('\n');
+    expect(parseExternalSubagentOutput(grok)).toEqual({
+      result: 'grok streamed',
+      usage: {
+        inputOther: 100,
+        output: 7,
+        inputCacheRead: 20,
+        inputCacheCreation: 0,
+      },
+    });
+  });
+
   it('reports non-zero exits and aborts a running process', async () => {
     const failing = {
       ...nodeRoute,

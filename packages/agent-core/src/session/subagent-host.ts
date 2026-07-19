@@ -40,7 +40,9 @@ import {
   materializeBackendArgs,
   resolveSubagentRoute,
   parseExternalSubagentOutput,
+  parseExternalSubagentStreamLine,
   wrapExternalSubagentPrompt,
+  type ExternalSubagentUsage,
   type ResolvedSubagentRoute,
 } from './subagent-routing';
 import SUMMARY_CONTINUATION_PROMPT from './summary-continuation.md?raw';
@@ -214,13 +216,26 @@ export class SessionSubagentHost {
         runOptions.signal.throwIfAborted();
         this.emitSubagentStarted(parent, id);
         runOptions.onReady?.();
-        const completion = await runExternalSubagent(route, parent.config.cwd, wrapExternalSubagentPrompt(profileName, runOptions.prompt), runOptions.signal, (stderr) => {
-          this.session.log.warn('external subagent stderr', {
-            subagentId: id,
-            backend: route.backendName,
-            stderr,
-          });
-        });
+        const completion = await runExternalSubagent(
+          route,
+          parent.config.cwd,
+          wrapExternalSubagentPrompt(profileName, runOptions.prompt),
+          runOptions.signal,
+          (stderr) => {
+            this.session.log.warn('external subagent stderr', {
+              subagentId: id,
+              backend: route.backendName,
+              stderr,
+            });
+          },
+          (usage) => {
+            parent.emitEvent({
+              type: 'subagent.progress',
+              subagentId: id,
+              usage,
+            });
+          },
+        );
         parent.emitEvent({
           type: 'subagent.completed',
           subagentId: id,
@@ -622,6 +637,7 @@ export async function runExternalSubagent(
   prompt: string,
   signal: AbortSignal,
   onStderr: (stderr: string) => void,
+  onUsage?: (usage: ExternalSubagentUsage) => void,
 ): Promise<SubagentCompletion> {
   signal.throwIfAborted();
   let promptDirectory: string | undefined;
@@ -651,7 +667,41 @@ export async function runExternalSubagent(
     let settled = false;
     let abortReason: unknown;
     let stdinError: unknown;
+    let stdoutLineBuffer = '';
+    let lastReportedUsage: ExternalSubagentUsage | undefined;
+    const usageByKey = new Map<string, ExternalSubagentUsage>();
+    let anonymousUsage: ExternalSubagentUsage | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const reportUsage = (usage: ExternalSubagentUsage): void => {
+      if (
+        lastReportedUsage?.inputOther === usage.inputOther &&
+        lastReportedUsage.output === usage.output &&
+        lastReportedUsage.inputCacheRead === usage.inputCacheRead &&
+        lastReportedUsage.inputCacheCreation === usage.inputCacheCreation
+      ) return;
+      lastReportedUsage = usage;
+      onUsage?.(usage);
+    };
+    const processStdoutLine = (line: string): void => {
+      const update = parseExternalSubagentStreamLine(line);
+      if (update?.usage === undefined) return;
+      if (update.finalUsage === true) {
+        reportUsage(update.usage);
+        return;
+      }
+      if (update.usageKey !== undefined) usageByKey.set(update.usageKey, update.usage);
+      else anonymousUsage = update.usage;
+      const usages = [...usageByKey.values(), ...(anonymousUsage === undefined ? [] : [anonymousUsage])];
+      reportUsage(usages.reduce<ExternalSubagentUsage>(
+        (total, usage) => ({
+          inputOther: total.inputOther + usage.inputOther,
+          output: total.output + usage.output,
+          inputCacheRead: total.inputCacheRead + usage.inputCacheRead,
+          inputCacheCreation: total.inputCacheCreation + usage.inputCacheCreation,
+        }),
+        { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+      ));
+    };
     const cleanup = (): void => {
       signal.removeEventListener('abort', onAbort);
       if (killTimer !== undefined) clearTimeout(killTimer);
@@ -661,6 +711,7 @@ export async function runExternalSubagent(
       if (settled) return;
       settled = true;
       cleanup();
+      if (stdoutLineBuffer.length > 0) processStdoutLine(stdoutLineBuffer);
       if (stderr.length > 0) onStderr(stderr);
       if (error !== undefined) reject(error);
       else resolve(parseExternalSubagentOutput(stdout));
@@ -677,6 +728,10 @@ export async function runExternalSubagent(
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
+      stdoutLineBuffer += chunk;
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() ?? '';
+      for (const line of lines) processStdoutLine(line);
     });
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
