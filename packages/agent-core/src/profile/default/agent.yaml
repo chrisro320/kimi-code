@@ -41,3 +41,7 @@ subagents:
     description: Fast codebase exploration with prompt-enforced read-only behavior.
   plan:
     description: Read-only implementation planning and architecture design.
+  reviewer:
+    description: Read-only code review focused on correctness, security, regressions, and test gaps.
+  frontend-artist:
+    description: Frontend implementation plus visual, game-art, and media asset production.

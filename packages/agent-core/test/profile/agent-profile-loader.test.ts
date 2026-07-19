@@ -165,6 +165,12 @@ describe('default agent profiles', () => {
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['plan']).toBe(
       DEFAULT_AGENT_PROFILES['plan'],
     );
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['reviewer']).toBe(
+      DEFAULT_AGENT_PROFILES['reviewer'],
+    );
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['frontend-artist']).toBe(
+      DEFAULT_AGENT_PROFILES['frontend-artist'],
+    );
 
     expect(DEFAULT_AGENT_PROFILES['agent']?.tools).toEqual(
       expect.arrayContaining([
@@ -205,6 +211,9 @@ describe('default agent profiles', () => {
     ]);
     expect(DEFAULT_AGENT_PROFILES['explore']?.tools).not.toContain('Write');
     expect(DEFAULT_AGENT_PROFILES['plan']?.tools).not.toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Write');
+    expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Edit');
+    expect(DEFAULT_AGENT_PROFILES['frontend-artist']?.tools).toContain('Write');
   });
 
   it('renders the model-invocable skill listing for bundled prompts', () => {

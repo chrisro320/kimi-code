@@ -4,7 +4,7 @@ import { ChoicePickerComponent, type ChoiceOption } from '../components/dialogs/
 import { formatErrorMessage } from '../utils/event-payload';
 import type { SlashCommandHost } from './dispatch';
 
-const DEFAULT_PROFILES = ['coder', 'explore', 'plan'] as const;
+const DEFAULT_PROFILES = ['coder', 'explore', 'frontend-artist', 'plan', 'reviewer'] as const;
 const INTERNAL_BACKEND = 'kimi';
 
 type RouteChoice =
@@ -16,7 +16,7 @@ type ProfileName = string;
 export async function handleSubagentCommand(host: SlashCommandHost, args: string): Promise<void> {
   const requestedProfile = args.trim();
   if (requestedProfile.includes(' ')) {
-    host.showError('Usage: /subagent [coder|explore|plan]');
+    host.showError('Usage: /subagent [coder|explore|frontend-artist|plan|reviewer]');
     return;
   }
 

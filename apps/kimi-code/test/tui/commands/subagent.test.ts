@@ -76,8 +76,12 @@ describe('handleSubagentCommand', () => {
     const { host, harness, session } = makeHost();
 
     await handleSubagentCommand(host, '');
-    expect(picker(host).render(100).join('\n')).toContain('Select subagent type');
-    picker(host).handleInput(ENTER);
+    const profilePicker = picker(host);
+    const profilePickerText = profilePicker.render(100).join('\n');
+    expect(profilePickerText).toContain('Select subagent type');
+    expect(profilePickerText).toContain('frontend-artist');
+    expect(profilePickerText).toContain('reviewer');
+    profilePicker.handleInput(ENTER);
     expect(picker(host, 1).render(100).join('\n')).toContain('Configure subagent: coder');
     picker(host, 1).handleInput(ENTER);
 
