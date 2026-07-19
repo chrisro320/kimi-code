@@ -45,6 +45,10 @@ export class BackgroundAgentStatusComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    if (this.data.phase !== 'started' && this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
     const safeWidth = Math.max(0, width);
     if (safeWidth <= 0) return [''];
 
