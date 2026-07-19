@@ -6,6 +6,8 @@ import { runExternalSubagent, SessionSubagentHost } from '../../src/session/suba
 import {
   materializeBackendArgs,
   resolveSubagentRoute,
+  parseExternalSubagentOutput,
+  wrapExternalSubagentPrompt,
   type ResolvedSubagentRoute,
 } from '../../src/session/subagent-routing';
 
@@ -59,6 +61,12 @@ describe('resolveSubagentRoute', () => {
     ]);
   });
 
+  it('adds lightweight identity context for external subagents', () => {
+    expect(wrapExternalSubagentPrompt('explore', 'Find the config loader.')).toBe(
+      'You are a subagent delegated by a parent Kimi Code agent. Your profile is "explore". Complete the delegated task below and return your result to the parent agent, not directly to the end user.\n\nFind the config loader.',
+    );
+  });
+
   it('rejects unknown model aliases, backends, and placeholders', () => {
     expect(() => resolveSubagentRoute(config, 'coder', 'missing')).toThrow(
       'not defined in config.models',
@@ -107,8 +115,41 @@ describe('runExternalSubagent', () => {
       new AbortController().signal,
       (chunk) => stderr.push(chunk),
     );
-    expect(result).toBe(`${process.cwd()}\nhello external`);
+    expect(result).toEqual({ result: `${process.cwd()}\nhello external` });
     expect(stderr).toEqual(['diagnostic']);
+  });
+
+  it('parses Claude and Grok JSON usage while preserving plain output fallback', () => {
+    expect(parseExternalSubagentOutput(JSON.stringify({
+      result: 'claude result',
+      usage: {
+        input_tokens: 8,
+        cache_creation_input_tokens: 36646,
+        cache_read_input_tokens: 120740,
+        output_tokens: 876,
+      },
+    }))).toEqual({
+      result: 'claude result',
+      usage: {
+        inputOther: 8,
+        output: 876,
+        inputCacheRead: 120740,
+        inputCacheCreation: 36646,
+      },
+    });
+    expect(parseExternalSubagentOutput(JSON.stringify({
+      text: 'grok result',
+      usage: { input_tokens: 19770, output_tokens: 22, total_tokens: 19920 },
+    }))).toEqual({
+      result: 'grok result',
+      usage: {
+        inputOther: 19770,
+        output: 22,
+        inputCacheRead: 0,
+        inputCacheCreation: 0,
+      },
+    });
+    expect(parseExternalSubagentOutput('plain output')).toEqual({ result: 'plain output' });
   });
 
   it('reports non-zero exits and aborts a running process', async () => {

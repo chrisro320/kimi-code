@@ -747,6 +747,7 @@ export interface SubagentSpawnedEvent {
   readonly type: 'subagent.spawned';
   readonly subagentId: string;
   readonly subagentName: string;
+  readonly backendName?: string;
   readonly parentToolCallId: string;
   readonly parentToolCallUuid?: string;
   readonly parentAgentId?: string;

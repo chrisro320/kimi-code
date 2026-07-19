@@ -130,6 +130,7 @@ export interface BackgroundAgentMetadata {
   readonly parentToolCallId: string;
   readonly agentName?: string;
   readonly description?: string;
+  readonly startedAtMs?: number;
 }
 
 export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed';
@@ -138,6 +139,9 @@ export interface BackgroundAgentStatusData {
   readonly phase: BackgroundAgentStatusPhase;
   readonly headline: string;
   readonly detail?: string;
+  readonly startedAtMs?: number;
+  readonly endedAtMs?: number;
+  readonly tokens?: number;
 }
 
 export interface CompactionTranscriptData {

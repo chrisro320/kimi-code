@@ -55,6 +55,7 @@ export class SubAgentEventHandler {
   readonly subagentInfo: Map<string, SubagentInfo> = new Map();
   private readonly agentSwarmProgress: Map<string, AgentSwarmProgressComponent> = new Map();
   backgroundAgentMetadata: Map<string, BackgroundAgentMetadata> = new Map();
+  private readonly backgroundAgentEntries = new Map<string, TranscriptEntry>();
 
   constructor(
     private readonly host: SessionEventHost,
@@ -64,6 +65,7 @@ export class SubAgentEventHandler {
   resetRuntimeState(): void {
     this.subagentInfo.clear();
     this.backgroundAgentMetadata.clear();
+    this.backgroundAgentEntries.clear();
     this.clearAgentSwarmProgress();
   }
 
@@ -246,7 +248,7 @@ export class SubAgentEventHandler {
     if (event.runInBackground) {
       const meta = this.buildBackgroundAgentMetadata(event);
       this.backgroundAgentMetadata.set(event.subagentId, meta);
-      this.appendBackgroundAgentEntry('started', meta);
+      this.backgroundAgentEntries.set(event.subagentId, this.appendBackgroundAgentEntry('started', meta));
       this.deps.syncBackgroundAgentBadge();
       return;
     }
@@ -288,9 +290,12 @@ export class SubAgentEventHandler {
       if (taskId !== undefined) {
         this.deps.backgroundTaskTranscriptedTerminal.add(taskId);
       }
-      const extras =
-        event.resultSummary === undefined ? undefined : { resultSummary: event.resultSummary };
-      this.appendBackgroundAgentEntry('completed', backgroundMeta, extras);
+      const extras = {
+        resultSummary: event.resultSummary,
+        usage: event.usage,
+        endedAtMs: Date.now(),
+      };
+      this.updateBackgroundAgentEntry(event.subagentId, 'completed', backgroundMeta, extras);
       return;
     }
 
@@ -327,7 +332,10 @@ export class SubAgentEventHandler {
       if (taskId !== undefined) {
         this.deps.backgroundTaskTranscriptedTerminal.add(taskId);
       }
-      this.appendBackgroundAgentEntry('failed', backgroundMeta, { error: event.error });
+      this.updateBackgroundAgentEntry(event.subagentId, 'failed', backgroundMeta, {
+        error: event.error,
+        endedAtMs: Date.now(),
+      });
       return;
     }
 
@@ -365,16 +373,17 @@ export class SubAgentEventHandler {
     return {
       agentId: event.subagentId,
       parentToolCallId: event.parentToolCallId,
-      agentName: event.subagentName,
+      agentName: event.backendName ?? event.subagentName,
       description: typeof description === 'string' ? description : undefined,
+      startedAtMs: Date.now(),
     };
   }
 
   private appendBackgroundAgentEntry(
     phase: 'started' | 'completed' | 'failed',
     meta: BackgroundAgentMetadata,
-    extras: { resultSummary?: string; error?: string } | undefined = undefined,
-  ): void {
+    extras: { resultSummary?: string; error?: string; usage?: import('@moonshot-ai/kimi-code-sdk').TokenUsage; endedAtMs?: number } | undefined = undefined,
+  ): TranscriptEntry {
     const status = formatBackgroundAgentTranscript(phase, meta, extras);
     const entry: TranscriptEntry = {
       id: nextTranscriptId(),
@@ -386,6 +395,30 @@ export class SubAgentEventHandler {
       backgroundAgentStatus: status,
     };
     this.host.appendTranscriptEntry(entry);
+    return entry;
+  }
+
+  private updateBackgroundAgentEntry(
+    agentId: string,
+    phase: 'completed' | 'failed',
+    meta: BackgroundAgentMetadata,
+    extras: { resultSummary?: string; error?: string; usage?: import('@moonshot-ai/kimi-code-sdk').TokenUsage; endedAtMs?: number },
+  ): void {
+    const entry = this.backgroundAgentEntries.get(agentId);
+    if (entry === undefined) {
+      this.appendBackgroundAgentEntry(phase, meta, extras);
+      return;
+    }
+    const status = formatBackgroundAgentTranscript(phase, meta, extras);
+    entry.content = status.headline;
+    entry.detail = status.detail;
+    if (entry.backgroundAgentStatus !== undefined) {
+      Object.assign(entry.backgroundAgentStatus, status);
+    } else {
+      entry.backgroundAgentStatus = status;
+    }
+    this.backgroundAgentEntries.delete(agentId);
+    this.host.state.ui.requestRender();
   }
 
   private rememberSubagent(
@@ -393,7 +426,7 @@ export class SubAgentEventHandler {
   ): void {
     this.subagentInfo.set(event.subagentId, {
       parentToolCallId: event.parentToolCallId,
-      name: event.subagentName,
+      name: event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
       swarmIndex: event.swarmIndex,
     });
@@ -416,7 +449,7 @@ export class SubAgentEventHandler {
     if (tc === undefined) return;
     tc.onSubagentSpawned({
       agentId: event.subagentId,
-      agentName: event.subagentName,
+      agentName: event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
     });
   }

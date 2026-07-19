@@ -60,6 +60,63 @@ export function materializeBackendArgs(
   );
 }
 
+export function wrapExternalSubagentPrompt(profileName: string, prompt: string): string {
+  return `You are a subagent delegated by a parent Kimi Code agent. Your profile is "${profileName}". Complete the delegated task below and return your result to the parent agent, not directly to the end user.\n\n${prompt}`;
+}
+
+export interface ExternalSubagentCompletion {
+  readonly result: string;
+  readonly usage?: {
+    readonly inputOther: number;
+    readonly output: number;
+    readonly inputCacheRead: number;
+    readonly inputCacheCreation: number;
+  };
+}
+
+export function parseExternalSubagentOutput(stdout: string): ExternalSubagentCompletion {
+  const fallback = { result: stdout };
+  const text = stdout.trim();
+  if (text.length === 0) return fallback;
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return fallback;
+  }
+  if (typeof payload !== 'object' || payload === null) return fallback;
+
+  const record = payload as Record<string, unknown>;
+  const result =
+    typeof record['result'] === 'string'
+      ? record['result']
+      : typeof record['text'] === 'string'
+        ? record['text']
+        : undefined;
+  if (result === undefined) return fallback;
+
+  const usage = record['usage'];
+  if (typeof usage !== 'object' || usage === null) return { result };
+  const usageRecord = usage as Record<string, unknown>;
+  const number = (key: string): number | undefined =>
+    typeof usageRecord[key] === 'number' && Number.isFinite(usageRecord[key])
+      ? usageRecord[key]
+      : undefined;
+  const inputOther = number('input_tokens');
+  const output = number('output_tokens');
+  if (inputOther === undefined || output === undefined) return { result };
+  return {
+    result,
+    usage: {
+      inputOther,
+      output,
+      inputCacheRead: number('cache_read_input_tokens') ?? 0,
+      inputCacheCreation: number('cache_creation_input_tokens') ?? 0,
+    },
+  };
+}
+
 export function isExternalSubagentId(agentId: string): boolean {
   return agentId.startsWith(EXTERNAL_SUBAGENT_ID_PREFIX);
 }

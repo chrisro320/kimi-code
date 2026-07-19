@@ -2012,14 +2012,14 @@ export class KimiTUI {
           return tc;
         }
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus, () => this.state.ui.requestRender());
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)
           : new StatusMessageComponent(entry.content, entry.color);
       case 'status':
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus, () => this.state.ui.requestRender());
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)

@@ -754,6 +754,7 @@ export const subagentSpawnedEventSchema = z.object({
   type: z.literal('subagent.spawned'),
   subagentId: z.string(),
   subagentName: z.string(),
+  backendName: z.string().optional(),
   parentToolCallId: z.string(),
   parentToolCallUuid: z.string().optional(),
   parentAgentId: z.string().optional(),

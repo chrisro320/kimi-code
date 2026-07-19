@@ -36,6 +36,8 @@ import {
   isExternalSubagentId,
   materializeBackendArgs,
   resolveSubagentRoute,
+  parseExternalSubagentOutput,
+  wrapExternalSubagentPrompt,
   type ResolvedSubagentRoute,
 } from './subagent-routing';
 import SUMMARY_CONTINUATION_PROMPT from './summary-continuation.md?raw';
@@ -203,13 +205,13 @@ export class SessionSubagentHost {
   ): SubagentHandle {
     const id = `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
-      this.emitSubagentSpawned(parent, id, profileName, runOptions);
+      this.emitSubagentSpawned(parent, id, profileName, runOptions, route.backendName);
       try {
         await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
         runOptions.signal.throwIfAborted();
         this.emitSubagentStarted(parent, id);
         runOptions.onReady?.();
-        const result = await runExternalSubagent(route, parent.config.cwd, runOptions.prompt, runOptions.signal, (stderr) => {
+        const completion = await runExternalSubagent(route, parent.config.cwd, wrapExternalSubagentPrompt(profileName, runOptions.prompt), runOptions.signal, (stderr) => {
           this.session.log.warn('external subagent stderr', {
             subagentId: id,
             backend: route.backendName,
@@ -219,10 +221,11 @@ export class SessionSubagentHost {
         parent.emitEvent({
           type: 'subagent.completed',
           subagentId: id,
-          resultSummary: result,
+          resultSummary: completion.result,
+          usage: completion.usage,
         });
-        this.triggerSubagentStop(parent, profileName, result);
-        return { result };
+        this.triggerSubagentStop(parent, profileName, completion.result);
+        return completion;
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
         throw error;
@@ -565,11 +568,13 @@ export class SessionSubagentHost {
     childId: string,
     profileName: string,
     options: RunSubagentOptions,
+    backendName?: string,
   ): void {
     parent.emitEvent({
       type: 'subagent.spawned',
       subagentId: childId,
       subagentName: profileName,
+      backendName,
       parentToolCallId: options.parentToolCallId,
       parentToolCallUuid: options.parentToolCallUuid,
       parentAgentId: this.ownerAgentId,
@@ -614,7 +619,7 @@ export function runExternalSubagent(
   prompt: string,
   signal: AbortSignal,
   onStderr: (stderr: string) => void,
-): Promise<string> {
+): Promise<SubagentCompletion> {
   signal.throwIfAborted();
   let child: ChildProcessWithoutNullStreams;
   try {
@@ -629,7 +634,7 @@ export function runExternalSubagent(
     return Promise.reject(error);
   }
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<SubagentCompletion>((resolve, reject) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -646,7 +651,7 @@ export function runExternalSubagent(
       cleanup();
       if (stderr.length > 0) onStderr(stderr);
       if (error !== undefined) reject(error);
-      else resolve(stdout);
+      else resolve(parseExternalSubagentOutput(stdout));
     };
     const kill = (): void => {
       killTimer ??= killExternalProcess(child);
