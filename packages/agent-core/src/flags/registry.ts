@@ -32,6 +32,15 @@ export const FLAG_DEFINITIONS = [
     default: false,
     surface: 'core',
   },
+  {
+    id: 'subagent-worktree-isolation',
+    title: 'Editing subagent worktree isolation',
+    description:
+      'Run editing-capable subagents (internal and external) in a temporary detached git worktree seeded from the current uncommitted state, then apply their changes back only when they stay within the declared dispatch scope and the source has not diverged. On scope violation, baseline mismatch, abort, or timeout, the workspace is left untouched and recovery data is preserved instead.',
+    env: 'KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION',
+    default: false,
+    surface: 'core',
+  },
 ] as const satisfies readonly FlagDefinitionInput[];
 
 /** Literal union of registered flag ids. */

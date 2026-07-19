@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Agent, AgentOptions } from '../../src/agent';
 import { AGENT_WIRE_PROTOCOL_VERSION } from '../../src/agent/records';
+import type { KimiConfig } from '../../src/config';
+import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
 import { Session } from '../../src/session';
@@ -19,6 +21,7 @@ import {
   resolveSubagentTimeoutMs,
   type QueuedSubagentTask,
 } from '../../src/session/subagent-host';
+import { acquireSubagentWorktree } from '../../src/session/subagent-worktree';
 import { abortError, userCancellationReason } from '../../src/utils/abort';
 import { testAgent, type AgentTestContext } from '../agent/harness/agent';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
@@ -29,6 +32,14 @@ import { executeTool } from '../tools/fixtures/execute-tool';
 // wiring (explore subagents get the block prepended, others do not).
 vi.mock('../../src/session/git-context', () => ({
   collectGitContext: vi.fn(async () => ''),
+}));
+
+// Worktree isolation service is exercised in subagent-worktree.test.ts; here
+// it is mocked (default: no isolation) so subagent-host tests stay
+// deterministic and assert only the wiring in `SessionSubagentHost worktree
+// isolation` below.
+vi.mock('../../src/session/subagent-worktree', () => ({
+  acquireSubagentWorktree: vi.fn(async () => null),
 }));
 
 const signal = new AbortController().signal;
@@ -1169,6 +1180,450 @@ describe('SessionSubagentHost', () => {
   });
 });
 
+describe('SessionSubagentHost worktree isolation', () => {
+  afterEach(() => {
+    vi.mocked(acquireSubagentWorktree).mockReset().mockResolvedValue(null);
+  });
+
+  it('does not attempt isolation when the experimental flag is disabled (default)', async () => {
+    const parent = testAgent();
+    parent.configure();
+
+    const child = testAgent();
+    child.configure();
+    const summary =
+      'Implemented the requested change in full and verified it against the existing test suite, leaving a thorough and complete summary so the parent agent can proceed without repeating any of the finished investigation work.';
+    child.mockNextResponse({ type: 'text', text: summary });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Implement the fix',
+      description: 'Fix bug',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(acquireSubagentWorktree).not.toHaveBeenCalled();
+    expect(child.agent.config.cwd).toBe(parent.agent.config.cwd);
+  });
+
+  it('does not attempt isolation for a non-editing-capable profile even when the flag is enabled', async () => {
+    const parent = testAgent({
+      experimentalFlags: new FlagResolver({
+        KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: 'true',
+      }),
+    });
+    parent.configure();
+
+    const child = testAgent();
+    child.configure({ tools: ['Read'] });
+    child.mockNextResponse({
+      type: 'text',
+      text: 'Explored the codebase thoroughly and reported back a detailed enough summary of the relevant files and structure for the parent agent to proceed with confidence, covering every directory that mattered for this investigation and calling out the pieces most relevant to the follow-up work.',
+    });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_agent',
+      prompt: 'Look around',
+      description: 'Explore',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(acquireSubagentWorktree).not.toHaveBeenCalled();
+  });
+
+  it('runs an editing-capable internal subagent in the isolated worktree cwd and finishes it on success', async () => {
+    const parent = testAgent({
+      experimentalFlags: new FlagResolver({
+        KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: 'true',
+      }),
+    });
+    parent.configure();
+
+    const child = testAgent();
+    child.configure();
+    const summary =
+      'Implemented the requested change inside the isolated worktree and verified it against the existing test suite, leaving a thorough and complete summary so the parent agent can proceed without repeating any of the finished investigation work.';
+    child.mockNextResponse({ type: 'text', text: summary });
+
+    const finish = vi.fn(async () => ({ applied: true }));
+    const isolatedCwd = '/tmp/kimi-subagent-worktree/isolated-cwd';
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: isolatedCwd, finish });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Implement the fix',
+      description: 'Fix bug',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(acquireSubagentWorktree).toHaveBeenCalledWith(
+      parent.agent.kaos,
+      parent.agent.config.cwd,
+      expect.objectContaining({ scope: undefined }),
+    );
+    expect(child.agent.config.cwd).toBe(isolatedCwd);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({ kind: 'success' });
+  });
+
+  it('finishes the isolated worktree as incomplete when the child turn is aborted', async () => {
+    const parent = testAgent({
+      experimentalFlags: new FlagResolver({
+        KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: 'true',
+      }),
+    });
+    parent.configure();
+    parent.newEvents();
+
+    const controller = new AbortController();
+    const child = testAgent();
+    child.mockNextResponse({ type: 'text', text: 'I will run Bash.' }, bashCall());
+
+    const finish = vi.fn(async () => ({ applied: false, reason: 'incomplete' }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: '/tmp/kimi-subagent-worktree/isolated', finish });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Keep working',
+      description: 'Long task',
+      runInBackground: false,
+      signal: controller.signal,
+    });
+
+    await child.untilApprovalRequest();
+    controller.abort(userCancellationReason());
+    await expect(handle.completion).rejects.toThrow();
+
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({ kind: 'incomplete' });
+  });
+});
+
+describe('SessionSubagentHost route pools', () => {
+  const CONTINUATION_SAFE_SUMMARY_SUFFIX =
+    ' The summary stays long enough to skip the automatic continuation retry that pads overly short subagent handoffs before returning them to the parent, since anything under two hundred characters triggers one extra follow-up turn asking for more detail.';
+
+  it('rotates coder spawns across a weighted pool of routes and releases slots on completion', async () => {
+    const config: KimiConfig = {
+      providers: {},
+      models: {
+        fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+        precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
+      },
+      subagent: {
+        pools: {
+          coder: [
+            { backend: 'kimi', model: 'fast', weight: 3 },
+            { backend: 'kimi', model: 'precise', weight: 1 },
+          ],
+        },
+      },
+    };
+
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent({
+      initialConfig: {
+        providers: { local: { type: 'openai', apiKey: 'test-key' } },
+        models: {
+          fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+          precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
+        },
+      },
+    });
+    child.configure();
+
+    const session = fakeSession(parent.agent, child.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const pickedModels: (string | undefined)[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      child.mockNextResponse({
+        type: 'text',
+        text: `Completed pooled spawn number ${String(i)}.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+      });
+      const handle = await host.spawn({
+        profileName: 'coder',
+        parentToolCallId: `call_${String(i)}`,
+        prompt: 'do pooled work',
+        description: 'do pooled work',
+        runInBackground: false,
+        signal,
+      });
+      await handle.completion;
+      pickedModels.push(child.agent.config.modelAlias);
+    }
+
+    // Deterministic smooth weighted round-robin (nginx-style) over a 3:1
+    // weight split resolves to A,A,B,A.
+    expect(pickedModels).toEqual(['fast', 'fast', 'precise', 'fast']);
+  });
+
+  it('ignores the pool for non-coder profiles and profiles without a configured pool', async () => {
+    const config: KimiConfig = {
+      providers: {},
+      models: {
+        fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+      },
+      subagent: {
+        pools: {
+          // Only `coder` pooling is wired; an `explore` pool must be ignored.
+          explore: [{ backend: 'kimi', model: 'fast' }],
+        },
+      },
+    };
+
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent();
+    child.configure();
+    child.mockNextResponse({
+      type: 'text',
+      text: `Explored the codebase.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+
+    const session = fakeSession(parent.agent, child.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    // No `subagent.routing.explore`, and the pool is gated to `coder` only,
+    // so the child inherits the parent's model exactly as before route
+    // pools existed.
+    expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
+  });
+
+  it('serializes coder spawns through a single-route pool and releases the slot on completion', async () => {
+    const config: KimiConfig = {
+      providers: {},
+      models: {
+        fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+      },
+      subagent: {
+        pools: {
+          coder: [{ backend: 'kimi', model: 'fast', maxConcurrency: 1 }],
+        },
+      },
+    };
+
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent({
+      initialConfig: {
+        providers: { local: { type: 'openai', apiKey: 'test-key' } },
+        models: {
+          fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+        },
+      },
+    });
+    child.configure();
+
+    const session = fakeSession(parent.agent, child.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    child.mockNextResponse({
+      type: 'text',
+      text: `First pooled spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+    const first = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_first',
+      prompt: 'first',
+      description: 'first',
+      runInBackground: false,
+      signal,
+    });
+
+    // The route slot is still held: the first spawn's turn has not settled
+    // yet, so a second spawn attempt against the same maxConcurrency=1 route
+    // must be rejected as exhausted rather than silently double-booking it.
+    await expect(
+      host.spawn({
+        profileName: 'coder',
+        parentToolCallId: 'call_second_too_soon',
+        prompt: 'second',
+        description: 'second',
+        runInBackground: false,
+        signal,
+      }),
+    ).rejects.toThrow('exhausted');
+
+    await first.completion;
+
+    // Completion releases the slot, so a later spawn can reuse the same
+    // single-entry pool.
+    child.mockNextResponse({
+      type: 'text',
+      text: `Second pooled spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+    const second = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_second',
+      prompt: 'second',
+      description: 'second',
+      runInBackground: false,
+      signal,
+    });
+    await expect(second.completion).resolves.toMatchObject({});
+  });
+
+  it('applies a one-shot work-card routeOverride without persisting it to config', async () => {
+    const config: KimiConfig = {
+      providers: {},
+      models: {
+        fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+        precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
+      },
+      subagent: {
+        routing: { coder: { model: 'fast' } },
+      },
+    };
+
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent({
+      initialConfig: {
+        providers: { local: { type: 'openai', apiKey: 'test-key' } },
+        models: {
+          fast: { provider: 'local', model: 'fast-model', maxContextSize: 128000 },
+          precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
+        },
+      },
+    });
+    child.configure();
+
+    const session = fakeSession(parent.agent, child.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    child.mockNextResponse({
+      type: 'text',
+      text: `Completed the overridden-route spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+    const overridden = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_override',
+      prompt: 'use the override',
+      description: 'use the override',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        workCard: {
+          id: 'card-1',
+          title: 'Override card',
+          goal: 'Use a one-shot route override',
+          acceptance: 'Runs on the overridden model',
+          routeOverride: { backend: 'kimi', model: 'precise' },
+        },
+      },
+    });
+    await overridden.completion;
+    expect(child.agent.config.modelAlias).toBe('precise');
+
+    child.mockNextResponse({
+      type: 'text',
+      text: `Completed the default-route spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+    const normal = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_normal',
+      prompt: 'no override this time',
+      description: 'no override this time',
+      runInBackground: false,
+      signal,
+    });
+    await normal.completion;
+    // The override was one-shot: config.subagent.routing.coder wins again.
+    expect(child.agent.config.modelAlias).toBe('fast');
+  });
+
+  it('resumes an external subagent through its recorded backend, not a re-derived pool pick', async () => {
+    const echoScript = (marker: string) => `process.stdout.write('${marker}');process.exit(0)`;
+    const config: KimiConfig = {
+      providers: {},
+      subagent: {
+        pools: {
+          // The pool would deterministically pick echo-a; the routeOverride
+          // below sends the initial spawn to echo-b instead, so a resume
+          // that incorrectly re-derived its route from the pool would
+          // observe echo-a and fail this assertion.
+          coder: [{ backend: 'echo-a' }],
+        },
+        backends: {
+          'echo-a': { command: process.execPath, args: ['-e', echoScript('FROM_A')] },
+          'echo-b': {
+            command: process.execPath,
+            args: ['-e', echoScript('FROM_B')],
+            resumeArgs: ['-e', echoScript('FROM_B_RESUMED')],
+          },
+        },
+      },
+    };
+
+    const parent = testAgent();
+    parent.configure();
+    const session = fakeSession(parent.agent, parent.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const spawned = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_external',
+      prompt: 'delegate externally',
+      description: 'delegate externally',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        workCard: {
+          id: 'card-external',
+          title: 'External override card',
+          goal: 'Route to echo-b instead of the pool pick',
+          acceptance: 'A later resume also targets echo-b',
+          routeOverride: { backend: 'echo-b' },
+        },
+      },
+    });
+    await expect(spawned.completion).resolves.toEqual({ result: 'FROM_B' });
+
+    const resumed = await host.resume(spawned.agentId, {
+      parentToolCallId: 'call_external_resume',
+      prompt: 'continue externally',
+      description: 'continue externally',
+      runInBackground: false,
+      signal,
+    });
+    await expect(resumed.completion).resolves.toEqual({ result: 'FROM_B_RESUMED' });
+  });
+});
+
 describe('Session resume permission parent chain', () => {
   it('restores subagent live-derived permission when metadata lists the child first', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kimi-permission-chain-'));
@@ -1577,6 +2032,7 @@ function fakeSession(
   parent: Agent,
   child: Agent,
   metadataAgents: Session['metadata']['agents'] = {},
+  config?: KimiConfig,
 ) {
   const agents = new Map<string, Agent>([['main', parent]]);
   if (metadataAgents['agent-0'] !== undefined) {
@@ -1584,7 +2040,7 @@ function fakeSession(
   }
   return {
     agents,
-    options: { kimiHomeDir: undefined },
+    options: { kimiHomeDir: undefined, config },
     metadata: {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',

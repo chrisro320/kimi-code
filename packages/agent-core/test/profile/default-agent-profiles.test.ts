@@ -45,7 +45,7 @@ describe('default agent profiles', () => {
     expect(agentTools).toEqual(
       expect.arrayContaining(['CreateGoal', 'GetGoal', 'SetGoalBudget', 'UpdateGoal']),
     );
-    for (const name of ['coder', 'coder-ex', 'explore', 'plan', 'reviewer', 'frontend-artist']) {
+    for (const name of ['coder', 'coder-ex', 'debugger', 'explore', 'reviewer', 'frontend-artist']) {
       const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
       expect(tools).not.toContain('CreateGoal');
       expect(tools).not.toContain('GetGoal');
@@ -72,9 +72,9 @@ describe('default agent profiles', () => {
       expect(prompt).toContain('- test-skill: does things');
     }
 
-    // explore/plan/reviewer lack the Skill tool, so neither the section heading
+    // explore/debugger/reviewer lack the Skill tool, so neither the section heading
     // nor the skill listing should appear in their prompts.
-    for (const name of ['explore', 'plan', 'reviewer']) {
+    for (const name of ['explore', 'debugger', 'reviewer']) {
       const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
       expect(tools).not.toContain('Skill');
       const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
@@ -90,7 +90,7 @@ describe('default agent profiles', () => {
     // {% if %} reconstruction of availability). This holds for the root `agent` too, not
     // just subagents. The cross-tool secret-file guard — built on the always-present
     // Read/Grep/Glob — stays shared.
-    for (const name of ['agent', 'coder', 'coder-ex', 'explore', 'plan', 'reviewer', 'frontend-artist']) {
+    for (const name of ['agent', 'coder', 'coder-ex', 'explore', 'debugger', 'reviewer', 'frontend-artist']) {
       const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
       expect(prompt).not.toContain('Launch multiple explore agents concurrently'); // Agent → agent.md + explore whenToUse
       expect(prompt).not.toContain('long-running shell commands as background tasks'); // background → bash.md
@@ -98,8 +98,8 @@ describe('default agent profiles', () => {
       expect(prompt).not.toContain('prefer entering plan mode first'); // EnterPlanMode → enter-plan-mode.md
       expect(prompt).not.toContain('call `TaskList` to re-enumerate'); // compaction recovery → task-list.md
       // The dedicated-tool routing must name only universally-present tools (Read/Glob/Grep).
-      // Write/Edit/Bash are absent from read-only profiles (plan has no Bash/Write/Edit;
-      // explore no Write/Edit), so naming them in the shared routing sentence would dangle —
+      // Write/Edit are absent from read-only profiles (explore/debugger/reviewer have
+      // Bash but no Write/Edit), so naming them in the shared routing sentence would dangle —
       // that routing lives in bash.md (echo>file→Write, sed→Edit, etc.), which ships with Bash.
       expect(prompt).not.toContain('`Write` / `Edit` to change files');
       expect(prompt).not.toContain('Keep `Bash` for genuine shell work');
@@ -111,12 +111,12 @@ describe('default agent profiles', () => {
   it('renders blast-radius and concrete-example guidance for root and subagents alike', () => {
     // These additions live in shared, ungated sections, so the root agent AND every
     // subagent that renders the coding guidelines must carry them verbatim.
-    for (const name of ['agent', 'coder', 'coder-ex', 'explore', 'plan', 'reviewer', 'frontend-artist']) {
+    for (const name of ['agent', 'coder', 'coder-ex', 'explore', 'debugger', 'reviewer', 'frontend-artist']) {
       const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
       // Reversibility / blast-radius principle generalized beyond the git rule.
       expect(prompt).toContain('reversibility and blast radius');
       expect(prompt).toContain('A one-time approval covers that one action');
-      // The "do local work freely" clause is role-scoped: read-only subagents (explore/plan)
+      // The "do local work freely" clause is role-scoped: read-only subagents (explore/debugger)
       // render this same paragraph, so it must not tell them editing files is free.
       expect(prompt).toContain('Local, reversible work your role permits');
       // Concrete one-line examples anchoring high-frequency abstract rules.

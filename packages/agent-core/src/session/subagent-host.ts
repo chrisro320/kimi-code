@@ -14,6 +14,12 @@ import type { Agent } from '../agent';
 import type { PromptOrigin } from '../agent/context';
 import { ErrorCodes } from '../errors';
 import { DenyAllPermissionPolicy } from '../agent/permission/policies/deny-all';
+import { isEditingCapableProfile } from '../agent/dispatch/profile';
+import type {
+  DispatchEscalationKind,
+  DispatchWaitOutcome,
+  DispatchWorkCard,
+} from '../agent/dispatch/controller';
 import { InMemoryAgentRecordPersistence } from '../agent/records';
 import { isAbortError } from '../loop/errors';
 import {
@@ -22,10 +28,15 @@ import {
   type ResolvedAgentProfile,
 } from '../profile';
 import {
+  isUserCancellation,
   linkAbortSignal,
   userCancellationReason,
 } from '../utils/abort';
 import { collectGitContext } from './git-context';
+import {
+  acquireSubagentWorktree,
+  type SubagentWorktreeHandle,
+} from './subagent-worktree';
 import type { Session } from './index';
 import {
   SubagentBatch,
@@ -34,13 +45,16 @@ import {
   type SubagentSuspendedEvent,
   type QueuedSubagentTask,
 } from './subagent-batch';
+import type { SubagentPoolRoute } from '../config/schema';
 import {
   EXTERNAL_SUBAGENT_ID_PREFIX,
   isExternalSubagentId,
   materializeBackendArgs,
+  resolveRouteByNames,
   resolveSubagentRoute,
   parseExternalSubagentOutput,
   parseExternalSubagentStreamLine,
+  SubagentRoutePool,
   wrapExternalSubagentPrompt,
   type ExternalSubagentUsage,
   type ResolvedSubagentRoute,
@@ -133,12 +147,26 @@ export interface RunSubagentOptions {
   readonly signal: AbortSignal;
   readonly onReady?: () => void;
   readonly suppressRateLimitFailureEvent?: boolean;
+  readonly dispatch?: DispatchSpawnMetadata;
+  readonly displayName?: string;
+}
+
+/** Optional dispatch metadata carried by a model-initiated Agent/AgentSwarm call (D5/D6/D7). */
+export interface DispatchSpawnMetadata {
+  readonly rationale?: string;
+  readonly scope?: readonly string[];
+  readonly qualityDeficiencies?: readonly string[];
+  readonly reviewReason?: string;
+  readonly workCard?: DispatchWorkCard;
 }
 
 export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
   readonly modelAlias?: string;
+  readonly dispatch?: DispatchSpawnMetadata;
+  /** Enforce proactive-dispatch invariants for a model-issued tool call. */
+  readonly enforceDispatch?: boolean;
 }
 
 type SubagentCompletion = {
@@ -163,6 +191,13 @@ export class SessionSubagentHost {
     }
   >();
 
+  /**
+   * One weighted round-robin pool per pooled profile (currently only
+   * `coder`), held for the life of this host so rotation state and
+   * per-route concurrency persist across every spawn in the session.
+   */
+  private readonly routePools = new Map<string, SubagentRoutePool>();
+
   constructor(
     private readonly session: Session,
     private readonly ownerAgentId: string,
@@ -173,34 +208,217 @@ export class SessionSubagentHost {
 
     const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
     const profile = this.resolveProfile(parent, options.profileName);
-    const route = resolveSubagentRoute(
-      this.session.options.config ?? { providers: {} },
-      profile.name,
-      options.modelAlias,
-    );
-    if (route.kind === 'external') {
-      return this.spawnExternal(parent, profile.name, route, options);
-    }
-    const { id, agent } = await this.session.createAgent(
-      { type: 'sub', generate: parent.rawGenerate },
-      { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
-    );
-    const completion = this.runWithActiveChild(id, options, async (runOptions) => {
-      this.emitSubagentSpawned(parent, id, profile.name, runOptions);
-      try {
-        await this.configureChild(parent, agent, profile, route.modelAlias);
-        return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
-      } catch (error) {
-        this.emitSubagentFailed(parent, id, runOptions, error);
-        throw error;
+    const reservation = await this.reserveDispatchSlot(parent, profile, options);
+    const reservationId = reservation?.reservationId;
+    const displayName = reservation?.displayName;
+    const runOptions =
+      displayName === undefined ? options : { ...options, displayName, dispatch: options.dispatch };
+    const enforceIsolation = options.enforceDispatch === true;
+
+    let handle: SubagentHandle;
+    let releasePoolSlot: (() => void) | undefined;
+    try {
+      const resolved = this.resolveSpawnRoute(profile, options);
+      const route = resolved.route;
+      releasePoolSlot = resolved.releasePoolSlot;
+      if (route.kind === 'external') {
+        handle = this.spawnExternal(parent, profile.name, route, runOptions, randomUUID(), false, undefined, enforceIsolation);
+      } else {
+        const { id, agent } = await this.session.createAgent(
+          { type: 'sub', generate: parent.rawGenerate },
+          { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
+        );
+        const completion = this.runWithActiveChild(id, runOptions, async (childRunOptions) => {
+          this.emitSubagentSpawned(parent, id, profile.name, childRunOptions);
+          const worktree = await this.acquireWorktreeIfNeeded(
+            parent,
+            profile,
+            childRunOptions.dispatch?.scope,
+            enforceIsolation,
+          );
+          try {
+            await this.configureChild(parent, agent, profile, route.modelAlias, worktree?.cwd);
+            const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
+            if (worktree) await worktree.finish({ kind: 'success' });
+            return result;
+          } catch (error) {
+            if (worktree) await worktree.finish({ kind: 'incomplete' }).catch(() => {});
+            this.emitSubagentFailed(parent, id, childRunOptions, error);
+            throw error;
+          }
+        });
+        handle = {
+          agentId: id,
+          profileName: profile.name,
+          resumed: false,
+          completion,
+        };
       }
-    });
+    } catch (error) {
+      releasePoolSlot?.();
+      if (reservationId !== undefined) parent.dispatchController.release(reservationId);
+      throw error;
+    }
+    if (reservationId === undefined && releasePoolSlot === undefined) return handle;
     return {
-      agentId: id,
-      profileName: profile.name,
-      resumed: false,
-      completion,
+      ...handle,
+      completion: handle.completion.then(
+        (result) => {
+          if (reservationId !== undefined) parent.dispatchController.release(reservationId, 'completed');
+          releasePoolSlot?.();
+          return result;
+        },
+        (error: unknown) => {
+          if (reservationId !== undefined) {
+            parent.dispatchController.release(
+              reservationId,
+              isAbortError(error) || isUserCancellation(options.signal.reason) ? 'aborted' : 'failed',
+            );
+          }
+          releasePoolSlot?.();
+          throw error;
+        },
+      ),
     };
+  }
+
+  /**
+   * Resolves the route for a spawn, in priority order: (1) the work card's
+   * one-shot `routeOverride` — fully replaces backend/model for this call
+   * only, never persisted to config; (2) the profile's `coder` route pool
+   * (deterministic weighted round-robin, filtered by each route's
+   * `maxConcurrency`), when configured; (3) the legacy single
+   * `subagent.routing` entry. Non-`coder` profiles and profiles without a
+   * configured pool always take path (3), unchanged from before pooling
+   * existed.
+   */
+  private resolveSpawnRoute(
+    profile: ResolvedAgentProfile,
+    options: SpawnSubagentOptions,
+  ): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void } {
+    const config = this.session.options.config ?? { providers: {} };
+
+    const routeOverride = options.dispatch?.workCard?.routeOverride;
+    if (routeOverride !== undefined) {
+      return { route: resolveRouteByNames(config, routeOverride.backend, routeOverride.model) };
+    }
+
+    const poolRoutes = profile.name === 'coder' ? config.subagent?.pools?.[profile.name] : undefined;
+    if (poolRoutes === undefined || poolRoutes.length === 0) {
+      return { route: resolveSubagentRoute(config, profile.name, options.modelAlias) };
+    }
+
+    const pool = this.getRoutePool(profile.name, poolRoutes);
+    const acquired = pool.acquire();
+    try {
+      return {
+        route: resolveRouteByNames(config, acquired.route.backend, acquired.route.model),
+        releasePoolSlot: acquired.release,
+      };
+    } catch (error) {
+      acquired.release();
+      throw error;
+    }
+  }
+
+  private getRoutePool(profileName: string, routes: readonly SubagentPoolRoute[]): SubagentRoutePool {
+    let pool = this.routePools.get(profileName);
+    if (pool === undefined) {
+      pool = new SubagentRoutePool(routes);
+      this.routePools.set(profileName, pool);
+    }
+    return pool;
+  }
+
+  /**
+   * Pre-spawn guardrail gate (D4/D5): reserves per-turn spawn/concurrency
+   * budget and editing scope before a worker launches. Returns `undefined`
+   * for resumed/retried workers, which are not new dispatch decisions and are
+   * intentionally left outside this bookkeeping. Waits here (not in the
+   * caller) when the request only exceeds a queue-only concurrency limit;
+   * throws immediately for a structural rejection (malformed/outside/overlap/
+   * exhausted-cycle scope).
+   */
+  private async reserveDispatchSlot(
+    parent: Agent,
+    profile: ResolvedAgentProfile,
+    options: SpawnSubagentOptions,
+  ): Promise<{ reservationId: string; displayName?: string } | undefined> {
+    // `SessionSubagentHost.spawn` is also a public/internal compatibility API
+    // used for session bootstrap and explicit callers. Only a tool-issued
+    // dispatch opts into proactive-dispatch quotas and scope enforcement.
+    if (options.enforceDispatch !== true) return undefined;
+
+    const isEditingCapable = isEditingCapableProfile(profile);
+    const dispatch = options.dispatch;
+    if (profile.name === 'coder-ex' && (dispatch?.qualityDeficiencies?.length ?? 0) === 0) {
+      throw new Error(
+        'Dispatch rejected (missing-evidence): coder-ex requires at least one concrete quality deficiency.',
+      );
+    }
+    if (profile.name === 'reviewer' && (dispatch?.reviewReason?.trim().length ?? 0) === 0) {
+      throw new Error(
+        'Dispatch rejected (missing-review-reason): reviewer requires a concrete review reason.',
+      );
+    }
+    const scope = dispatch?.scope;
+    // Escalation identity comes from which profile is being spawned, not from
+    // model-declared intent text — the cycle gate is a runtime invariant, not
+    // a keyword classifier. A scope-less escalation/review (read-only
+    // reviewer with no declared scope) has no stable key to dedupe against,
+    // so it is intentionally left outside the one-cycle-per-scope cap; see
+    // the dispatch design notes.
+    const escalationKind: DispatchEscalationKind | undefined =
+      profile.name === 'coder-ex' ? 'coder-ex' : profile.name === 'reviewer' ? 'reviewer' : undefined;
+    const logicalScopeKey =
+      escalationKind !== undefined && scope !== undefined && scope.length > 0
+        ? [...scope].map((entry) => entry.trim()).sort().join('|')
+        : undefined;
+
+    const decision = parent.dispatchController.reserve({
+      requestId: randomUUID(),
+      isEditingCapable,
+      scope,
+      escalation: logicalScopeKey !== undefined ? escalationKind : undefined,
+      logicalScopeKey,
+      workCard: dispatch?.workCard,
+      displayProfile: dispatch?.workCard === undefined ? undefined : profile.name,
+    });
+    if (decision.kind === 'rejected') {
+      throw new Error(`Dispatch rejected (${decision.reason}): ${decision.message}`);
+    }
+    if (decision.kind === 'started') {
+      return { reservationId: decision.reservationId, displayName: decision.displayName };
+    }
+    await this.waitForDispatchStart(parent, decision.reservationId, options.signal);
+    return { reservationId: decision.reservationId, displayName: decision.displayName };
+  }
+
+  private async waitForDispatchStart(
+    parent: Agent,
+    reservationId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) {
+      parent.dispatchController.release(reservationId);
+      signal.throwIfAborted();
+    }
+    const outcome = await new Promise<DispatchWaitOutcome | 'aborted'>((resolve) => {
+      const onAbort = (): void => resolve('aborted');
+      signal.addEventListener('abort', onAbort, { once: true });
+      void parent.dispatchController.waitUntilStarted(reservationId).then((result) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      });
+    });
+    if (outcome === 'dependency-failed') {
+      throw new Error('Dispatch was not started because a work-card dependency failed.');
+    }
+    if (outcome === 'aborted') {
+      parent.dispatchController.release(reservationId);
+      signal.throwIfAborted();
+      throw new Error('Dispatch was cancelled before it started.');
+    }
   }
 
   private spawnExternal(
@@ -211,6 +429,7 @@ export class SessionSubagentHost {
     sessionId: string = randomUUID(),
     resumed = false,
     existingAgentId?: string,
+    enforceIsolation = false,
   ): SubagentHandle {
     const id = existingAgentId ?? `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
     if (existingAgentId === undefined) {
@@ -227,6 +446,12 @@ export class SessionSubagentHost {
     }
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profileName, runOptions, route.backendName);
+      const worktree = await this.acquireExternalWorktreeIfNeeded(
+        parent,
+        profileName,
+        runOptions,
+        enforceIsolation,
+      );
       try {
         await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
         runOptions.signal.throwIfAborted();
@@ -234,7 +459,7 @@ export class SessionSubagentHost {
         runOptions.onReady?.();
         const completion = await runExternalSubagent(
           route,
-          parent.config.cwd,
+          worktree?.cwd ?? parent.config.cwd,
           wrapExternalSubagentPrompt(profileName, runOptions.prompt),
           runOptions.signal,
           (stderr) => {
@@ -254,6 +479,7 @@ export class SessionSubagentHost {
           resumed ? route.backend.resumeArgs ?? route.backend.args ?? [] : route.backend.args ?? [],
           sessionId,
         );
+        if (worktree) await worktree.finish({ kind: 'success' });
         parent.emitEvent({
           type: 'subagent.completed',
           subagentId: id,
@@ -263,6 +489,7 @@ export class SessionSubagentHost {
         this.triggerSubagentStop(parent, profileName, completion.result);
         return completion;
       } catch (error) {
+        if (worktree) await worktree.finish({ kind: 'incomplete' }).catch(() => {});
         this.emitSubagentFailed(parent, id, runOptions, error);
         throw error;
       }
@@ -310,12 +537,15 @@ export class SessionSubagentHost {
       throw new Error(`External subagent "${agentId}" has no resumable session metadata.`);
     }
     const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
-    const route = resolveSubagentRoute(
+    // Resolve strictly by the backend/model recorded at spawn time. Resume
+    // must never re-enter route-pool selection or drift onto a different
+    // backend because `subagent.routing`/`subagent.pools` changed since.
+    const route = resolveRouteByNames(
       this.session.options.config ?? { providers: {} },
-      metadata.externalProfile,
+      metadata.externalBackend,
       metadata.externalModelAlias,
     );
-    if (route.kind !== 'external' || route.backendName !== metadata.externalBackend) {
+    if (route.kind !== 'external') {
       throw new Error(`External subagent "${agentId}" backend configuration is no longer available.`);
     }
     if (route.backend.resumeArgs === undefined) {
@@ -547,9 +777,10 @@ export class SessionSubagentHost {
     child: Agent,
     profile: ResolvedAgentProfile,
     modelAlias?: string,
+    isolatedCwd?: string,
   ): Promise<void> {
     child.config.update({
-      cwd: parent.config.cwd,
+      cwd: isolatedCwd ?? parent.config.cwd,
       modelAlias: modelAlias ?? parent.config.modelAlias,
       thinkingEffort: parent.config.thinkingEffort,
     });
@@ -561,6 +792,33 @@ export class SessionSubagentHost {
     );
     child.useProfile(profile, context, this.session.options.kimiHomeDir);
     child.tools.inheritUserTools(parent.tools);
+  }
+
+  /** Acquire an isolated worktree for every editing-capable dispatch. */
+  private async acquireWorktreeIfNeeded(
+    parent: Agent,
+    profile: ResolvedAgentProfile,
+    scope: readonly string[] | undefined,
+    enforceIsolation: boolean,
+  ): Promise<SubagentWorktreeHandle | null> {
+    const explicitlyEnabled = parent.experimentalFlags.enabled('subagent-worktree-isolation');
+    if ((!enforceIsolation && !explicitlyEnabled) || !isEditingCapableProfile(profile)) return null;
+    const worktree = await acquireSubagentWorktree(parent.kaos, parent.config.cwd, { scope });
+    if (worktree === null && (enforceIsolation || explicitlyEnabled)) {
+      throw new Error('Editing subagent isolation could not be created; dispatch was refused.');
+    }
+    return worktree;
+  }
+
+  /** Resolve the profile for the external-backend spawn path, then isolate editing dispatches. */
+  private async acquireExternalWorktreeIfNeeded(
+    parent: Agent,
+    profileName: string,
+    options: RunSubagentOptions,
+    enforceIsolation: boolean,
+  ): Promise<SubagentWorktreeHandle | null> {
+    const profile = this.resolveProfile(parent, profileName);
+    return this.acquireWorktreeIfNeeded(parent, profile, options.dispatch?.scope, enforceIsolation);
   }
 
   /**
@@ -663,6 +921,17 @@ export class SessionSubagentHost {
       description: options.description,
       swarmIndex: options.swarmIndex,
       runInBackground: options.runInBackground,
+      dispatch:
+        options.dispatch === undefined
+          ? undefined
+          : {
+              rationale: options.dispatch.rationale,
+              scope: options.dispatch.scope,
+              qualityDeficiencies: options.dispatch.qualityDeficiencies,
+              reviewReason: options.dispatch.reviewReason,
+              workCard: options.dispatch.workCard,
+              displayName: options.displayName,
+            },
     });
     parent.telemetry.track('subagent_created', {
       subagent_name: profileName,

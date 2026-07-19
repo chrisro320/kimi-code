@@ -17,6 +17,13 @@ const REFRESH_TTL_MS = 2_000;
 const SPAWN_TIMEOUT_MS = 1_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
+export interface CustomStatuslineAgentPayload {
+  readonly agentId: string;
+  readonly agentName: string;
+  readonly startedAtMs: number;
+  readonly tokens?: number;
+}
+
 export interface CustomStatuslinePayload {
   readonly weekly: ManagedUsageRow | null;
   readonly fiveHour: ManagedUsageRow | null;
@@ -25,6 +32,13 @@ export interface CustomStatuslinePayload {
   readonly totalTokens: number;
   readonly lastReplyAt: number | null;
   readonly streamingPhase: string;
+  /** Optional local-only dispatch observability; absent in older callers. */
+  readonly dispatch?: {
+    readonly active: number;
+    readonly queued: number;
+    readonly agents: readonly CustomStatuslineAgentPayload[];
+    readonly reportedTokens: number | null;
+  };
 }
 
 export interface CustomStatuslineCache {

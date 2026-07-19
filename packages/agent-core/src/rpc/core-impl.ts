@@ -92,6 +92,7 @@ import type {
   ClientTelemetryInfo,
   EmptyPayload,
   EnterSwarmPayload,
+  SetDispatchModePayload,
   GoalSnapshot,
   GoalToolResult,
   GlobalMcpServerConfig,
@@ -848,6 +849,14 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.sessionApi(sessionId).getSwarmMode(payload);
   }
 
+  setDispatchMode({ sessionId, ...payload }: SessionAgentPayload<SetDispatchModePayload>) {
+    return this.sessionApi(sessionId).setDispatchMode(payload);
+  }
+
+  getDispatchMode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).getDispatchMode(payload);
+  }
+
   beginCompaction({ sessionId, ...payload }: SessionAgentPayload<BeginCompactionPayload>) {
     return this.sessionApi(sessionId).beginCompaction(payload);
   }
@@ -1504,6 +1513,7 @@ async function resumeSessionResult(
     const permission = await api.getPermission({ agentId });
     const plan = await api.getPlan({ agentId });
     const swarmMode = await api.getSwarmMode({ agentId });
+    const dispatchMode = await api.getDispatchMode({ agentId });
     const usage = await api.getUsage({ agentId });
     agents[agentId] = {
       type: agent.type,
@@ -1513,6 +1523,7 @@ async function resumeSessionResult(
       permission,
       plan,
       swarmMode,
+      dispatchMode,
       usage,
       tools: await api.getTools({ agentId }),
       toolStore: agent.tools.storeData(),

@@ -14,6 +14,7 @@ import type {
   DetachBackgroundPayload,
   EmptyPayload,
   EnterSwarmPayload,
+  SetDispatchModePayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
   ImportContextPayload,
@@ -185,6 +186,14 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
 
   async getSwarmMode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
     return (await this.getAgent(agentId)).getSwarmMode(payload);
+  }
+
+  async setDispatchMode({ agentId, ...payload }: AgentScopedPayload<SetDispatchModePayload>) {
+    return (await this.getAgent(agentId)).setDispatchMode(payload);
+  }
+
+  async getDispatchMode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).getDispatchMode(payload);
   }
 
   async beginCompaction({ agentId, ...payload }: AgentScopedPayload<BeginCompactionPayload>) {

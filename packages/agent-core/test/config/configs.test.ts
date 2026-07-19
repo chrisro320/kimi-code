@@ -253,6 +253,53 @@ resume_args = ["--resume", "{session_id}", "--cwd", "{cwd}"]
     expect(parseConfigString(text, configPath).subagent).toEqual(config.subagent);
   });
 
+  it('round-trips a weighted subagent route pool', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'subagent-pools.toml');
+    const toml = `
+[providers.local]
+type = "openai"
+
+[models.fast]
+provider = "local"
+model = "fast-model"
+max_context_size = 128000
+
+[models.precise]
+provider = "local"
+model = "precise-model"
+max_context_size = 128000
+
+[[subagent.pools.coder]]
+backend = "kimi"
+model = "fast"
+weight = 3
+
+[[subagent.pools.coder]]
+backend = "custom-cli"
+model = "precise"
+max_concurrency = 2
+weight = 1
+
+[subagent.backends.custom-cli]
+command = "custom-agent"
+args = ["--model", "{model}", "--cwd", "{cwd}"]
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.subagent?.pools).toEqual({
+      coder: [
+        { backend: 'kimi', model: 'fast', weight: 3 },
+        { backend: 'custom-cli', model: 'precise', maxConcurrency: 2, weight: 1 },
+      ],
+    });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[[subagent.pools.coder]]');
+    expect(text).toContain('max_concurrency = 2');
+    expect(parseConfigString(text, configPath).subagent).toEqual(config.subagent);
+  });
+
   it('round-trips the [image] section', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'image-round-trip.toml');

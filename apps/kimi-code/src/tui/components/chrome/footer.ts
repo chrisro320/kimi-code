@@ -25,6 +25,7 @@ import {
 } from '#/utils/git/git-status';
 import {
   createCustomStatuslineCache,
+  type CustomStatuslineAgentPayload,
   type CustomStatuslineCache,
   type CustomStatuslinePayload,
 } from '#/utils/statusline/custom-statusline';
@@ -263,8 +264,16 @@ function ttlCell(
 }
 
 /** Builds the JSON payload piped to a `statusline.command` script's stdin. */
-export function buildCustomStatuslinePayload(state: AppState): CustomStatuslinePayload {
+export function buildCustomStatuslinePayload(
+  state: AppState,
+  activeAgents: readonly CustomStatuslineAgentPayload[] = [],
+  queuedAgents = 0,
+): CustomStatuslinePayload {
   const report = state.managedUsage ?? null;
+  const reportedTokens = activeAgents.reduce(
+    (sum, agent) => sum + (agent.tokens ?? 0),
+    0,
+  );
   return {
     weekly: report?.summary ?? null,
     fiveHour: report !== null ? pickFiveHourWindow(report.limits) : null,
@@ -273,6 +282,14 @@ export function buildCustomStatuslinePayload(state: AppState): CustomStatuslineP
     totalTokens: state.totalTokens ?? 0,
     lastReplyAt: state.lastReplyAt ?? null,
     streamingPhase: state.streamingPhase,
+    dispatch: {
+      active: activeAgents.length,
+      queued: Math.max(0, queuedAgents),
+      agents: activeAgents,
+      reportedTokens: activeAgents.some((agent) => agent.tokens !== undefined)
+        ? reportedTokens
+        : null,
+    },
   };
 }
 
@@ -338,6 +355,7 @@ export class FooterComponent implements Component {
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  private queuedBackgroundAgentCount = 0;
   private activeBackgroundAgents: readonly ActiveBackgroundAgentStatus[] = [];
   private backgroundAgentTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -387,9 +405,11 @@ export class FooterComponent implements Component {
     bashTasks: number;
     agentTasks: number;
     activeAgents?: readonly ActiveBackgroundAgentStatus[];
+    queuedAgents?: number;
   }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+    this.queuedBackgroundAgentCount = Math.max(0, counts.queuedAgents ?? 0);
     this.activeBackgroundAgents = counts.activeAgents ?? [];
     this.syncBackgroundAgentTimer();
   }
@@ -521,7 +541,9 @@ export class FooterComponent implements Component {
   private renderStatuslineRow(state: AppState, colors: ColorPalette, width: number): string | null {
     if (state.statusline?.enabled !== true) return null;
     const customLine =
-      this.customStatuslineCache?.getLine(buildCustomStatuslinePayload(state)) ?? null;
+      this.customStatuslineCache?.getLine(
+        buildCustomStatuslinePayload(state, this.activeBackgroundAgents, this.queuedBackgroundAgentCount),
+      ) ?? null;
     const agentCells = this.activeBackgroundAgents.map((agent) => formatActiveAgentStatus(agent, colors));
     const appendAgents = (base: string | null): string | null => {
       const cells = [...(base === null ? [] : [base]), ...agentCells];

@@ -498,6 +498,9 @@ export function projectContext(
       case 'swarm_mode.exit':
         swarm = { active: false };
         break;
+      case 'dispatch_mode.set':
+        // Not yet projected in the vis inspector; tracked at the session-status level.
+        break;
       // Kinds that don't affect the projected timeline / derived state,
       // including the observability records (request trace — `llm.*`,
       // `mcp.tools_discovered`), which are never part of context state:

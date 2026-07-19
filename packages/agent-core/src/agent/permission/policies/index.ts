@@ -3,6 +3,7 @@ import type { PermissionPolicy } from '../types';
 import { AgentSwarmExclusiveDenyPermissionPolicy } from './agent-swarm-exclusive-deny';
 import { AutoModeApprovePermissionPolicy } from './auto-mode-approve';
 import { AutoModeAskUserQuestionDenyPermissionPolicy } from './auto-mode-ask-user-question-deny';
+import { DispatchModeGuardPermissionPolicy } from './dispatch-mode-guard';
 import { DefaultToolApprovePermissionPolicy } from './default-tool-approve';
 import { ExitPlanModeReviewAskPermissionPolicy } from './exit-plan-mode-review-ask';
 import { FallbackAskPermissionPolicy } from './fallback-ask';
@@ -17,6 +18,7 @@ import { PlanModeToolApprovePermissionPolicy } from './plan-mode-tool-approve';
 import { PreToolCallHookPermissionPolicy } from './pre-tool-call-hook';
 import { SessionApprovalHistoryPermissionPolicy } from './session-approval-history';
 import { SwarmModeAgentSwarmApprovePermissionPolicy } from './swarm-mode-agent-swarm-approve';
+import { TaskStopConfirmationAskPermissionPolicy } from './task-stop-confirmation-ask';
 import {
   UserConfiguredAllowPermissionPolicy,
   UserConfiguredAskPermissionPolicy,
@@ -33,11 +35,16 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     new AgentSwarmExclusiveDenyPermissionPolicy(),
     // auto mode + AskUserQuestion → deny.
     new AutoModeAskUserQuestionDenyPermissionPolicy(agent),
+    // dispatch mode ask/off: Agent/AgentSwarm needs confirmation (D3); auto mode is a no-op here.
+    new DispatchModeGuardPermissionPolicy(agent),
     // plan mode: Write/Edit outside the plan file, or TaskStop → deny.
     new PlanModeGuardDenyPermissionPolicy(agent),
     // User-configured deny rule matches → deny.
     new UserConfiguredDenyPermissionPolicy(agent),
-    // auto mode → approve (any auto-mode block must be a deny rule above this).
+    // A model-issued TaskStop is destructive and must ask even in auto/yolo mode.
+    // Internal timeout/shutdown/safety paths call BackgroundManager directly.
+    new TaskStopConfirmationAskPermissionPolicy(agent),
+    // auto mode → approve (any auto-mode block must be a deny/ask rule above this).
     new AutoModeApprovePermissionPolicy(agent),
     // Approve-for-session memorized rule matches → approve. Runs before user-configured ask rules so an in-session grant beats a still-matching ask rule on later calls.
     new SessionApprovalHistoryPermissionPolicy(agent),

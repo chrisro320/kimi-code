@@ -18,6 +18,7 @@ import {
   type ToolCallRequest,
   type ToolCallResponse,
   type SwarmModeTrigger,
+  type DispatchMode,
 } from '@moonshot-ai/agent-core';
 import type { Kaos } from '@moonshot-ai/kaos';
 
@@ -109,6 +110,10 @@ export interface SetSessionPlanModeRpcInput extends SessionIdRpcInput {
 export type SetSessionSwarmModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SwarmModeTrigger })
   | (SessionIdRpcInput & { readonly enabled: false });
+
+export interface SetSessionDispatchModeRpcInput extends SessionIdRpcInput {
+  readonly mode: DispatchMode;
+}
 
 export interface ActivateSkillRpcInput extends SessionIdRpcInput {
   readonly name: string;
@@ -462,6 +467,23 @@ export abstract class SDKRpcClientBase {
     return this.exitSwarmMode(input);
   }
 
+  async setDispatchMode(input: SetSessionDispatchModeRpcInput): Promise<void> {
+    const rpc = await this.getRpc();
+    return rpc.setDispatchMode({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+      mode: input.mode,
+    });
+  }
+
+  async getDispatchMode(input: SessionIdRpcInput): Promise<DispatchMode> {
+    const rpc = await this.getRpc();
+    return rpc.getDispatchMode({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+    });
+  }
+
   async swarm(input: SessionPromptRpcInput): Promise<void> {
     await this.enterSwarmMode({ sessionId: input.sessionId, trigger: 'task' });
     return this.prompt(input);
@@ -567,6 +589,10 @@ export abstract class SDKRpcClientBase {
       sessionId: input.sessionId,
       agentId,
     });
+    const dispatchMode = await rpc.getDispatchMode({
+      sessionId: input.sessionId,
+      agentId,
+    });
     const usage = await rpc.getUsage({
       sessionId: input.sessionId,
       agentId,
@@ -582,6 +608,7 @@ export abstract class SDKRpcClientBase {
       permission: permission.mode,
       planMode: plan !== null,
       swarmMode,
+      dispatchMode,
       contextTokens,
       maxContextTokens,
       contextUsage,

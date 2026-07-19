@@ -607,6 +607,10 @@ describe('background tool descriptions', () => {
     expect(description).toMatch(/destructive/i);
     expect(description).toMatch(/cancel/i);
     expect(description).toMatch(/general[-\s]?purpose|generic/i);
+    expect(description).toMatch(/long runtime/i);
+    expect(description).toMatch(/empty buffered output/i);
+    expect(description).toMatch(/explicit user confirmation/i);
+    expect(description).toMatch(/resume/i);
     expect(description).not.toMatch(/bash[- ]?only/i);
   });
 });

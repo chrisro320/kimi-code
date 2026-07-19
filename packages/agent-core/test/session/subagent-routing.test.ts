@@ -5,8 +5,10 @@ import type { Session } from '../../src/session';
 import { runExternalSubagent, SessionSubagentHost } from '../../src/session/subagent-host';
 import {
   materializeBackendArgs,
+  resolveRouteByNames,
   resolveSubagentRoute,
   parseExternalSubagentOutput,
+  SubagentRoutePool,
   wrapExternalSubagentPrompt,
   type ResolvedSubagentRoute,
 } from '../../src/session/subagent-routing';
@@ -99,6 +101,90 @@ describe('resolveSubagentRoute', () => {
         'coder',
       ),
     ).toThrow('unsupported template placeholder');
+  });
+});
+
+describe('resolveRouteByNames', () => {
+  it('resolves the in-process route for undefined and for the "kimi" name', () => {
+    expect(resolveRouteByNames(config, undefined, undefined)).toEqual({
+      kind: 'internal',
+      modelAlias: undefined,
+    });
+    expect(resolveRouteByNames(config, 'kimi', 'fast')).toEqual({
+      kind: 'internal',
+      modelAlias: 'fast',
+    });
+  });
+
+  it('resolves an external route by explicit backend and model name', () => {
+    const route = resolveRouteByNames(config, 'custom-cli', 'precise');
+    expect(route).toMatchObject({ kind: 'external', backendName: 'custom-cli', modelAlias: 'precise' });
+  });
+
+  it('validates the model alias and backend name independently of subagent.routing', () => {
+    expect(() => resolveRouteByNames(config, undefined, 'missing')).toThrow(
+      'not defined in config.models',
+    );
+    expect(() => resolveRouteByNames(config, 'missing-backend', undefined)).toThrow(
+      'not defined in subagent.backends',
+    );
+  });
+});
+
+describe('SubagentRoutePool', () => {
+  it('requires at least one route entry', () => {
+    expect(() => new SubagentRoutePool([])).toThrow('at least one route entry');
+  });
+
+  it('rotates through routes using deterministic smooth weighted round robin', () => {
+    const pool = new SubagentRoutePool([
+      { backend: 'a', weight: 3 },
+      { backend: 'b', weight: 1 },
+    ]);
+    const picks = Array.from({ length: 4 }, () => {
+      const acquired = pool.acquire();
+      acquired.release();
+      return acquired.route.backend;
+    });
+    // nginx-style smooth weighted round robin over a 3:1 split: A,A,B,A.
+    expect(picks).toEqual(['a', 'a', 'b', 'a']);
+  });
+
+  it('treats a missing weight as 1', () => {
+    const pool = new SubagentRoutePool([{ backend: 'a' }, { backend: 'b' }]);
+    const picks = Array.from({ length: 4 }, () => {
+      const acquired = pool.acquire();
+      acquired.release();
+      return acquired.route.backend;
+    });
+    expect(picks).toEqual(['a', 'b', 'a', 'b']);
+  });
+
+  it('filters routes that are at their max_concurrency limit', () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }, { backend: 'b' }]);
+    const first = pool.acquire();
+    expect(first.route.backend).toBe('a');
+    // `a` is now saturated, so `b` is the only route with capacity left.
+    const second = pool.acquire();
+    expect(second.route.backend).toBe('b');
+  });
+
+  it('throws when every route is at its max_concurrency limit', () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    const acquired = pool.acquire();
+    expect(() => pool.acquire()).toThrow('exhausted');
+    acquired.release();
+    expect(pool.acquire().route.backend).toBe('a');
+  });
+
+  it('release is idempotent', () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    const first = pool.acquire();
+    first.release();
+    first.release();
+    const second = pool.acquire();
+    expect(() => pool.acquire()).toThrow('exhausted');
+    second.release();
   });
 });
 

@@ -400,7 +400,7 @@ export class SubAgentEventHandler {
     return {
       agentId: event.subagentId,
       parentToolCallId: event.parentToolCallId,
-      agentName: event.backendName ?? event.subagentName,
+      agentName: event.dispatch?.displayName ?? event.backendName ?? event.subagentName,
       description: typeof description === 'string' ? description : undefined,
       startedAtMs: Date.now(),
     };
@@ -453,7 +453,7 @@ export class SubAgentEventHandler {
   ): void {
     this.subagentInfo.set(event.subagentId, {
       parentToolCallId: event.parentToolCallId,
-      name: event.backendName ?? event.subagentName,
+      name: event.dispatch?.displayName ?? event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
       swarmIndex: event.swarmIndex,
     });

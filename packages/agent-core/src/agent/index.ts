@@ -51,6 +51,8 @@ import { ReplayBuilder, type ReplayBuilderOptions } from './replay';
 import { SkillManager } from './skill';
 import type { SkillRegistry } from './skill/types';
 import { SwarmMode } from './swarm';
+import { DispatchModeState } from './dispatch/mode';
+import { DispatchController } from './dispatch/controller';
 import { ToolManager } from './tool/index';
 import { TurnFlow } from './turn';
 import { KosongLLM } from './turn/kosong-llm';
@@ -63,6 +65,7 @@ import type { ToolServices } from '../tools/support/services';
 
 export type { AgentRecord, AgentRecordPersistence } from './records';
 export type { SwarmModeTrigger } from './swarm';
+export type { DispatchMode } from './dispatch/mode';
 export type { BuiltinTool, ToolInfo, ToolSource, UserToolRegistration } from './tool';
 export * from './goal';
 
@@ -142,6 +145,8 @@ export class Agent {
   readonly permission: PermissionManager;
   readonly planMode: PlanMode;
   readonly swarmMode: SwarmMode;
+  readonly dispatchMode: DispatchModeState;
+  readonly dispatchController: DispatchController;
   readonly usage: UsageRecorder;
   readonly skills: SkillManager | null;
   readonly tools: ToolManager;
@@ -221,6 +226,10 @@ export class Agent {
     this.permission = new PermissionManager(this, options.permission);
     this.planMode = new PlanMode(this);
     this.swarmMode = new SwarmMode(this);
+    this.dispatchMode = new DispatchModeState(this);
+    this.dispatchController = new DispatchController({
+      onQueuedCountChange: () => this.emitStatusUpdated(),
+    });
     this.usage = new UsageRecorder(this);
     this.skills = options.skills ? new SkillManager(this, options.skills) : null;
     this.tools = new ToolManager(this);
@@ -578,6 +587,12 @@ export class Agent {
       getSwarmMode: () => {
         return this.swarmMode.isActive;
       },
+      setDispatchMode: (payload) => {
+        this.dispatchMode.set(payload.mode);
+      },
+      getDispatchMode: () => {
+        return this.dispatchMode.mode;
+      },
       beginCompaction: (payload) => {
         this.fullCompaction.begin({ source: 'manual', instruction: payload.instruction });
       },
@@ -698,6 +713,8 @@ export class Agent {
       contextUsage,
       planMode: this.planMode.isActive,
       swarmMode: this.swarmMode.isActive,
+      dispatchMode: this.dispatchMode.mode,
+      dispatchQueued: this.dispatchController.queuedCount,
       permission: this.permission.mode,
       usage,
     });

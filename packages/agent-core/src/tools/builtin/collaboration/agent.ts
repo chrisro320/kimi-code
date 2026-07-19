@@ -23,6 +23,8 @@ import { ToolAccesses } from '../../../loop/tool-access';
 import { isAbortError } from '../../../loop/errors';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import type { ResolvedAgentProfile } from '../../../profile';
+import { isEditingCapableProfile } from '../../../agent/dispatch/profile';
+import { normalizeScopeList } from '../../../agent/dispatch/scope';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   formatSubagentTimeoutDescription,
@@ -79,6 +81,54 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'If true, return immediately without waiting for completion. Prefer false unless the task can run independently and there is a clear benefit to not waiting.',
       ),
+    dispatch: z
+      .object({
+        rationale: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe('Why this work is being delegated instead of done directly.'),
+        scope: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe(
+            'Workspace-relative files/directories/globs this editing dispatch may change. Required for an editing agent type (coder, coder-ex, frontend-artist); rejected if absolute, containing "..", or pointing at VCS metadata.',
+          ),
+        quality_deficiencies: z
+          .array(z.string().trim().min(1))
+          .optional()
+          .describe(
+            'Concrete deficiencies in the prior result that justify a coder-ex escalation (missed requirement, failed validation, damaged existing work, etc.).',
+          ),
+        review_reason: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe('Risk category or evidence that justifies dispatching reviewer.'),
+        work_card: z
+          .object({
+            id: z.string().trim().min(1),
+            title: z.string().trim().min(1),
+            goal: z.string().trim().min(1),
+            dependencies: z.array(z.string().trim().min(1)).optional(),
+            acceptance: z.string().trim().min(1),
+            forbidden_scope: z.array(z.string().trim().min(1)).optional(),
+            route_override: z
+              .object({
+                backend: z.string().trim().min(1),
+                model: z.string().trim().min(1).optional(),
+              })
+              .optional(),
+          })
+          .optional()
+          .describe('Structured work card for dependency scheduling and coder#N display.'),
+      })
+      .optional()
+      .describe(
+        'Optional dispatch metadata for a model-initiated call. Legacy calls without it remain accepted.',
+      ),
   }),
 );
 
@@ -112,7 +162,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
   constructor(
     private readonly subagentHost: SessionSubagentHost,
     private readonly backgroundManager: BackgroundManager,
-    subagents?: ResolvedAgentProfile['subagents'] | undefined,
+    private readonly subagents?: ResolvedAgentProfile['subagents'] | undefined,
     options?: {
       log?: Logger;
       allowBackground?: boolean | undefined;
@@ -206,6 +256,26 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         runInBackground,
         signal: controller.signal,
       };
+      const dispatch = args.dispatch === undefined
+        ? undefined
+        : {
+            rationale: args.dispatch.rationale,
+            scope: args.dispatch.scope,
+            qualityDeficiencies: args.dispatch.quality_deficiencies,
+            reviewReason: args.dispatch.review_reason,
+            workCard:
+              args.dispatch.work_card === undefined
+                ? undefined
+                : {
+                    id: args.dispatch.work_card.id,
+                    title: args.dispatch.work_card.title,
+                    goal: args.dispatch.work_card.goal,
+                    dependencies: args.dispatch.work_card.dependencies,
+                    acceptance: args.dispatch.work_card.acceptance,
+                    forbiddenScope: args.dispatch.work_card.forbidden_scope,
+                    routeOverride: args.dispatch.work_card.route_override,
+                  },
+          };
       let handle: SubagentHandle;
       try {
         handle =
@@ -213,6 +283,8 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
             ? await this.subagentHost.resume(resumeAgentId!, runOptions)
             : await this.subagentHost.spawn({
                 profileName: requestedProfileName ?? 'coder',
+                dispatch,
+                enforceDispatch: true,
                 ...runOptions,
               });
       } catch (error) {

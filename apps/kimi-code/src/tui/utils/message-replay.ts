@@ -66,6 +66,7 @@ export function appStateFromResumeAgent(agent: ResumedAgentState): Partial<AppSt
     contextUsage,
     planMode: agent.plan !== null,
     swarmMode: agent.swarmMode ?? false,
+    dispatchMode: agent.dispatchMode ?? 'auto',
     permissionMode: agent.permission.mode,
   };
 }

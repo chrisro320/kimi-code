@@ -4,6 +4,7 @@ import {
   type AgentContextData,
   type KimiErrorCode,
   type SwarmModeTrigger,
+  type DispatchMode,
 } from '@moonshot-ai/agent-core';
 
 import { type ApprovalHandler, type Event, type QuestionHandler } from '#/events';
@@ -266,6 +267,22 @@ export class Session {
     } else {
       await this.rpc.setSwarmMode({ sessionId: this.id, enabled: false });
     }
+  }
+
+  async setDispatchMode(mode: DispatchMode): Promise<void> {
+    this.ensureOpen();
+    if (mode !== 'auto' && mode !== 'ask' && mode !== 'off') {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session dispatch mode must be auto, ask, or off',
+      );
+    }
+    await this.rpc.setDispatchMode({ sessionId: this.id, mode });
+  }
+
+  async getDispatchMode(): Promise<DispatchMode> {
+    this.ensureOpen();
+    return this.rpc.getDispatchMode({ sessionId: this.id });
   }
 
   async getPlan(): Promise<SessionPlan> {

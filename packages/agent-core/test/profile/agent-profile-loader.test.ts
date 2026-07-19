@@ -165,8 +165,8 @@ describe('default agent profiles', () => {
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['explore']).toBe(
       DEFAULT_AGENT_PROFILES['explore'],
     );
-    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['plan']).toBe(
-      DEFAULT_AGENT_PROFILES['plan'],
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['debugger']).toBe(
+      DEFAULT_AGENT_PROFILES['debugger'],
     );
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['reviewer']).toBe(
       DEFAULT_AGENT_PROFILES['reviewer'],
@@ -217,7 +217,9 @@ describe('default agent profiles', () => {
     );
     expect(DEFAULT_AGENT_PROFILES['coder-ex']?.whenToUse).toContain('quality bar');
     expect(DEFAULT_AGENT_PROFILES['explore']?.tools).not.toContain('Write');
-    expect(DEFAULT_AGENT_PROFILES['plan']?.tools).not.toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['debugger']?.tools).toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['debugger']?.tools).not.toContain('Write');
+    expect(DEFAULT_AGENT_PROFILES['debugger']?.tools).not.toContain('Edit');
     expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Write');
     expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Edit');
     expect(DEFAULT_AGENT_PROFILES['frontend-artist']?.tools).toContain('Write');

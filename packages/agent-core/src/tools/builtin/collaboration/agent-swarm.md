@@ -11,3 +11,5 @@ Each of these is enforced — a violation is rejected before any subagent starts
 Use enough subagents to keep the work focused and parallel. AgentSwarm supports up to 128 subagents, and launches are queued automatically, so it is safe to split large tasks into many clear, independent items.
 
 If `AgentSwarm` is called, that call must be the only tool call in the response.
+
+Optional `item_dispatch` carries per-item dispatch metadata keyed by the exact item value: `rationale` explains that item's delegation, and `scope` lists the workspace-relative files/directories/globs it may change. Every new item on an editing subagent_type needs a distinct, non-overlapping scope; the runtime rejects the launch before any subagent starts if two items would touch the same files.

@@ -14,6 +14,7 @@ function fakeInitialAppState(): AppState {
     planMode: false,
     inputMode: 'prompt',
     swarmMode: false,
+    dispatchMode: 'auto',
     thinkingEffort: 'off',
     contextUsage: 0,
     contextTokens: 0,

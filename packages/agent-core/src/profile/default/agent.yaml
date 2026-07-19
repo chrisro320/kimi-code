@@ -47,8 +47,11 @@ subagents:
       asking the same coder to repair a result you no longer trust.
   explore:
     description: Fast codebase exploration with prompt-enforced read-only behavior.
-  plan:
-    description: Read-only implementation planning and architecture design.
+  debugger:
+    description: >-
+      Read-only failure diagnosis: reproduces the issue, analyzes logs, failing
+      tests, and stack traces, localizes the root cause, and returns an
+      evidence-backed fix boundary. Not a planner or implementer.
   reviewer:
     description: Read-only code review focused on correctness, security, regressions, and test gaps.
   frontend-artist:

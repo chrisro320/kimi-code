@@ -1,4 +1,5 @@
 import type {
+  DispatchMode,
   ExportSessionManifest,
   ResumeSessionResult,
   ShellEnvironment,
@@ -69,6 +70,7 @@ export type {
 } from '@moonshot-ai/agent-core';
 
 export type { KimiHostIdentity, OAuthRefreshOutcome };
+export type { DispatchMode };
 export type { TelemetryClient, TelemetryContextPatch, TelemetryProperties };
 export type { ContentPart, Role, ThinkingEffort, ToolCall } from '@moonshot-ai/kosong';
 
@@ -235,6 +237,7 @@ export interface SessionStatus {
   readonly permission: PermissionMode;
   readonly planMode: boolean;
   readonly swarmMode?: boolean | undefined;
+  readonly dispatchMode?: DispatchMode;
   readonly contextTokens: number;
   readonly maxContextTokens: number;
   readonly contextUsage: number;

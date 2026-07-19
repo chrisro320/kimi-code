@@ -84,6 +84,9 @@ function restoreAgentRecord(agent: Agent, input: AgentRecord): void {
     case 'swarm_mode.exit':
       agent.swarmMode.exit();
       return;
+    case 'dispatch_mode.set':
+      agent.dispatchMode.restoreSet(input.mode);
+      return;
     case 'context.append_message':
       agent.context.appendMessage(input.message);
       return;

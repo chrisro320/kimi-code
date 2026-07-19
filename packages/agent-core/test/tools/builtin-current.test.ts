@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { Agent } from '../../src/agent';
 import type { SwarmMode } from '../../src/agent/swarm';
+import { DEFAULT_AGENT_PROFILES } from '../../src/profile';
 import { FLAG_DEFINITIONS, FlagResolver } from '../../src/flags';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -398,8 +399,16 @@ describe('current builtin collaboration tools', () => {
       [
         {
           kind: 'spawn',
-          data: { kind: 'spawn', index: 1, item: 'src/a.ts', prompt: 'Review src/a.ts' },
+          data: {
+            kind: 'spawn',
+            index: 1,
+            item: 'src/a.ts',
+            prompt: 'Review src/a.ts',
+            dispatch: undefined,
+          },
           profileName: 'explore',
+          dispatch: undefined,
+          enforceDispatch: true,
           parentToolCallId: 'call_swarm',
           prompt: 'Review src/a.ts',
           description: 'Review files #1 (explore)',
@@ -412,8 +421,16 @@ describe('current builtin collaboration tools', () => {
         },
         {
           kind: 'spawn',
-          data: { kind: 'spawn', index: 2, item: 'src/b.ts', prompt: 'Review src/b.ts' },
+          data: {
+            kind: 'spawn',
+            index: 2,
+            item: 'src/b.ts',
+            prompt: 'Review src/b.ts',
+            dispatch: undefined,
+          },
           profileName: 'explore',
+          dispatch: undefined,
+          enforceDispatch: true,
           parentToolCallId: 'call_swarm',
           prompt: 'Review src/b.ts',
           description: 'Review files #2 (explore)',
@@ -456,6 +473,141 @@ describe('current builtin collaboration tools', () => {
     expect(description).toContain('at least 2');
     expect(description).toContain('{{item}}');
     expect(description.toLowerCase()).toContain('distinct');
+  });
+
+  it('AgentSwarm requires non-overlapping scopes for every editing item', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const tool = new AgentSwarmTool(
+      host,
+      mockSwarmMode(),
+      undefined,
+      DEFAULT_AGENT_PROFILES['agent']?.subagents,
+    );
+    const base = {
+      description: 'Edit files',
+      prompt_template: 'Edit {{item}}',
+      items: ['src/a.ts', 'src/b.ts'],
+      subagent_type: 'coder',
+    };
+
+    const missing = await executeTool(tool, context(base));
+    expect(missing.output).toContain('requires a non-empty scope');
+    expect(missing.isError).toBe(true);
+
+    const overlap = await executeTool(
+      tool,
+      context({
+        ...base,
+        item_dispatch: {
+          'src/a.ts': { scope: ['src'] },
+          'src/b.ts': { scope: ['src/b.ts'] },
+        },
+      }),
+    );
+    expect(overlap.output).toContain('item scopes overlap');
+    expect(overlap.isError).toBe(true);
+
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm orders batch work cards by dependencies', async () => {
+    const runQueued = vi.fn(async (tasks: readonly QueuedSubagentTask[]) =>
+      tasks.map((task) => ({ task, status: 'completed' as const, result: 'done' })),
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const tool = new AgentSwarmTool(host, mockSwarmMode());
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Implement dependency chain',
+        prompt_template: 'Implement {{item}}',
+        items: ['final', 'base'],
+        item_dispatch: {
+          final: {
+            work_card: {
+              id: 'final',
+              title: 'Final',
+              goal: 'Finish',
+              dependencies: ['base'],
+              acceptance: 'done',
+            },
+          },
+          base: {
+            work_card: {
+              id: 'base',
+              title: 'Base',
+              goal: 'Start',
+              acceptance: 'done',
+            },
+          },
+        },
+      }),
+    );
+    expect(result.isError).toBeUndefined();
+    expect(runQueued.mock.calls[0]?.[0].map((task) => task.swarmItem)).toEqual(['base', 'final']);
+  });
+
+  it('AgentSwarm rejects work-card dependency cycles before launching', async () => {
+    const runQueued = vi.fn();
+    const host = mockSubagentHost({ runQueued });
+    const tool = new AgentSwarmTool(host, mockSwarmMode());
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Cycle',
+        prompt_template: 'Do {{item}}',
+        items: ['a', 'b'],
+        item_dispatch: {
+          a: { work_card: { id: 'a', title: 'A', goal: 'A', dependencies: ['b'], acceptance: 'done' } },
+          b: { work_card: { id: 'b', title: 'B', goal: 'B', dependencies: ['a'], acceptance: 'done' } },
+        },
+      }),
+    );
+    expect(result.output).toContain('dependency cycle');
+    expect(result.isError).toBe(true);
+    expect(runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm accepts disjoint editing item scopes and marks new spawns enforced', async () => {
+    const runQueued = vi.fn(async (tasks: readonly QueuedSubagentTask[]) =>
+      tasks.map((task) => ({ task, status: 'completed' as const, result: 'done' })),
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const tool = new AgentSwarmTool(
+      host,
+      mockSwarmMode(),
+      undefined,
+      DEFAULT_AGENT_PROFILES['agent']?.subagents,
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Edit files',
+        prompt_template: 'Edit {{item}}',
+        items: ['src/a.ts', 'test/a.test.ts'],
+        subagent_type: 'coder',
+        item_dispatch: {
+          'src/a.ts': { scope: ['src/a.ts'] },
+          'test/a.test.ts': { scope: ['test/a.test.ts'] },
+        },
+      }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(runQueued).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'spawn',
+          enforceDispatch: true,
+          dispatch: { rationale: undefined, scope: ['src/a.ts'] },
+        }),
+      ]),
+    );
   });
 
   it('AgentSwarm rejects more than 128 subagents at execution time', async () => {
@@ -622,8 +774,11 @@ describe('current builtin collaboration tools', () => {
             index: 3,
             item: 'src/new.ts',
             prompt: 'Review src/new.ts',
+            dispatch: undefined,
           },
           profileName: 'explore',
+          dispatch: undefined,
+          enforceDispatch: true,
           parentToolCallId: 'call_swarm',
           prompt: 'Review src/new.ts',
           description: 'Finish review #3 (explore)',

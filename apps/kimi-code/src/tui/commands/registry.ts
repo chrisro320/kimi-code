@@ -26,6 +26,12 @@ const SWARM_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'off', description: 'Turn swarm mode off' },
 ];
 
+const DISPATCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
+  { value: 'auto', description: 'Balanced proactive delegation (default)' },
+  { value: 'ask', description: 'Confirm before multi-worker or editing dispatch' },
+  { value: 'off', description: 'No proactive delegation; explicit calls still confirm' },
+];
+
 const ADD_DIR_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'list', description: 'Show configured additional workspace directories' },
 ];
@@ -47,6 +53,11 @@ export function goalArgumentCompletions(argumentPrefix: string): AutocompleteIte
 /** Argument autocompletion for the `/swarm` command (subcommands). */
 export function swarmArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   return completeLeadingArg(SWARM_ARG_COMPLETIONS, argumentPrefix);
+}
+
+/** Argument autocompletion for the `/dispatch` command (mode names). */
+export function dispatchArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  return completeLeadingArg(DISPATCH_ARG_COMPLETIONS, argumentPrefix);
 }
 
 /** Argument autocompletion for the `/add-dir` command. */
@@ -175,6 +186,15 @@ export const BUILTIN_SLASH_COMMANDS = [
     priority: 100,
     argumentHint: '[on|off] | <task>',
     completeArgs: swarmArgumentCompletions,
+    availability: 'idle-only',
+  },
+  {
+    name: 'dispatch',
+    aliases: [],
+    description: 'Show or set the proactive-delegation policy (auto/ask/off)',
+    priority: 100,
+    argumentHint: '[auto|ask|off]',
+    completeArgs: dispatchArgumentCompletions,
     availability: 'idle-only',
   },
   {

@@ -41,6 +41,17 @@ export interface UsageStatus {
 
 export type PermissionMode = 'manual' | 'yolo' | 'auto';
 
+/**
+ * Session-scoped proactive-delegation policy for the main agent.
+ * `auto`: balanced proactive delegation applies.
+ * `ask`: multi-worker, editing, reviewer, or coder-ex dispatch requires
+ * confirmation before launch; a single read-only worker follows normal rules.
+ * `off`: the model is told not to initiate delegation; an Agent/AgentSwarm
+ * call that still occurs (explicit or otherwise -- the runtime cannot reliably
+ * tell them apart) requires confirmation rather than being silently approved.
+ */
+export type DispatchMode = 'auto' | 'ask' | 'off';
+
 export type SkillSource = 'project' | 'user' | 'extra' | 'builtin';
 
 export interface UserPromptOrigin {
@@ -486,6 +497,8 @@ export interface AgentStatusUpdatedEvent {
   readonly contextUsage?: number;
   readonly planMode?: boolean;
   readonly swarmMode?: boolean;
+  readonly dispatchMode?: DispatchMode;
+  readonly dispatchQueued?: number;
   readonly permission?: PermissionMode;
   readonly usage?: UsageStatus;
   readonly phase?: AgentPhase;
@@ -743,6 +756,22 @@ export interface ToolResultEvent {
   readonly synthetic?: boolean;
 }
 
+export interface SubagentDispatchMetadata {
+  readonly rationale?: string;
+  readonly scope?: readonly string[];
+  readonly qualityDeficiencies?: readonly string[];
+  readonly reviewReason?: string;
+  readonly workCard?: {
+    readonly id: string;
+    readonly title: string;
+    readonly goal: string;
+    readonly dependencies?: readonly string[];
+    readonly acceptance: string;
+    readonly forbiddenScope?: readonly string[];
+  };
+  readonly displayName?: string;
+}
+
 export interface SubagentSpawnedEvent {
   readonly type: 'subagent.spawned';
   readonly subagentId: string;
@@ -755,6 +784,7 @@ export interface SubagentSpawnedEvent {
   readonly description?: string;
   readonly swarmIndex?: number;
   readonly runInBackground: boolean;
+  readonly dispatch?: SubagentDispatchMetadata;
 }
 
 export interface SubagentStartedEvent {
@@ -969,6 +999,8 @@ export const usageStatusSchema = z.object({
 }) satisfies z.ZodType<UsageStatus>;
 
 export const permissionModeSchema = z.enum(['manual', 'yolo', 'auto']) satisfies z.ZodType<PermissionMode>;
+
+export const dispatchModeSchema = z.enum(['auto', 'ask', 'off']) satisfies z.ZodType<DispatchMode>;
 
 export const skillSourceSchema = z.enum(['project', 'user', 'extra', 'builtin']) satisfies z.ZodType<SkillSource>;
 
@@ -1376,6 +1408,8 @@ export const agentStatusUpdatedEventSchema = z.object({
   contextUsage: z.number().optional(),
   planMode: z.boolean().optional(),
   swarmMode: z.boolean().optional(),
+  dispatchMode: dispatchModeSchema.optional(),
+  dispatchQueued: z.number().int().nonnegative().optional(),
   permission: permissionModeSchema.optional(),
   usage: usageStatusSchema.optional(),
   phase: agentPhaseSchema.optional(),
@@ -1611,6 +1645,25 @@ export const subagentSpawnedEventSchema = z.object({
   description: z.string().optional(),
   swarmIndex: z.number().optional(),
   runInBackground: z.boolean(),
+  dispatch: z
+    .object({
+      rationale: z.string().optional(),
+      scope: z.array(z.string()).optional(),
+      qualityDeficiencies: z.array(z.string()).optional(),
+      reviewReason: z.string().optional(),
+      workCard: z
+        .object({
+          id: z.string(),
+          title: z.string(),
+          goal: z.string(),
+          dependencies: z.array(z.string()).optional(),
+          acceptance: z.string(),
+          forbiddenScope: z.array(z.string()).optional(),
+        })
+        .optional(),
+      displayName: z.string().optional(),
+    })
+    .optional(),
 }) satisfies z.ZodType<SubagentSpawnedEvent>;
 
 export const subagentStartedEventSchema = z.object({

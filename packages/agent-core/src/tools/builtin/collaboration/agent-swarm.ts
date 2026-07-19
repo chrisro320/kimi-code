@@ -1,7 +1,11 @@
 import { z } from 'zod';
 
 import type { SwarmMode } from '../../../agent/swarm';
+import { isEditingCapableProfile } from '../../../agent/dispatch/profile';
+import type { DispatchWorkCard } from '../../../agent/dispatch/controller';
+import { normalizeScopeList, scopesOverlap } from '../../../agent/dispatch/scope';
 import type { BuiltinTool } from '../../../agent/tool';
+import type { ResolvedAgentProfile } from '../../../profile';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   type QueuedSubagentTask,
@@ -61,6 +65,44 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Map of existing subagent agent_id to the prompt used to resume that subagent. These resumed subagents are launched before new item-based subagents.',
       ),
+    item_dispatch: z
+      .record(
+        z.string(),
+        z.object({
+          rationale: z
+            .string()
+            .trim()
+            .min(1)
+            .optional()
+            .describe('Why this item is delegated instead of done directly.'),
+          scope: z
+            .array(z.string().trim().min(1))
+            .optional()
+            .describe(
+              'Workspace-relative files/directories/globs this item may change. Required for an editing subagent_type; must not overlap another item\'s scope.',
+            ),
+          work_card: z
+            .object({
+              id: z.string().trim().min(1),
+              title: z.string().trim().min(1),
+              goal: z.string().trim().min(1),
+              dependencies: z.array(z.string().trim().min(1)).optional(),
+              acceptance: z.string().trim().min(1),
+              forbidden_scope: z.array(z.string().trim().min(1)).optional(),
+              route_override: z
+                .object({
+                  backend: z.string().trim().min(1),
+                  model: z.string().trim().min(1).optional(),
+                })
+                .optional(),
+            })
+            .optional(),
+        }),
+      )
+      .optional()
+      .describe(
+        'Optional per-item dispatch metadata keyed by the exact item value, for new item-based spawns only.',
+      ),
   })
   .strict();
 
@@ -71,6 +113,11 @@ interface AgentSwarmSpawnSpec {
   readonly index: number;
   readonly item: string;
   readonly prompt: string;
+  readonly dispatch?: {
+    readonly rationale?: string;
+    readonly scope?: readonly string[];
+    readonly workCard?: DispatchWorkCard;
+  };
 }
 
 interface AgentSwarmResumeSpec {
@@ -104,6 +151,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     // `0` = no timeout, preserved on purpose (`0 ?? DEFAULT` stays `0`);
     // SubagentBatch arms no timer for non-positive timeouts.
     private readonly subagentTimeoutMs?: number,
+    private readonly subagents?: ResolvedAgentProfile['subagents'],
   ) {}
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
@@ -146,7 +194,18 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
   ): Promise<string> {
     const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
     const specs = createAgentSwarmSpecs(args, (agentId) => this.subagentHost.getSwarmItem(agentId));
-    const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
+    const spawnSpecs = specs.filter((spec): spec is AgentSwarmSpawnSpec => spec.kind === 'spawn');
+    validateSpawnDispatch(
+      spawnSpecs,
+      profileName,
+      this.subagents,
+      args.subagent_type !== undefined || spawnSpecs.some((spec) => spec.dispatch !== undefined),
+    );
+    const orderedSpecs = [
+      ...specs.filter((spec): spec is AgentSwarmResumeSpec => spec.kind === 'resume'),
+      ...orderSpawnSpecsByDependencies(spawnSpecs),
+    ];
+    const tasks = orderedSpecs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
       const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
       const common = {
         data: spec,
@@ -157,7 +216,6 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
-        modelAlias: spec.kind === 'spawn' ? args.model : undefined,
         signal,
         timeout: this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS,
       };
@@ -171,6 +229,9 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
       return {
         ...common,
         kind: 'spawn',
+        modelAlias: args.model,
+        dispatch: spec.dispatch,
+        enforceDispatch: true,
       };
     });
     const results = await this.subagentHost.runQueued(tasks);
@@ -228,15 +289,121 @@ function createAgentSwarmSpecs(
         );
       }
       seenPrompts.set(prompt, index + 1);
+      const itemDispatch = args.item_dispatch?.[item];
       specs.push({
         kind: 'spawn',
         index: specs.length + 1,
         item,
         prompt,
+        dispatch:
+          itemDispatch === undefined
+            ? undefined
+            : {
+                 rationale: itemDispatch.rationale,
+                 scope: itemDispatch.scope,
+                 workCard:
+                   itemDispatch.work_card === undefined
+                     ? undefined
+                     : {
+                         id: itemDispatch.work_card.id,
+                         title: itemDispatch.work_card.title,
+                         goal: itemDispatch.work_card.goal,
+                         dependencies: itemDispatch.work_card.dependencies,
+                         acceptance: itemDispatch.work_card.acceptance,
+                         forbiddenScope: itemDispatch.work_card.forbidden_scope,
+                         routeOverride: itemDispatch.work_card.route_override,
+                       },
+               },
       });
     });
   }
+
   return specs;
+}
+
+function orderSpawnSpecsByDependencies(
+  specs: readonly AgentSwarmSpawnSpec[],
+): AgentSwarmSpawnSpec[] {
+  const byCardId = new Map<string, AgentSwarmSpawnSpec>();
+  for (const spec of specs) {
+    const card = spec.dispatch?.workCard;
+    if (card === undefined) continue;
+    if (byCardId.has(card.id)) {
+      throw new Error(`AgentSwarm contains duplicate work-card id "${card.id}".`);
+    }
+    byCardId.set(card.id, spec);
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const ordered: AgentSwarmSpawnSpec[] = [];
+  const visit = (spec: AgentSwarmSpawnSpec): void => {
+    const card = spec.dispatch?.workCard;
+    if (visited.has(spec.item)) return;
+    if (card === undefined) {
+      visited.add(spec.item);
+      ordered.push(spec);
+      return;
+    }
+    if (visiting.has(spec.item)) {
+      throw new Error(`AgentSwarm work-card dependency cycle includes "${card.id}".`);
+    }
+    visiting.add(spec.item);
+    for (const dependency of card.dependencies ?? []) {
+      const dependencySpec = byCardId.get(dependency);
+      if (dependencySpec === undefined) {
+        throw new Error(
+          `AgentSwarm work-card "${card.id}" references unknown batch dependency "${dependency}".`,
+        );
+      }
+      visit(dependencySpec);
+    }
+    visiting.delete(spec.item);
+    visited.add(spec.item);
+    ordered.push(spec);
+  };
+
+  for (const spec of specs) visit(spec);
+  return ordered;
+}
+
+function validateSpawnDispatch(
+  specs: readonly AgentSwarmSpawnSpec[],
+  profileName: string,
+  subagents: ResolvedAgentProfile['subagents'] | undefined,
+  enforceScope: boolean,
+): void {
+  const profile = subagents?.[profileName];
+  // Legacy AgentSwarm callers without dispatch metadata keep the historical
+  // homogeneous launch contract. New editing dispatches opt into scope checks
+  // through item_dispatch; the host still enforces any supplied scope.
+  if (profile === undefined || !enforceScope) return;
+  const editing = isEditingCapableProfile(profile);
+  if (!editing) return;
+
+  const normalizedScopes: Array<{ item: string; scope: readonly string[] }> = [];
+  for (const spec of specs) {
+    const rawScope = spec.dispatch?.scope ?? [];
+    if (rawScope.length === 0) {
+      throw new Error(
+        `AgentSwarm item "${spec.item}" requires a non-empty scope for editing profile "${profileName}".`,
+      );
+    }
+    const normalized = normalizeScopeList(rawScope);
+    if (!normalized.ok) {
+      throw new Error(`AgentSwarm item "${spec.item}" has invalid scope: ${normalized.message}`);
+    }
+    normalizedScopes.push({ item: spec.item, scope: normalized.value });
+  }
+  for (let i = 0; i < normalizedScopes.length; i += 1) {
+    for (let j = i + 1; j < normalizedScopes.length; j += 1) {
+      if (scopesOverlap(normalizedScopes[i]!.scope, normalizedScopes[j]!.scope)) {
+        throw new Error(
+          `AgentSwarm item scopes overlap: "${normalizedScopes[i]!.item}" and "${normalizedScopes[j]!.item}".`,
+        );
+      }
+    }
+  }
 }
 
 function hasMinimumAgentSwarmInputs(itemCount: number, resumeCount: number): boolean {

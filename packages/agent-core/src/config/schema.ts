@@ -168,6 +168,19 @@ export const SubagentRoutingSchema = z.object({
 
 export type SubagentRouting = z.infer<typeof SubagentRoutingSchema>;
 
+export const SubagentPoolRouteSchema = z.object({
+  /** `kimi` uses the in-process subagent; anything else must exist in `subagent.backends`. */
+  backend: z.string().min(1),
+  /** Model alias used when this route is selected. */
+  model: z.string().min(1).optional(),
+  /** Max concurrently active spawns through this route. Unset means unlimited. */
+  maxConcurrency: z.number().int().min(1).optional(),
+  /** Relative weight for round-robin selection. Defaults to 1. */
+  weight: z.number().positive().optional(),
+});
+
+export type SubagentPoolRoute = z.infer<typeof SubagentPoolRouteSchema>;
+
 export const SubagentConfigSchema = z.object({
   /**
    * Per-subagent (`Agent` / `AgentSwarm`, foreground and background) timeout
@@ -176,6 +189,12 @@ export const SubagentConfigSchema = z.object({
   timeoutMs: z.number().int().min(0).optional(),
   routing: z.record(z.string().min(1), SubagentRoutingSchema).optional(),
   backends: z.record(z.string().min(1), SubagentBackendSchema).optional(),
+  /**
+   * Per-profile pool of weighted routes. When a profile has a non-empty
+   * pool, `SessionSubagentHost` spawns through a deterministic weighted
+   * round-robin over these routes instead of the single `routing` entry.
+   */
+  pools: z.record(z.string().min(1), z.array(SubagentPoolRouteSchema).min(1)).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;

@@ -21,6 +21,7 @@ import {
   type ProviderConfig,
   type ServicesConfig,
   type SubagentConfig,
+  type SubagentPoolRoute,
   type ThinkingConfig,
   validateConfig,
 } from '#/config/schema';
@@ -379,6 +380,19 @@ function transformSubagentData(data: Record<string, unknown>): Record<string, un
       out[key] = transformRecord(out[key], transformPlainObject);
     }
   }
+  if (isPlainObject(out['pools'])) {
+    out['pools'] = transformPoolsData(out['pools']);
+  }
+  return out;
+}
+
+function transformPoolsData(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [profileName, entries] of Object.entries(data)) {
+    out[profileName] = Array.isArray(entries)
+      ? entries.map((entry) => (isPlainObject(entry) ? transformPlainObject(entry) : entry))
+      : entries;
+  }
   return out;
 }
 
@@ -703,11 +717,35 @@ function subagentToToml(subagent: SubagentConfig, rawSubagent: unknown): Record<
         converted[name] = entryOut;
       }
       out[camelToSnake(key)] = converted;
+    } else if (key === 'pools' && isPlainObject(value)) {
+      const rawPools = isPlainObject(rawSubagent) ? rawSubagent['pools'] : undefined;
+      out['pools'] = poolsToToml(value as Record<string, readonly SubagentPoolRoute[]>, rawPools);
     } else {
       setDefined(out, camelToSnake(key), value);
     }
   }
   return out;
+}
+
+function poolsToToml(
+  pools: Record<string, readonly SubagentPoolRoute[]>,
+  rawPools: unknown,
+): Record<string, unknown> {
+  const rawPoolsRecord = isPlainObject(rawPools) ? rawPools : {};
+  const converted: Record<string, unknown> = {};
+  for (const [profileName, entries] of Object.entries(pools)) {
+    const rawEntries = Array.isArray(rawPoolsRecord[profileName])
+      ? (rawPoolsRecord[profileName] as unknown[])
+      : [];
+    converted[profileName] = entries.map((entry, index) => {
+      const entryOut = cloneRecord(rawEntries[index]);
+      for (const [entryKey, entryValue] of Object.entries(entry)) {
+        setDefined(entryOut, camelToSnake(entryKey), entryValue);
+      }
+      return entryOut;
+    });
+  }
+  return converted;
 }
 
 function imageToToml(image: ImageConfig, rawImage: unknown): Record<string, unknown> {

@@ -403,6 +403,33 @@ describe('TasksBrowserApp — stop confirmation', () => {
     expect(strip(app.render(120).join('\n'))).not.toContain('Stop bash-aaaaaaaa?');
   });
 
+  it('warns that a stopped agent session may not resume', () => {
+    const app = makeApp({
+      tasks: [
+        task({
+          taskId: 'agent-aaaaaaaa',
+          kind: 'agent',
+          status: 'running',
+          agentId: 'external-agent',
+        }),
+      ],
+      selectedTaskId: 'agent-aaaaaaaa',
+    });
+
+    app.handleInput('s');
+    expect(strip(app.render(120).join('\n'))).toContain('agent session may not resume');
+  });
+
+  it('does not show the resume warning for process tasks', () => {
+    const app = makeApp({
+      tasks: [task({ taskId: 'bash-aaaaaaaa', kind: 'process', status: 'running' })],
+      selectedTaskId: 'bash-aaaaaaaa',
+    });
+
+    app.handleInput('s');
+    expect(strip(app.render(120).join('\n'))).not.toContain('agent session may not resume');
+  });
+
   it('S → n cancels without firing onStopConfirmed', () => {
     const onStopConfirmed = vi.fn();
     const app = makeApp({

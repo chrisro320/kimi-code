@@ -2,6 +2,7 @@ import { isProviderRateLimitError, type TokenUsage } from '@moonshot-ai/kosong';
 import * as retry from 'retry';
 
 import type {
+  DispatchSpawnMetadata,
   RunSubagentOptions,
   SpawnSubagentOptions,
   SubagentHandle,
@@ -51,6 +52,8 @@ type BaseQueuedSubagentTask<T> = {
   readonly runInBackground: boolean;
   readonly timeout?: number;
   readonly modelAlias?: string;
+  readonly dispatch?: DispatchSpawnMetadata;
+  readonly enforceDispatch?: boolean;
   readonly signal?: AbortSignal;
 };
 
@@ -314,6 +317,7 @@ export class SubagentBatch<T> {
         this.markAttemptReady(attempt);
       },
       suppressRateLimitFailureEvent: true,
+      dispatch: task.dispatch,
     };
 
     let handle: SubagentHandle;
@@ -328,6 +332,8 @@ export class SubagentBatch<T> {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
           modelAlias: task.modelAlias,
+          dispatch: task.dispatch,
+          enforceDispatch: task.enforceDispatch,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);

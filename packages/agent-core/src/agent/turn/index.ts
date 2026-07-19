@@ -234,6 +234,10 @@ export class TurnFlow {
   /** Allocates the next monotonic turn id. */
   private allocateTurnId(): number {
     this.turnId += 1;
+    // Reset the per-turn dispatch spawn budget at the parent turn boundary;
+    // active editing/read-only reservations persist until their worker
+    // terminates (D4).
+    this.agent.dispatchController.beginTurn(String(this.turnId));
     return this.turnId;
   }
 

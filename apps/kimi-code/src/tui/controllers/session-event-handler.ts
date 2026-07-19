@@ -77,6 +77,7 @@ import type { StreamingUIController } from './streaming-ui';
 import type { TasksBrowserController } from './tasks-browser';
 import { SubAgentEventHandler } from './subagent-event-handler';
 import type {
+  ActiveBackgroundAgentStatus,
   AppState,
   LivePaneState,
   QueuedMessage,
@@ -146,6 +147,7 @@ export class SessionEventHandler {
   private queuedGoalPromotionPending = false;
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
+  private dispatchQueuedCount = 0;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -161,6 +163,7 @@ export class SessionEventHandler {
     this.pendingModelBlockedFallback = undefined;
     this.queuedGoalPromotionPending = false;
     this.queuedGoalPromotionInFlight = false;
+    this.dispatchQueuedCount = 0;
     this.clearQueuedGoalPromotionTimer();
     this.stopAllMcpServerStatusSpinners();
   }
@@ -612,6 +615,11 @@ export class SessionEventHandler {
     if (event.maxContextTokens !== undefined) patch.maxContextTokens = event.maxContextTokens;
     if (event.planMode !== undefined) patch.planMode = event.planMode;
     if (event.swarmMode !== undefined) patch.swarmMode = event.swarmMode;
+    if (event.dispatchQueued !== undefined) {
+      this.dispatchQueuedCount = event.dispatchQueued;
+      this.syncBackgroundTaskBadge();
+    }
+    if (event.dispatchMode !== undefined) patch.dispatchMode = event.dispatchMode;
     if (event.permission !== undefined) {
       patch.permissionMode = event.permission;
     }
@@ -1119,6 +1127,7 @@ export class SessionEventHandler {
     const { state } = this.host;
     let bashTasks = 0;
     let agentTasks = 0;
+    const activeAgents: ActiveBackgroundAgentStatus[] = [];
     for (const info of this.backgroundTasks.values()) {
       if (
         info.status === 'completed' ||
@@ -1131,11 +1140,25 @@ export class SessionEventHandler {
       }
       if (info.kind === 'agent') {
         agentTasks += 1;
+        const meta = this.subAgentEventHandler.backgroundAgentMetadata.get(info.agentId ?? '');
+        if (meta?.startedAtMs !== undefined) {
+          activeAgents.push({
+            agentId: info.agentId ?? info.taskId,
+            agentName: meta.agentName ?? info.subagentType ?? 'agent',
+            startedAtMs: meta.startedAtMs,
+            tokens: meta.tokens,
+          });
+        }
       } else {
         bashTasks += 1;
       }
     }
-    state.footer.setBackgroundCounts({ bashTasks, agentTasks });
+    state.footer.setBackgroundCounts({
+      bashTasks,
+      agentTasks,
+      activeAgents,
+      queuedAgents: this.dispatchQueuedCount,
+    });
     state.ui.requestRender();
   }
 }

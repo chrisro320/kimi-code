@@ -364,9 +364,12 @@ export class TasksBrowserApp extends Container implements Focusable {
 
     if (this.pendingStopTaskId !== undefined) {
       const warn = (text: string): string => currentTheme.boldFg('warning', text);
+      const task = this.props.tasks.find((entry) => entry.taskId === this.pendingStopTaskId);
+      const consequence = task?.kind === 'agent' ? ' · agent session may not resume' : '';
       const line =
-        ` ${warn('Stop')} ${currentTheme.fg('text', this.pendingStopTaskId)}? ` +
-        `${key('Y')} ${dim('confirm')}  ${key('N')}${dim('/')}${key('esc')} ${dim('cancel')} `;
+        ` ${warn('Stop')} ${currentTheme.fg('text', this.pendingStopTaskId)}?` +
+        `${warn(consequence)}  ${key('Y')} ${dim('confirm')}  ` +
+        `${key('N')}${dim('/')}${key('esc')} ${dim('cancel')} `;
       return fitExactly(line, width);
     }
 

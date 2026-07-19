@@ -9,6 +9,7 @@ import type {
   PermissionData,
   PermissionMode,
 } from '#/agent/permission';
+import type { DispatchMode } from '#/agent/dispatch/mode';
 import type { PlanData } from '#/agent/plan';
 import type { ToolInfo } from '#/agent/tool';
 import type { SessionSummary } from '#/rpc/core-api';
@@ -38,6 +39,7 @@ export interface ResumedAgentState {
   readonly permission: PermissionData;
   readonly plan: PlanData;
   readonly swarmMode?: boolean | undefined;
+  readonly dispatchMode?: DispatchMode;
   readonly usage: UsageStatus;
   readonly tools: readonly ToolInfo[];
   readonly toolStore?: Readonly<Record<string, unknown>>;

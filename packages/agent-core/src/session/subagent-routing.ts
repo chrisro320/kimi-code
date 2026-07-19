@@ -1,4 +1,4 @@
-import type { KimiConfig, SubagentBackend } from '#/config/schema';
+import type { KimiConfig, SubagentBackend, SubagentPoolRoute } from '#/config/schema';
 
 export const INTERNAL_SUBAGENT_BACKEND = 'kimi';
 export const EXTERNAL_SUBAGENT_ID_PREFIX = 'external-';
@@ -22,10 +22,23 @@ export function resolveSubagentRoute(
 ): ResolvedSubagentRoute {
   const routing = config.subagent?.routing?.[profileName];
   const modelAlias = modelOverride ?? routing?.model;
+  return resolveRouteByNames(config, routing?.backend, modelAlias);
+}
+
+/**
+ * Shared resolution core behind {@link resolveSubagentRoute}, the one-shot
+ * work-card `routeOverride`, and pool-entry selection: given an explicit
+ * backend name (`undefined`/`"kimi"` for the in-process subagent) and model
+ * alias, validate both against `config` and produce a `ResolvedSubagentRoute`.
+ */
+export function resolveRouteByNames(
+  config: KimiConfig,
+  backendName: string | undefined,
+  modelAlias: string | undefined,
+): ResolvedSubagentRoute {
   if (modelAlias !== undefined && config.models?.[modelAlias] === undefined) {
     throw new Error(`Subagent model alias "${modelAlias}" is not defined in config.models.`);
   }
-  const backendName = routing?.backend;
   if (backendName === undefined || backendName === INTERNAL_SUBAGENT_BACKEND) {
     return { kind: 'internal', modelAlias };
   }
@@ -212,4 +225,72 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 export function isExternalSubagentId(agentId: string): boolean {
   return agentId.startsWith(EXTERNAL_SUBAGENT_ID_PREFIX);
+}
+
+export interface AcquiredSubagentRoute {
+  readonly route: SubagentPoolRoute;
+  /** Releases this route's concurrency slot. Idempotent; call exactly once per acquire. */
+  readonly release: () => void;
+}
+
+/**
+ * Deterministic weighted round-robin over a profile's `subagent.pools`
+ * entries. `SessionSubagentHost` holds one instance per pooled profile for
+ * the life of the host, so rotation state (`currentWeight`) and per-route
+ * concurrency (`active`) persist across every spawn in the session.
+ *
+ * Uses the smooth weighted round-robin algorithm (as used by nginx
+ * upstreams): each `acquire()` adds every currently-available route's
+ * weight to its running total, picks the highest, then subtracts the sum of
+ * available weights from it. This keeps selection frequency proportional to
+ * `weight` even as routes drop in and out of availability because of
+ * `maxConcurrency`.
+ */
+export class SubagentRoutePool {
+  private readonly entries: Array<{
+    readonly route: SubagentPoolRoute;
+    currentWeight: number;
+    active: number;
+  }>;
+
+  constructor(routes: readonly SubagentPoolRoute[]) {
+    if (routes.length === 0) {
+      throw new Error('Subagent route pool requires at least one route entry.');
+    }
+    this.entries = routes.map((route) => ({ route, currentWeight: 0, active: 0 }));
+  }
+
+  /**
+   * Picks the next route among entries under their `maxConcurrency` cap.
+   * Throws when every route is saturated. The caller must invoke the
+   * returned `release()` exactly once, after the spawn settles (completion,
+   * failure, or abort) — never on every attempt, only the terminal one.
+   */
+  acquire(): AcquiredSubagentRoute {
+    const available = this.entries.filter(
+      (entry) => entry.route.maxConcurrency === undefined || entry.active < entry.route.maxConcurrency,
+    );
+    if (available.length === 0) {
+      throw new Error('Subagent route pool is exhausted: every route is at its max_concurrency limit.');
+    }
+
+    const totalWeight = available.reduce((sum, entry) => sum + (entry.route.weight ?? 1), 0);
+    let picked = available[0]!;
+    for (const entry of available) {
+      entry.currentWeight += entry.route.weight ?? 1;
+      if (entry.currentWeight > picked.currentWeight) picked = entry;
+    }
+    picked.currentWeight -= totalWeight;
+    picked.active += 1;
+
+    let released = false;
+    return {
+      route: picked.route,
+      release: () => {
+        if (released) return;
+        released = true;
+        picked.active -= 1;
+      },
+    };
+  }
 }

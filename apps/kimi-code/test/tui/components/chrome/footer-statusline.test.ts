@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildStatuslineRow } from '#/tui/components/chrome/footer';
+import { buildCustomStatuslinePayload, buildStatuslineRow } from '#/tui/components/chrome/footer';
 import { currentTheme } from '#/tui/theme';
 import type { AppState } from '#/tui/types';
 import { formatTokenCount } from '#/utils/usage/usage-format';
@@ -24,6 +24,25 @@ function makeState(patch: Partial<AppState>): AppState {
     ...patch,
   } as AppState;
 }
+
+describe('buildCustomStatuslinePayload', () => {
+  it('preserves existing fields and adds optional dispatch observability', () => {
+    const payload = buildCustomStatuslinePayload(makeState({}), [
+      { agentId: 'a1', agentName: 'coder#1', startedAtMs: 100, tokens: 1200 },
+      { agentId: 'a2', agentName: 'grok', startedAtMs: 200 },
+    ]);
+    expect(payload.totalTokens).toBe(536_000);
+    expect(payload.dispatch).toEqual({
+      active: 2,
+      queued: 0,
+      agents: [
+        { agentId: 'a1', agentName: 'coder#1', startedAtMs: 100, tokens: 1200 },
+        { agentId: 'a2', agentName: 'grok', startedAtMs: 200 },
+      ],
+      reportedTokens: 1200,
+    });
+  });
+});
 
 describe('buildStatuslineRow', () => {
   it('renders weekly + 5h quota, both cache-hit ratios, and total tokens', () => {

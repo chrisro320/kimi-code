@@ -138,7 +138,7 @@ describe('handleSubagentCommand', () => {
 
   it('does not write configuration when cancelled', async () => {
     const { host, harness } = makeHost();
-    await handleSubagentCommand(host, 'plan');
+    await handleSubagentCommand(host, 'debugger');
     picker(host).handleInput(ESCAPE);
     expect(harness.setConfig).not.toHaveBeenCalled();
   });

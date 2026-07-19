@@ -24,6 +24,7 @@ export {
 } from './config';
 export { handleSubagentCommand } from './subagent';
 export { handleSwarmCommand } from './swarm';
+export { handleDispatchCommand } from './dispatch-mode';
 export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
 export { handlePluginsCommand } from './plugins';
 export { handleReloadCommand, handleReloadTuiCommand } from './reload';
