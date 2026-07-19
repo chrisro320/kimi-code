@@ -11,6 +11,8 @@ import type {
   PermissionMode,
   PromptPart,
   Session,
+  SessionUsage,
+  TokenUsage,
 } from '@moonshot-ai/kimi-code-sdk';
 import type { MigrationPlan } from '@moonshot-ai/migration-legacy';
 import {
@@ -90,6 +92,7 @@ import { ActivityPaneComponent, type ActivityPaneMode } from './components/panes
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { TuiConfig } from './config';
 import {
+  isManagedUsageProvider,
   LLM_NOT_SET_MESSAGE,
   MAIN_AGENT_ID,
   NO_ACTIVE_SESSION_MESSAGE,
@@ -224,6 +227,13 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     disablePasteBurst: input.tuiConfig.disablePasteBurst,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
+    statusline: input.tuiConfig.statusline,
+    managedUsage: null,
+    managedUsageError: undefined,
+    sessionUsage: null,
+    sessionCacheHit: null,
+    lastCacheHit: null,
+    totalTokens: 0,
     availableModels: {},
     availableProviders: {},
     sessionTitle: null,
@@ -231,6 +241,37 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     mcpServersSummary: null,
     banner: undefined,
   };
+}
+
+/** How often the footer statusline refreshes its quota + usage snapshot. */
+const STATUSLINE_POLL_INTERVAL_MS = 20_000;
+
+function positiveNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Fold a per-model {@link SessionUsage} into the scalar totals the statusline
+ * needs: total tokens (all input kinds + output), the input total, and the
+ * cache-read portion (for cache-hit ratios).
+ */
+function summarizeSessionUsage(usage: SessionUsage): {
+  totalTokens: number;
+  inputTotal: number;
+  cacheRead: number;
+} {
+  const byModel = (usage as { readonly byModel?: Record<string, TokenUsage> }).byModel ?? {};
+  let inputTotal = 0;
+  let cacheRead = 0;
+  let output = 0;
+  for (const row of Object.values(byModel)) {
+    const cRead = positiveNumber(row.inputCacheRead);
+    inputTotal +=
+      positiveNumber(row.inputOther) + cRead + positiveNumber(row.inputCacheCreation);
+    cacheRead += cRead;
+    output += positiveNumber(row.output);
+  }
+  return { totalTokens: inputTotal + output, inputTotal, cacheRead };
 }
 
 interface SendMessageOptions {
@@ -694,6 +735,7 @@ export class KimiTUI {
     if (this.session !== undefined) {
       this.sessionEventHandler.startSubscription();
       void this.showSessionWarnings(this.session);
+      this.startStatuslinePolling();
     }
     void this.fetchSessions();
     if (this.session !== undefined) {
@@ -834,6 +876,7 @@ export class KimiTUI {
     this.streamingUI.resetToolUi();
     this.disposeTranscriptChildren();
     this.editorKeyboard.dispose();
+    this.stopStatuslinePolling();
     this.state.footer.dispose();
     for (const dispose of this.reverseRpcDisposers) {
       dispose();
@@ -1456,13 +1499,103 @@ export class KimiTUI {
     }
   }
 
+  // ── Statusline background poller ────────────────────────────────────────
+  // Polls managed-plan quota (/usages) + session token usage on a fixed
+  // interval and pushes snapshots into appState so the footer statusline can
+  // render weekly/5h limits + cache-hit + total tokens without any per-render
+  // network call. Uses the session's own credentials (never a hardcoded key).
+  private statuslineTimer: ReturnType<typeof setInterval> | null = null;
+  private prevStatuslineInputTotal = 0;
+  private prevStatuslineCacheRead = 0;
+
+  private startStatuslinePolling(): void {
+    if (this.statuslineTimer !== null) return;
+    void this.pollStatusline();
+    this.statuslineTimer = setInterval(() => {
+      void this.pollStatusline();
+    }, STATUSLINE_POLL_INTERVAL_MS);
+    this.statuslineTimer.unref?.();
+  }
+
+  private stopStatuslinePolling(): void {
+    if (this.statuslineTimer !== null) {
+      clearInterval(this.statuslineTimer);
+      this.statuslineTimer = null;
+    }
+  }
+
+  private async pollStatusline(): Promise<void> {
+    if (this.state.appState.statusline?.enabled !== true) return;
+    if (this.session === undefined) return;
+    await this.pollSessionUsageForStatusline();
+    await this.pollManagedUsageForStatusline();
+  }
+
+  /** Session token usage → total tokens + cumulative/last cache-hit ratios. */
+  private async pollSessionUsageForStatusline(): Promise<void> {
+    const session = this.session;
+    if (session === undefined) return;
+    let usage: SessionUsage;
+    try {
+      usage = await session.getUsage();
+    } catch {
+      // Keep prior snapshot; a transient getUsage failure must not blank the row.
+      return;
+    }
+    const { totalTokens, inputTotal, cacheRead } = summarizeSessionUsage(usage);
+    const sessionCacheHit = inputTotal > 0 ? cacheRead / inputTotal : null;
+    const deltaInput = inputTotal - this.prevStatuslineInputTotal;
+    const deltaCache = cacheRead - this.prevStatuslineCacheRead;
+    const lastCacheHit =
+      deltaInput > 0 ? deltaCache / deltaInput : (this.state.appState.lastCacheHit ?? null);
+    this.prevStatuslineInputTotal = inputTotal;
+    this.prevStatuslineCacheRead = cacheRead;
+    this.setAppState({ sessionUsage: usage, totalTokens, sessionCacheHit, lastCacheHit });
+  }
+
+  /** Managed-plan quota (weekly + 5h windows) — only for managed providers. */
+  private async pollManagedUsageForStatusline(): Promise<void> {
+    const providerKey = this.state.appState.availableModels[this.state.appState.model]?.provider;
+    if (!isManagedUsageProvider(providerKey)) {
+      this.setAppState({ managedUsage: null, managedUsageError: undefined });
+      return;
+    }
+    try {
+      const res = await this.harness.auth.getManagedUsage(providerKey);
+      if (res.kind === 'error') {
+        this.setAppState({ managedUsageError: res.message });
+      } else {
+        this.setAppState({
+          managedUsage: { summary: res.summary, limits: res.limits, extraUsage: res.extraUsage },
+          managedUsageError: undefined,
+        });
+      }
+    } catch (error) {
+      this.setAppState({
+        managedUsageError: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   setAppState(patch: Partial<AppState>): void {
     if (!hasPatchChanges(this.state.appState, patch)) return;
     const additionalDirsChanged =
       'additionalDirs' in patch &&
       !sameStringArrays(this.state.appState.additionalDirs, patch.additionalDirs ?? []);
     const busyChanged = 'streamingPhase' in patch || 'isCompacting' in patch;
+    const prevPhase = this.state.appState.streamingPhase;
     Object.assign(this.state.appState, patch);
+    // Anchor the statusline TTL countdown to reply completion: a transition from
+    // an active streaming phase back to idle marks the end of an assistant reply.
+    if (
+      patch.streamingPhase === 'idle' &&
+      (prevPhase === 'thinking' || prevPhase === 'composing' || prevPhase === 'waiting')
+    ) {
+      this.state.appState.lastReplyAt = Date.now();
+      if (this.state.appState.statusline?.enabled === true) {
+        void this.pollSessionUsageForStatusline();
+      }
+    }
     if ('planMode' in patch) this.updateEditorBorderHighlight();
     this.state.footer.setState(this.state.appState);
     this.updateActivityPane();
@@ -1893,14 +2026,14 @@ export class KimiTUI {
           return tc;
         }
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus, () => this.state.ui.requestRender());
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)
           : new StatusMessageComponent(entry.content, entry.color);
       case 'status':
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus, () => this.state.ui.requestRender());
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)

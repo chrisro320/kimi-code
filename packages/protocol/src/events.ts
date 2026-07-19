@@ -747,6 +747,7 @@ export interface SubagentSpawnedEvent {
   readonly type: 'subagent.spawned';
   readonly subagentId: string;
   readonly subagentName: string;
+  readonly backendName?: string;
   readonly parentToolCallId: string;
   readonly parentToolCallUuid?: string;
   readonly parentAgentId?: string;
@@ -765,6 +766,12 @@ export interface SubagentSuspendedEvent {
   readonly type: 'subagent.suspended';
   readonly subagentId: string;
   readonly reason: string;
+}
+
+export interface SubagentProgressEvent {
+  readonly type: 'subagent.progress';
+  readonly subagentId: string;
+  readonly usage: TokenUsage;
 }
 
 export interface SubagentCompletedEvent {
@@ -920,6 +927,7 @@ export type AgentEvent =
   | SubagentSpawnedEvent
   | SubagentStartedEvent
   | SubagentSuspendedEvent
+  | SubagentProgressEvent
   | SubagentCompletedEvent
   | SubagentFailedEvent
   | CompactionStartedEvent
@@ -1595,6 +1603,7 @@ export const subagentSpawnedEventSchema = z.object({
   type: z.literal('subagent.spawned'),
   subagentId: z.string(),
   subagentName: z.string(),
+  backendName: z.string().optional(),
   parentToolCallId: z.string(),
   parentToolCallUuid: z.string().optional(),
   parentAgentId: z.string().optional(),
@@ -1614,6 +1623,12 @@ export const subagentSuspendedEventSchema = z.object({
   subagentId: z.string(),
   reason: z.string(),
 }) satisfies z.ZodType<SubagentSuspendedEvent>;
+
+export const subagentProgressEventSchema = z.object({
+  type: z.literal('subagent.progress'),
+  subagentId: z.string(),
+  usage: tokenUsageSchema,
+}) satisfies z.ZodType<SubagentProgressEvent>;
 
 export const subagentCompletedEventSchema = z.object({
   type: z.literal('subagent.completed'),
@@ -1765,6 +1780,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   subagentSpawnedEventSchema,
   subagentStartedEventSchema,
   subagentSuspendedEventSchema,
+  subagentProgressEventSchema,
   subagentCompletedEventSchema,
   subagentFailedEventSchema,
   compactionStartedEventSchema,
@@ -1815,6 +1831,7 @@ export const VOLATILE_EVENT_TYPES = [
   'shell.output',
   'shell.started',
   'agent.status.updated',
+  'subagent.progress',
 ] as const satisfies readonly AgentEvent['type'][];
 
 export type VolatileEventType = (typeof VOLATILE_EVENT_TYPES)[number];

@@ -37,6 +37,8 @@ describe('TUI config', () => {
     expect(text).toContain('command = ""');
     expect(text).toContain('[upgrade]');
     expect(text).toContain('auto_install = true');
+    expect(text).toContain('[statusline]');
+    expect(text).toContain('enabled = true');
     expect(text).toContain('[notifications]');
     expect(text).toContain('enabled = true');
     expect(text).toContain('notification_condition = "unfocused"');
@@ -63,6 +65,7 @@ auto_install = false
       editorCommand: 'code --wait',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
+      statusline: { enabled: true },
     });
   });
 
@@ -87,14 +90,16 @@ command = "   "
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
+      statusline: { enabled: true },
     });
   });
 
-  it('falls back to default notifications when the section is omitted', () => {
+  it('falls back to default notifications and statusline when sections are omitted', () => {
     const config = parseTuiConfig(`theme = "dark"`);
 
     expect(config.notifications).toEqual({ enabled: true, condition: 'unfocused' });
     expect(config.upgrade).toEqual({ autoInstall: true });
+    expect(config.statusline).toEqual({ enabled: true });
   });
 
   it('throws TuiConfigParseError with fallback when parsing fails, leaving the file untouched', async () => {
@@ -119,6 +124,7 @@ command = "   "
         editorCommand: 'vim',
         notifications: { enabled: false, condition: 'always' },
         upgrade: { autoInstall: false },
+        statusline: { enabled: true },
       },
       filePath,
     );
@@ -129,6 +135,7 @@ command = "   "
       editorCommand: 'vim',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
+      statusline: { enabled: true },
     });
   });
 
@@ -141,6 +148,7 @@ command = "   "
         editorCommand: null,
         notifications: DEFAULT_TUI_CONFIG.notifications,
         upgrade: DEFAULT_TUI_CONFIG.upgrade,
+        statusline: DEFAULT_TUI_CONFIG.statusline ?? { enabled: true },
       },
       filePath,
     );

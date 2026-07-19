@@ -55,6 +55,7 @@ export class SubAgentEventHandler {
   readonly subagentInfo: Map<string, SubagentInfo> = new Map();
   private readonly agentSwarmProgress: Map<string, AgentSwarmProgressComponent> = new Map();
   backgroundAgentMetadata: Map<string, BackgroundAgentMetadata> = new Map();
+  private readonly backgroundAgentEntries = new Map<string, TranscriptEntry>();
 
   constructor(
     private readonly host: SessionEventHost,
@@ -64,6 +65,7 @@ export class SubAgentEventHandler {
   resetRuntimeState(): void {
     this.subagentInfo.clear();
     this.backgroundAgentMetadata.clear();
+    this.backgroundAgentEntries.clear();
     this.clearAgentSwarmProgress();
   }
 
@@ -83,6 +85,18 @@ export class SubAgentEventHandler {
       this.applySubagentEventToSwarmProgress(swarmProgress, event, childAgentId);
       this.requestRender();
       return true;
+    }
+
+    if (event.type === 'agent.status.updated') {
+      const totalUsage = event.usage?.total ?? event.usage?.currentTurn;
+      const backgroundMeta = this.backgroundAgentMetadata.get(childAgentId);
+      if (backgroundMeta !== undefined && totalUsage !== undefined) {
+        this.backgroundAgentMetadata.set(childAgentId, {
+          ...backgroundMeta,
+          tokens: totalUsage.inputOther + totalUsage.output + totalUsage.inputCacheRead + totalUsage.inputCacheCreation,
+        });
+        this.deps.syncBackgroundAgentBadge();
+      }
     }
 
     const toolCall = this.host.streamingUI.getToolComponent(parentToolCallId);
@@ -121,10 +135,9 @@ export class SubAgentEventHandler {
       });
     } else if (event.type === 'agent.status.updated') {
       const usageObj = event.usage;
-      const totalUsage = usageObj?.total ?? usageObj?.currentTurn;
       toolCall.updateSubagentMetrics({
         contextTokens: event.contextTokens,
-        usage: totalUsage,
+        usage: usageObj?.total ?? usageObj?.currentTurn,
       });
     }
     return true;
@@ -140,6 +153,9 @@ export class SubAgentEventHandler {
         return;
       case 'subagent.suspended':
         this.handleSubagentSuspended(event);
+        return;
+      case 'subagent.progress':
+        this.handleSubagentProgress(event);
         return;
       case 'subagent.completed':
         this.handleSubagentCompleted(event);
@@ -246,7 +262,7 @@ export class SubAgentEventHandler {
     if (event.runInBackground) {
       const meta = this.buildBackgroundAgentMetadata(event);
       this.backgroundAgentMetadata.set(event.subagentId, meta);
-      this.appendBackgroundAgentEntry('started', meta);
+      this.backgroundAgentEntries.set(event.subagentId, this.appendBackgroundAgentEntry('started', meta));
       this.deps.syncBackgroundAgentBadge();
       return;
     }
@@ -270,6 +286,19 @@ export class SubAgentEventHandler {
     if (!info.runInBackground) this.handleForegroundSubagentSuspended(event, info);
   }
 
+  private handleSubagentProgress(
+    event: SubagentLifecycleEventOf<'subagent.progress'>,
+  ): void {
+    const meta = this.backgroundAgentMetadata.get(event.subagentId);
+    if (meta === undefined) return;
+    const usage = event.usage;
+    this.backgroundAgentMetadata.set(event.subagentId, {
+      ...meta,
+      tokens: usage.inputOther + usage.output + usage.inputCacheRead + usage.inputCacheCreation,
+    });
+    this.deps.syncBackgroundAgentBadge();
+  }
+
   private handleSubagentCompleted(
     event: SubagentLifecycleEventOf<'subagent.completed'>,
   ): void {
@@ -288,9 +317,12 @@ export class SubAgentEventHandler {
       if (taskId !== undefined) {
         this.deps.backgroundTaskTranscriptedTerminal.add(taskId);
       }
-      const extras =
-        event.resultSummary === undefined ? undefined : { resultSummary: event.resultSummary };
-      this.appendBackgroundAgentEntry('completed', backgroundMeta, extras);
+      const extras = {
+        resultSummary: event.resultSummary,
+        usage: event.usage,
+        endedAtMs: Date.now(),
+      };
+      this.updateBackgroundAgentEntry(event.subagentId, 'completed', backgroundMeta, extras);
       return;
     }
 
@@ -327,7 +359,10 @@ export class SubAgentEventHandler {
       if (taskId !== undefined) {
         this.deps.backgroundTaskTranscriptedTerminal.add(taskId);
       }
-      this.appendBackgroundAgentEntry('failed', backgroundMeta, { error: event.error });
+      this.updateBackgroundAgentEntry(event.subagentId, 'failed', backgroundMeta, {
+        error: event.error,
+        endedAtMs: Date.now(),
+      });
       return;
     }
 
@@ -365,16 +400,17 @@ export class SubAgentEventHandler {
     return {
       agentId: event.subagentId,
       parentToolCallId: event.parentToolCallId,
-      agentName: event.subagentName,
+      agentName: event.backendName ?? event.subagentName,
       description: typeof description === 'string' ? description : undefined,
+      startedAtMs: Date.now(),
     };
   }
 
   private appendBackgroundAgentEntry(
     phase: 'started' | 'completed' | 'failed',
     meta: BackgroundAgentMetadata,
-    extras: { resultSummary?: string; error?: string } | undefined = undefined,
-  ): void {
+    extras: { resultSummary?: string; error?: string; usage?: import('@moonshot-ai/kimi-code-sdk').TokenUsage; endedAtMs?: number } | undefined = undefined,
+  ): TranscriptEntry {
     const status = formatBackgroundAgentTranscript(phase, meta, extras);
     const entry: TranscriptEntry = {
       id: nextTranscriptId(),
@@ -386,6 +422,30 @@ export class SubAgentEventHandler {
       backgroundAgentStatus: status,
     };
     this.host.appendTranscriptEntry(entry);
+    return entry;
+  }
+
+  private updateBackgroundAgentEntry(
+    agentId: string,
+    phase: 'completed' | 'failed',
+    meta: BackgroundAgentMetadata,
+    extras: { resultSummary?: string; error?: string; usage?: import('@moonshot-ai/kimi-code-sdk').TokenUsage; endedAtMs?: number },
+  ): void {
+    const entry = this.backgroundAgentEntries.get(agentId);
+    if (entry === undefined) {
+      this.appendBackgroundAgentEntry(phase, meta, extras);
+      return;
+    }
+    const status = formatBackgroundAgentTranscript(phase, meta, extras);
+    entry.content = status.headline;
+    entry.detail = status.detail;
+    if (entry.backgroundAgentStatus !== undefined) {
+      Object.assign(entry.backgroundAgentStatus, status);
+    } else {
+      entry.backgroundAgentStatus = status;
+    }
+    this.backgroundAgentEntries.delete(agentId);
+    this.host.state.ui.requestRender();
   }
 
   private rememberSubagent(
@@ -393,7 +453,7 @@ export class SubAgentEventHandler {
   ): void {
     this.subagentInfo.set(event.subagentId, {
       parentToolCallId: event.parentToolCallId,
-      name: event.subagentName,
+      name: event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
       swarmIndex: event.swarmIndex,
     });
@@ -416,7 +476,7 @@ export class SubAgentEventHandler {
     if (tc === undefined) return;
     tc.onSubagentSpawned({
       agentId: event.subagentId,
-      agentName: event.subagentName,
+      agentName: event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
     });
   }
@@ -626,6 +686,7 @@ function isSubagentLifecycleEvent(event: Event): event is SubagentLifecycleEvent
     event.type === 'subagent.spawned' ||
     event.type === 'subagent.started' ||
     event.type === 'subagent.suspended' ||
+    event.type === 'subagent.progress' ||
     event.type === 'subagent.completed' ||
     event.type === 'subagent.failed'
   );

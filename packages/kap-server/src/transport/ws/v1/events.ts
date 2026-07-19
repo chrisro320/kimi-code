@@ -182,6 +182,7 @@ export const VOLATILE_EVENT_TYPES = [
   'shell.output',
   'shell.started',
   'agent.status.updated',
+  'subagent.progress',
 ] as const;
 
 export type VolatileEventType = (typeof VOLATILE_EVENT_TYPES)[number];

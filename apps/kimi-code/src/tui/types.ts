@@ -5,11 +5,13 @@ import type {
   PermissionMode,
   ProviderConfig,
   PromptPart,
+  SessionUsage,
   ThinkingEffort,
   ToolInputDisplay,
 } from '@moonshot-ai/kimi-code-sdk';
 
-import type { NotificationsConfig, UpgradePreferences } from './config';
+import type { NotificationsConfig, StatuslineConfig, UpgradePreferences } from './config';
+import type { ManagedUsageReport } from './components/messages/usage-panel';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types';
 import type { ColorToken, ThemeName } from './theme';
 
@@ -52,6 +54,27 @@ export interface AppState {
   disablePasteBurst?: boolean;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
+  /** Client statusline preferences (bottom quota + cache-hit row). Optional so
+   * existing fixtures stay valid; the runtime always populates it from config. */
+  statusline?: StatuslineConfig;
+  /**
+   * Latest managed-plan usage snapshot for the statusline (weekly + 5h
+   * windows). Populated by the background poller in kimi-tui; null while
+   * loading or when the provider is not a managed Kimi Code plan.
+   */
+  managedUsage?: ManagedUsageReport | null;
+  /** Error hint from the last managed-usage poll; statusline shows `--`. */
+  managedUsageError?: string;
+  /** Latest session token usage snapshot (byModel), for total + cache-hit. */
+  sessionUsage?: SessionUsage | null;
+  /** Cumulative session cache-hit ratio: ΣcacheRead / Σinput. null if unknown. */
+  sessionCacheHit?: number | null;
+  /** Most-recent-turn cache-hit ratio (delta between usage snapshots). */
+  lastCacheHit?: number | null;
+  /** Total session tokens (all input kinds + output), for the statusline. */
+  totalTokens?: number;
+  /** Epoch ms of the last assistant reply; anchors the statusline TTL countdown. */
+  lastReplyAt?: number;
   availableModels: Record<string, ModelAlias>;
   availableProviders: Record<string, ProviderConfig>;
   sessionTitle: string | null;
@@ -107,6 +130,15 @@ export interface BackgroundAgentMetadata {
   readonly parentToolCallId: string;
   readonly agentName?: string;
   readonly description?: string;
+  readonly startedAtMs?: number;
+  readonly tokens?: number;
+}
+
+export interface ActiveBackgroundAgentStatus {
+  readonly agentId: string;
+  readonly agentName: string;
+  readonly startedAtMs: number;
+  readonly tokens?: number;
 }
 
 export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed';
@@ -115,6 +147,9 @@ export interface BackgroundAgentStatusData {
   readonly phase: BackgroundAgentStatusPhase;
   readonly headline: string;
   readonly detail?: string;
+  readonly startedAtMs?: number;
+  readonly endedAtMs?: number;
+  readonly tokens?: number;
 }
 
 export interface CompactionTranscriptData {

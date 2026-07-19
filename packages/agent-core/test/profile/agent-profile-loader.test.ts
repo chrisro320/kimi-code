@@ -159,11 +159,20 @@ describe('default agent profiles', () => {
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['coder']).toBe(
       DEFAULT_AGENT_PROFILES['coder'],
     );
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['coder-ex']).toBe(
+      DEFAULT_AGENT_PROFILES['coder-ex'],
+    );
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['explore']).toBe(
       DEFAULT_AGENT_PROFILES['explore'],
     );
     expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['plan']).toBe(
       DEFAULT_AGENT_PROFILES['plan'],
+    );
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['reviewer']).toBe(
+      DEFAULT_AGENT_PROFILES['reviewer'],
+    );
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['frontend-artist']).toBe(
+      DEFAULT_AGENT_PROFILES['frontend-artist'],
     );
 
     expect(DEFAULT_AGENT_PROFILES['agent']?.tools).toEqual(
@@ -203,8 +212,15 @@ describe('default agent profiles', () => {
       'Write',
       'mcp__*',
     ]);
+    expect(DEFAULT_AGENT_PROFILES['coder-ex']?.tools).toEqual(
+      DEFAULT_AGENT_PROFILES['coder']?.tools,
+    );
+    expect(DEFAULT_AGENT_PROFILES['coder-ex']?.whenToUse).toContain('quality bar');
     expect(DEFAULT_AGENT_PROFILES['explore']?.tools).not.toContain('Write');
     expect(DEFAULT_AGENT_PROFILES['plan']?.tools).not.toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Write');
+    expect(DEFAULT_AGENT_PROFILES['reviewer']?.tools).not.toContain('Edit');
+    expect(DEFAULT_AGENT_PROFILES['frontend-artist']?.tools).toContain('Write');
   });
 
   it('renders the model-invocable skill listing for bundled prompts', () => {

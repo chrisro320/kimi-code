@@ -29,6 +29,7 @@ describe('update preference commands', () => {
           editorCommand: null,
           notifications: { enabled: true, condition: 'unfocused' as const },
           upgrade: { autoInstall: true },
+          statusline: { enabled: true, command: 'statusline-helper' },
         },
         theme: { palette: darkColors },
       },
@@ -45,6 +46,7 @@ describe('update preference commands', () => {
       disablePasteBurst: false,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: false },
+      statusline: { enabled: true, command: 'statusline-helper' },
     });
     expect(setAppState).toHaveBeenCalledWith({ upgrade: { autoInstall: false } });
     expect(track).toHaveBeenCalledWith('upgrade_preference_changed', { auto_install: false });

@@ -633,6 +633,28 @@ describe('BackgroundManager — agent recovery notification bodies', () => {
     expect(text).not.toMatch(/Agent\(resume="agent-8"/);
   });
 
+  it('failed external agent task body never mentions recovery or resume', async () => {
+    const { agent, manager } = createBackgroundManager();
+    const taskId = manager.registerTask(
+      agentTask(
+        Promise.reject(new Error('external backend failed')),
+        'external repository inspection',
+        { agentId: 'external-cli-123' },
+      ),
+    );
+
+    await manager.wait(taskId);
+
+    await vi.waitFor(() => {
+      expect(agent.turn.steer).toHaveBeenCalled();
+    });
+    const [content] = agent.turn.steer.mock.calls[0]!;
+    const text = (content as Array<{ text: string }>)[0]!.text;
+    expect(text).toContain('agent_id="external-cli-123"');
+    expect(text).not.toContain('To recover or continue');
+    expect(text).not.toContain('Agent(resume=');
+  });
+
   it('process task body never mentions resume', async () => {
     const { agent, manager } = createBackgroundManager();
     const taskId = registerProcess(manager, immediateProcess(1), 'false', 'shell');

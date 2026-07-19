@@ -50,6 +50,7 @@ type BaseQueuedSubagentTask<T> = {
   readonly swarmItem?: string;
   readonly runInBackground: boolean;
   readonly timeout?: number;
+  readonly modelAlias?: string;
   readonly signal?: AbortSignal;
 };
 
@@ -70,6 +71,7 @@ export type QueuedSubagentTask<T = unknown> =
 export type SubagentResult<T = unknown> = {
   readonly task: QueuedSubagentTask<T>;
   readonly agentId?: string;
+  readonly resumable?: boolean;
   readonly status: 'completed' | 'failed' | 'aborted';
   readonly state?: 'started' | 'not_started';
   readonly result?: string;
@@ -102,6 +104,7 @@ type TaskState<T> = {
   readonly index: number;
   readonly task: QueuedSubagentTask<T>;
   agentId?: string;
+  resumable?: boolean;
   retryAgentId?: string;
   retryCount: number;
   retryReadyAt: number;
@@ -324,6 +327,7 @@ export class SubagentBatch<T> {
         const spawnOptions: SpawnSubagentOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
+          modelAlias: task.modelAlias,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);
@@ -333,11 +337,13 @@ export class SubagentBatch<T> {
     }
 
     attempt.state.agentId = handle.agentId;
+    attempt.state.resumable = handle.resumable;
     try {
       const completion = await handle.completion;
       return {
         task,
         agentId: handle.agentId,
+        resumable: handle.resumable,
         status: 'completed',
         result: completion.result,
         usage: completion.usage,
@@ -363,6 +369,7 @@ export class SubagentBatch<T> {
     return {
       task: attempt.state.task,
       agentId: attempt.state.agentId,
+      resumable: attempt.state.resumable,
       status,
       state: attempt.state.agentId === undefined ? 'not_started' : 'started',
       error: this.attemptErrorMessage(attempt, error, status),

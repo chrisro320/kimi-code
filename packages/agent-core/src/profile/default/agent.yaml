@@ -36,8 +36,20 @@ tools:
 
 subagents:
   coder:
-    description: General software engineering agent — the only subagent type with file-editing tools; use it for any delegated task that must modify code.
+    description: Backend, core logic, CLI, infrastructure, build, and non-visual engineering agent; use frontend-artist for primarily frontend, UI, visual, or art work.
+  coder-ex:
+    description: >-
+      High-assurance escalation worker for correcting coder results that miss requirements,
+      fail validation, damage existing work, or fall below the required quality bar. Do not
+      escalate merely because a task is large: first assess the coder's actual output against
+      requirements and evidence. When escalating, give coder-ex the original task, the prior
+      result or diff, concrete deficiencies, and failed or missing validation; do not keep
+      asking the same coder to repair a result you no longer trust.
   explore:
     description: Fast codebase exploration with prompt-enforced read-only behavior.
   plan:
     description: Read-only implementation planning and architecture design.
+  reviewer:
+    description: Read-only code review focused on correctness, security, regressions, and test gaps.
+  frontend-artist:
+    description: Frontend implementation plus visual, game-art, and media asset production.

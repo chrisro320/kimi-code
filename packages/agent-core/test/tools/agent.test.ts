@@ -608,6 +608,24 @@ describe('AgentTool', () => {
     expect(result.output).toMatch(/task\.lost|task\.failed|task\.killed/);
   });
 
+  it('offers a conditional resume hint for external background agents', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockResolvedValue({
+        agentId: 'external-cli-123',
+        profileName: 'coder',
+        resumed: false,
+        resumable: true,
+        completion: new Promise<{ result: string }>(() => {}),
+      }),
+    });
+    const result = await executeTool(
+      agentTool(host, createBackgroundManager().manager),
+      context({ prompt: 'Investigate', description: 'External work', run_in_background: true }),
+    );
+    expect(result.output).toContain('resume_hint:');
+    expect(result.output).toContain('Agent(resume=');
+  });
+
   it('rejects background subagents when background execution is disabled', async () => {
     const host = mockSubagentHost({
       spawn: vi.fn().mockResolvedValue({
@@ -840,61 +858,72 @@ describe('AgentTool', () => {
     expect(result.output).toContain('wait for the user');
   });
 
-  it('returns the spawned agent id when a foreground subagent times out', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      const host = mockSubagentHost({
-        spawn: vi.fn(
-          (
-            profileNameOrOptions: string | { readonly signal: AbortSignal },
-            legacyOptions?: { readonly signal: AbortSignal },
-          ) =>
-          Promise.resolve({
-            agentId: 'agent-child',
-            profileName: 'coder',
-            resumed: false,
-            completion: new Promise<{ result: string }>((_resolve, reject) => {
-              const signal =
-                typeof profileNameOrOptions === 'string'
-                  ? legacyOptions!.signal
-                  : profileNameOrOptions.signal;
-              signal.addEventListener(
-                'abort',
-                () => {
-                  reject(signal.reason);
-                },
-                { once: true },
-              );
+  it.each([
+    { agentId: 'agent-child', shouldOfferResume: true },
+    { agentId: 'external-cli-123', shouldOfferResume: false },
+  ])(
+    'returns the spawned agent id when foreground $agentId times out',
+    async ({ agentId, shouldOfferResume }) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const host = mockSubagentHost({
+          spawn: vi.fn(
+            (
+              profileNameOrOptions: string | { readonly signal: AbortSignal },
+              legacyOptions?: { readonly signal: AbortSignal },
+            ) =>
+            Promise.resolve({
+              agentId,
+              profileName: 'coder',
+              resumed: false,
+              completion: new Promise<{ result: string }>((_resolve, reject) => {
+                const signal =
+                  typeof profileNameOrOptions === 'string'
+                    ? legacyOptions!.signal
+                    : profileNameOrOptions.signal;
+                signal.addEventListener(
+                  'abort',
+                  () => {
+                    reject(signal.reason);
+                  },
+                  { once: true },
+                );
+              }),
             }),
+          ),
+        });
+        const tool = agentTool(host);
+
+        const resultPromise = executeTool(tool,
+          context({
+            prompt: 'Investigate',
+            description: 'Find cause',
           }),
-        ),
-      });
-      const tool = agentTool(host);
+        );
+        await vi.advanceTimersByTimeAsync(DEFAULT_SUBAGENT_TIMEOUT_MS);
+        const result = await resultPromise;
 
-      const resultPromise = executeTool(tool,
-        context({
-          prompt: 'Investigate',
-          description: 'Find cause',
-        }),
-      );
-      await vi.advanceTimersByTimeAsync(DEFAULT_SUBAGENT_TIMEOUT_MS);
-      const result = await resultPromise;
-
-      expect(result).toMatchObject({ isError: true });
-      expect(result.output).toContain('agent_id: agent-child');
-      expect(result.output).toContain('actual_subagent_type: coder');
-      expect(result.output).toContain('status: failed');
-      expect(result.output).toContain(
-        `subagent error: Agent timed out after ${formatSubagentTimeoutDescription(DEFAULT_SUBAGENT_TIMEOUT_MS)}.`,
-      );
-      expect(result.output).toContain('resume_hint:');
-      expect(result.output).toContain('Agent(resume="agent-child", prompt="continue")');
-      expect(result.output).toContain('do not set subagent_type');
-      expect(result.output).toContain('retains its prior context');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        expect(result).toMatchObject({ isError: true });
+        expect(result.output).toContain(`agent_id: ${agentId}`);
+        expect(result.output).toContain('actual_subagent_type: coder');
+        expect(result.output).toContain('status: failed');
+        expect(result.output).toContain(
+          `subagent error: Agent timed out after ${formatSubagentTimeoutDescription(DEFAULT_SUBAGENT_TIMEOUT_MS)}.`,
+        );
+        if (shouldOfferResume) {
+          expect(result.output).toContain('resume_hint:');
+          expect(result.output).toContain('Agent(resume="agent-child", prompt="continue")');
+          expect(result.output).toContain('do not set subagent_type');
+          expect(result.output).toContain('retain');
+        } else {
+          expect(result.output).not.toContain('resume_hint:');
+          expect(result.output).not.toContain('Agent(resume=');
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 function profile(input: {

@@ -319,7 +319,7 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
     } else if (targetKey === 'experimental' && isPlainObject(value)) {
       result[targetKey] = cloneRecord(value);
     } else if (targetKey === 'subagent' && isPlainObject(value)) {
-      result[targetKey] = transformPlainObject(value);
+      result[targetKey] = transformSubagentData(value);
     } else if (!isPlainObject(value)) {
       result[targetKey] = value;
     }
@@ -368,6 +368,16 @@ function transformModelData(data: Record<string, unknown>): Record<string, unkno
   const out = transformPlainObject(data);
   if (isPlainObject(out['overrides'])) {
     out['overrides'] = transformPlainObject(out['overrides']);
+  }
+  return out;
+}
+
+function transformSubagentData(data: Record<string, unknown>): Record<string, unknown> {
+  const out = transformPlainObject(data);
+  for (const key of ['routing', 'backends']) {
+    if (isPlainObject(out[key])) {
+      out[key] = transformRecord(out[key], transformPlainObject);
+    }
   }
   return out;
 }
@@ -681,7 +691,21 @@ function backgroundToToml(
 function subagentToToml(subagent: SubagentConfig, rawSubagent: unknown): Record<string, unknown> {
   const out = cloneRecord(rawSubagent);
   for (const [key, value] of Object.entries(subagent)) {
-    setDefined(out, camelToSnake(key), value);
+    if ((key === 'routing' || key === 'backends') && isPlainObject(value)) {
+      const rawSection = isPlainObject(rawSubagent) ? rawSubagent[key] : undefined;
+      const converted: Record<string, unknown> = {};
+      for (const [name, entry] of Object.entries(value)) {
+        const rawEntry = isPlainObject(rawSection) ? rawSection[name] : undefined;
+        const entryOut = cloneRecord(rawEntry);
+        for (const [entryKey, entryValue] of Object.entries(entry)) {
+          setDefined(entryOut, camelToSnake(entryKey), entryValue);
+        }
+        converted[name] = entryOut;
+      }
+      out[camelToSnake(key)] = converted;
+    } else {
+      setDefined(out, camelToSnake(key), value);
+    }
   }
   return out;
 }

@@ -1,3 +1,5 @@
+import type { TokenUsage } from '@moonshot-ai/kimi-code-sdk';
+
 import type {
   BackgroundAgentMetadata,
   BackgroundAgentStatusData,
@@ -17,7 +19,7 @@ function normalizeBackgroundField(value: string | undefined): string | undefined
 export function formatBackgroundAgentTranscript(
   phase: BackgroundAgentStatusPhase,
   meta: BackgroundAgentMetadata,
-  extras: { resultSummary?: string; error?: string } | undefined = undefined,
+  extras: { resultSummary?: string; error?: string; usage?: TokenUsage; endedAtMs?: number } | undefined = undefined,
 ): BackgroundAgentStatusData {
   const normalizedAgentName = normalizeBackgroundField(meta.agentName);
   const subject = normalizedAgentName !== undefined ? `${normalizedAgentName} agent` : 'agent';
@@ -32,9 +34,16 @@ export function formatBackgroundAgentTranscript(
     (part): part is string => part !== undefined,
   );
 
+  const usage = extras?.usage;
+  const tokens = usage === undefined
+    ? undefined
+    : usage.inputOther + usage.output + usage.inputCacheRead + usage.inputCacheCreation;
   return {
     phase,
     headline,
     detail: detailParts.length > 0 ? detailParts.join(' · ') : undefined,
+    startedAtMs: meta.startedAtMs,
+    endedAtMs: extras?.endedAtMs,
+    tokens,
   };
 }

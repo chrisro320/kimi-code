@@ -1,3 +1,9 @@
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   APIProviderRateLimitError,
   isProviderRateLimitError,
@@ -28,6 +34,17 @@ import {
   type SubagentSuspendedEvent,
   type QueuedSubagentTask,
 } from './subagent-batch';
+import {
+  EXTERNAL_SUBAGENT_ID_PREFIX,
+  isExternalSubagentId,
+  materializeBackendArgs,
+  resolveSubagentRoute,
+  parseExternalSubagentOutput,
+  parseExternalSubagentStreamLine,
+  wrapExternalSubagentPrompt,
+  type ExternalSubagentUsage,
+  type ResolvedSubagentRoute,
+} from './subagent-routing';
 import SUMMARY_CONTINUATION_PROMPT from './summary-continuation.md?raw';
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -121,6 +138,7 @@ export interface RunSubagentOptions {
 export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
+  readonly modelAlias?: string;
 }
 
 type SubagentCompletion = {
@@ -132,6 +150,7 @@ export type SubagentHandle = {
   readonly agentId: string;
   readonly profileName: string;
   readonly resumed: boolean;
+  readonly resumable?: boolean;
   readonly completion: Promise<SubagentCompletion>;
 };
 
@@ -154,6 +173,14 @@ export class SessionSubagentHost {
 
     const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
     const profile = this.resolveProfile(parent, options.profileName);
+    const route = resolveSubagentRoute(
+      this.session.options.config ?? { providers: {} },
+      profile.name,
+      options.modelAlias,
+    );
+    if (route.kind === 'external') {
+      return this.spawnExternal(parent, profile.name, route, options);
+    }
     const { id, agent } = await this.session.createAgent(
       { type: 'sub', generate: parent.rawGenerate },
       { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
@@ -161,7 +188,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
-        await this.configureChild(parent, agent, profile);
+        await this.configureChild(parent, agent, profile, route.modelAlias);
         return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
@@ -176,8 +203,84 @@ export class SessionSubagentHost {
     };
   }
 
+  private spawnExternal(
+    parent: Agent,
+    profileName: string,
+    route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+    options: RunSubagentOptions & { readonly swarmItem?: string },
+    sessionId: string = randomUUID(),
+    resumed = false,
+    existingAgentId?: string,
+  ): SubagentHandle {
+    const id = existingAgentId ?? `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
+    if (existingAgentId === undefined) {
+      this.session.metadata.agents[id] = {
+        type: 'sub',
+        parentAgentId: this.ownerAgentId,
+        swarmItem: options.swarmItem,
+        externalBackend: route.backendName,
+        externalProfile: profileName,
+        externalModelAlias: route.modelAlias,
+        externalSessionId: sessionId,
+      };
+      void this.session.writeMetadata();
+    }
+    const completion = this.runWithActiveChild(id, options, async (runOptions) => {
+      this.emitSubagentSpawned(parent, id, profileName, runOptions, route.backendName);
+      try {
+        await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
+        runOptions.signal.throwIfAborted();
+        this.emitSubagentStarted(parent, id);
+        runOptions.onReady?.();
+        const completion = await runExternalSubagent(
+          route,
+          parent.config.cwd,
+          wrapExternalSubagentPrompt(profileName, runOptions.prompt),
+          runOptions.signal,
+          (stderr) => {
+            this.session.log.warn('external subagent stderr', {
+              subagentId: id,
+              backend: route.backendName,
+              stderr,
+            });
+          },
+          (usage) => {
+            parent.emitEvent({
+              type: 'subagent.progress',
+              subagentId: id,
+              usage,
+            });
+          },
+          resumed ? route.backend.resumeArgs ?? route.backend.args ?? [] : route.backend.args ?? [],
+          sessionId,
+        );
+        parent.emitEvent({
+          type: 'subagent.completed',
+          subagentId: id,
+          resultSummary: completion.result,
+          usage: completion.usage,
+        });
+        this.triggerSubagentStop(parent, profileName, completion.result);
+        return completion;
+      } catch (error) {
+        this.emitSubagentFailed(parent, id, runOptions, error);
+        throw error;
+      }
+    });
+    return {
+      agentId: id,
+      profileName,
+      resumed,
+      resumable: route.backend.resumeArgs !== undefined,
+      completion,
+    };
+  }
+
   async resume(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
+    if (isExternalSubagentId(agentId)) {
+      return this.resumeExternal(agentId, options);
+    }
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
@@ -192,8 +295,50 @@ export class SessionSubagentHost {
     return { agentId, profileName, resumed: true, completion };
   }
 
+  private async resumeExternal(
+    agentId: string,
+    options: RunSubagentOptions,
+  ): Promise<SubagentHandle> {
+    const metadata = this.session.metadata.agents[agentId];
+    if (
+      metadata?.type !== 'sub' ||
+      metadata.parentAgentId !== this.ownerAgentId ||
+      metadata.externalBackend === undefined ||
+      metadata.externalProfile === undefined ||
+      metadata.externalSessionId === undefined
+    ) {
+      throw new Error(`External subagent "${agentId}" has no resumable session metadata.`);
+    }
+    const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
+    const route = resolveSubagentRoute(
+      this.session.options.config ?? { providers: {} },
+      metadata.externalProfile,
+      metadata.externalModelAlias,
+    );
+    if (route.kind !== 'external' || route.backendName !== metadata.externalBackend) {
+      throw new Error(`External subagent "${agentId}" backend configuration is no longer available.`);
+    }
+    if (route.backend.resumeArgs === undefined) {
+      throw new Error(
+        `External subagent backend "${route.backendName}" has no resume_args; launch a fresh replacement instead.`,
+      );
+    }
+    return this.spawnExternal(
+      parent,
+      metadata.externalProfile,
+      route,
+      options,
+      metadata.externalSessionId,
+      true,
+      agentId,
+    );
+  }
+
   async retry(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
+    if (isExternalSubagentId(agentId)) {
+      return this.resumeExternal(agentId, options);
+    }
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       try {
@@ -296,6 +441,7 @@ export class SessionSubagentHost {
     if (metadata?.type !== 'sub' || metadata.parentAgentId !== this.ownerAgentId) {
       return undefined;
     }
+    if (metadata.externalProfile !== undefined) return metadata.externalProfile;
     return (await this.session.ensureAgentResumed(agentId)).config.profileName;
   }
 
@@ -400,11 +546,11 @@ export class SessionSubagentHost {
     parent: Agent,
     child: Agent,
     profile: ResolvedAgentProfile,
+    modelAlias?: string,
   ): Promise<void> {
-    // A subagent always inherits the parent agent's model.
     child.config.update({
       cwd: parent.config.cwd,
-      modelAlias: parent.config.modelAlias,
+      modelAlias: modelAlias ?? parent.config.modelAlias,
       thinkingEffort: parent.config.thinkingEffort,
     });
 
@@ -504,11 +650,13 @@ export class SessionSubagentHost {
     childId: string,
     profileName: string,
     options: RunSubagentOptions,
+    backendName?: string,
   ): void {
     parent.emitEvent({
       type: 'subagent.spawned',
       subagentId: childId,
       subagentName: profileName,
+      backendName,
       parentToolCallId: options.parentToolCallId,
       parentToolCallUuid: options.parentToolCallUuid,
       parentAgentId: this.ownerAgentId,
@@ -544,6 +692,180 @@ export class SessionSubagentHost {
       subagentId: childId,
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+export async function runExternalSubagent(
+  route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+  cwd: string,
+  prompt: string,
+  signal: AbortSignal,
+  onStderr: (stderr: string) => void,
+  onUsage?: (usage: ExternalSubagentUsage) => void,
+  args: readonly string[] = route.backend.args ?? [],
+  sessionId = '',
+): Promise<SubagentCompletion> {
+  signal.throwIfAborted();
+  let promptDirectory: string | undefined;
+  let promptFile: string | undefined;
+  if (args.some((arg) => arg.includes('{prompt_file}'))) {
+    promptDirectory = await mkdtemp(join(tmpdir(), 'kimi-subagent-'));
+    promptFile = join(promptDirectory, 'prompt.txt');
+    await writeFile(promptFile, prompt, 'utf8');
+  }
+
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(route.backend.command, materializeBackendArgs(route, cwd, promptFile, args, sessionId), {
+      cwd,
+      shell: false,
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+  } catch (error) {
+    if (promptDirectory !== undefined) await rm(promptDirectory, { recursive: true, force: true });
+    throw error;
+  }
+
+  return new Promise<SubagentCompletion>((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let abortReason: unknown;
+    let stdinError: unknown;
+    let stdoutLineBuffer = '';
+    let lastReportedUsage: ExternalSubagentUsage | undefined;
+    const usageByKey = new Map<string, ExternalSubagentUsage>();
+    let anonymousUsage: ExternalSubagentUsage | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const reportUsage = (usage: ExternalSubagentUsage): void => {
+      if (
+        lastReportedUsage?.inputOther === usage.inputOther &&
+        lastReportedUsage.output === usage.output &&
+        lastReportedUsage.inputCacheRead === usage.inputCacheRead &&
+        lastReportedUsage.inputCacheCreation === usage.inputCacheCreation
+      ) return;
+      lastReportedUsage = usage;
+      onUsage?.(usage);
+    };
+    const processStdoutLine = (line: string): void => {
+      const update = parseExternalSubagentStreamLine(line);
+      if (update?.usage === undefined) return;
+      if (update.finalUsage === true) {
+        reportUsage(update.usage);
+        return;
+      }
+      if (update.usageKey !== undefined) usageByKey.set(update.usageKey, update.usage);
+      else anonymousUsage = update.usage;
+      const usages = [...usageByKey.values(), ...(anonymousUsage === undefined ? [] : [anonymousUsage])];
+      reportUsage(usages.reduce<ExternalSubagentUsage>(
+        (total, usage) => ({
+          inputOther: total.inputOther + usage.inputOther,
+          output: total.output + usage.output,
+          inputCacheRead: total.inputCacheRead + usage.inputCacheRead,
+          inputCacheCreation: total.inputCacheCreation + usage.inputCacheCreation,
+        }),
+        { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+      ));
+    };
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      if (promptDirectory !== undefined) void rm(promptDirectory, { recursive: true, force: true });
+    };
+    const settle = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (stdoutLineBuffer.length > 0) processStdoutLine(stdoutLineBuffer);
+      if (stderr.length > 0) onStderr(stderr);
+      if (error !== undefined) reject(error);
+      else resolve(parseExternalSubagentOutput(stdout));
+    };
+    const kill = (): void => {
+      killTimer ??= killExternalProcess(child);
+    };
+    const onAbort = (): void => {
+      abortReason = signal.reason ?? new Error('Aborted');
+      kill();
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      stdoutLineBuffer += chunk;
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() ?? '';
+      for (const line of lines) processStdoutLine(line);
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', (error) => {
+      if (abortReason !== undefined || stdinError !== undefined) return;
+      settle(error);
+    });
+    child.on('close', (code, closeSignal) => {
+      if (abortReason !== undefined) return settle(abortReason);
+      if (stdinError !== undefined) return settle(stdinError);
+      if (code === 0) return settle();
+      const detail = stderr.trim();
+      const suffix = detail.length > 0 ? `: ${detail}` : '';
+      settle(new Error(
+        `External subagent backend "${route.backendName}" exited with ${code === null ? `signal ${closeSignal ?? 'unknown'}` : `code ${String(code)}`}${suffix}`,
+      ));
+    });
+    child.stdin.on('error', (error) => {
+      stdinError = error;
+      if (abortReason === undefined) kill();
+    });
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    if (promptFile === undefined) child.stdin.end(prompt);
+    else child.stdin.end();
+  });
+}
+
+function killExternalProcess(child: ChildProcessWithoutNullStreams): ReturnType<typeof setTimeout> {
+  if (process.platform === 'win32') {
+    killProcessTreeWindows(child, false);
+  } else {
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGTERM');
+      else child.kill('SIGTERM');
+    } catch {
+      try {
+        child.kill('SIGTERM');
+      } catch {}
+    }
+  }
+  const timer = setTimeout(() => {
+    if (process.platform === 'win32') {
+      killProcessTreeWindows(child, true);
+      return;
+    }
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch {}
+  }, 100);
+  timer.unref();
+  return timer;
+}
+
+function killProcessTreeWindows(child: ChildProcessWithoutNullStreams, force: boolean): void {
+  if (child.pid === undefined) return;
+  const args = force
+    ? ['/T', '/F', '/PID', String(child.pid)]
+    : ['/T', '/PID', String(child.pid)];
+  try {
+    const killer = spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+    killer.once('error', () => {});
+  } catch {
+    try {
+      child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    } catch {}
   }
 }
 

@@ -15,7 +15,7 @@ import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
 import { currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
-import type { AppState } from '#/tui/types';
+import type { ActiveBackgroundAgentStatus, AppState } from '#/tui/types';
 import {
   createGitStatusCache,
   formatGitBadgeBase,
@@ -24,10 +24,17 @@ import {
   type GitStatusCache,
 } from '#/utils/git/git-status';
 import {
+  createCustomStatuslineCache,
+  type CustomStatuslineCache,
+  type CustomStatuslinePayload,
+} from '#/utils/statusline/custom-statusline';
+import {
   formatTokenCount,
+  ratioSeverity,
   usagePercent,
   usagePercentFromRatio,
 } from '#/utils/usage/usage-format';
+import type { ManagedUsageRow } from '#/tui/components/messages/usage-panel';
 
 const MAX_CWD_SEGMENTS = 3;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
@@ -172,6 +179,133 @@ function formatContextStatus(usage: number, tokens?: number, maxTokens?: number)
   return `context: ${String(usagePercentFromRatio(usage))}%`;
 }
 
+/**
+ * Statusline row (footer line 3): managed-plan quota + cache-hit + tokens, e.g.
+ *   `7d 56%(5d6h) │ 5h 7%(3h49m) │ cache 91%/83% │ 536k tok`
+ * Data is read from AppState snapshots populated by the kimi-tui background
+ * poller — this render path never touches the network. Returns null when the
+ * statusline is disabled. `compact` drops the reset-time hints for narrow
+ * terminals. Quota cells show `--` until the first poll lands / on error.
+ */
+function severityHex(ratio: number, colors: ColorPalette): string {
+  const sev = ratioSeverity(ratio);
+  return sev === 'danger' ? colors.error : sev === 'warn' ? colors.warning : colors.text;
+}
+
+function compactResetHint(hint: string | undefined): string {
+  if (hint === undefined) return '';
+  const body = hint.replace(/^resets in\s*/i, '').trim();
+  if (body.length === 0 || body.toLowerCase() === 'reset') return '';
+  return body.split(/\s+/).slice(0, 2).join('');
+}
+
+function quotaCell(
+  label: string,
+  row: ManagedUsageRow | null,
+  colors: ColorPalette,
+  compact: boolean,
+): string {
+  if (row === null) {
+    return `${label} ${chalk.hex(colors.textMuted)('--')}`;
+  }
+  const ratio = row.limit > 0 ? Math.max(0, Math.min(row.used / row.limit, 1)) : 0;
+  const pct = chalk.hex(severityHex(ratio, colors))(`${String(Math.round(ratio * 100))}%`);
+  const reset = compact ? '' : compactResetHint(row.resetHint);
+  const resetStr = reset.length > 0 ? chalk.hex(colors.textMuted)(`(${reset})`) : '';
+  return `${label} ${pct}${resetStr}`;
+}
+
+function pickFiveHourWindow(limits: readonly ManagedUsageRow[]): ManagedUsageRow | null {
+  return limits.find((l) => /\b5\s*h/i.test(l.label)) ?? limits[0] ?? null;
+}
+
+function formatHitRatio(value: number | null | undefined): string {
+  return value === null || value === undefined ? '--' : `${String(Math.round(value * 100))}%`;
+}
+
+/** Statusline TTL countdown window (ms) — resets on each assistant reply. */
+const STATUSLINE_TTL_MS = 300_000;
+
+/**
+ * Idle estimate of when the prompt cache goes cold. The window resets on each
+ * reply (`lastReplyAt`) and then ticks down *only while idle* — it is a "how
+ * long until my cache expires if I stay away" readout, not a pomodoro clock.
+ * While a turn is active the cache is being refreshed every request, so the
+ * cell freezes at the full window instead of counting down.
+ */
+function formatAgentElapsed(startedAtMs: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${String(minutes)}m ${String(seconds % 60)}s` : `${String(seconds)}s`;
+}
+
+function formatActiveAgentStatus(agent: ActiveBackgroundAgentStatus, colors: ColorPalette): string {
+  const metrics = [
+    formatAgentElapsed(agent.startedAtMs),
+    agent.tokens === undefined ? undefined : `${formatTokenCount(agent.tokens)} tok`,
+  ].filter((part): part is string => part !== undefined).join(' · ');
+  return chalk.hex(colors.primary)(`${agent.agentName} ${metrics}`);
+}
+
+function ttlCell(
+  lastReplyAt: number | undefined,
+  active: boolean,
+  colors: ColorPalette,
+): string | null {
+  if (lastReplyAt === undefined) return null; // no reply yet → hide
+  const elapsed = active ? 0 : Date.now() - lastReplyAt;
+  const remaining = Math.floor((STATUSLINE_TTL_MS - elapsed) / 1000);
+  if (remaining <= 0) return null; // expired → hide
+  const mm = String(Math.floor(remaining / 60));
+  const ss = String(remaining % 60).padStart(2, '0');
+  const hex = remaining > 120 ? colors.success : remaining > 30 ? colors.warning : colors.error;
+  return `ttl ${chalk.hex(hex)(`${mm}:${ss}`)}`;
+}
+
+/** Builds the JSON payload piped to a `statusline.command` script's stdin. */
+export function buildCustomStatuslinePayload(state: AppState): CustomStatuslinePayload {
+  const report = state.managedUsage ?? null;
+  return {
+    weekly: report?.summary ?? null,
+    fiveHour: report !== null ? pickFiveHourWindow(report.limits) : null,
+    lastCacheHit: state.lastCacheHit ?? null,
+    sessionCacheHit: state.sessionCacheHit ?? null,
+    totalTokens: state.totalTokens ?? 0,
+    lastReplyAt: state.lastReplyAt ?? null,
+    streamingPhase: state.streamingPhase,
+  };
+}
+
+export function buildStatuslineRow(
+  state: AppState,
+  colors: ColorPalette,
+  compact = false,
+  customLine?: string | null,
+): string | null {
+  if (state.statusline?.enabled !== true) return null;
+  if (state.statusline.command !== undefined) return customLine ?? null;
+
+  const report = state.managedUsage ?? null;
+  const weekly = report?.summary ?? null;
+  const fiveHour = report !== null ? pickFiveHourWindow(report.limits) : null;
+
+  const cache =
+    `cache ${chalk.hex(colors.text)(formatHitRatio(state.lastCacheHit))}` +
+    `/${chalk.hex(colors.text)(formatHitRatio(state.sessionCacheHit))}`;
+  const tok = chalk.hex(colors.textDim)(`${formatTokenCount(state.totalTokens ?? 0)} tok`);
+
+  const sep = chalk.hex(colors.textDim)(' │ ');
+  const cells = [
+    quotaCell('7d', weekly, colors, compact),
+    quotaCell('5h', fiveHour, colors, compact),
+    cache,
+    tok,
+  ];
+  const ttl = ttlCell(state.lastReplyAt, state.streamingPhase !== 'idle', colors);
+  if (ttl !== null) cells.push(ttl);
+  return cells.join(sep);
+}
+
 export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): string {
   const base = chalk.hex(colors.textDim)(formatGitBadgeBase(status));
   if (status.pullRequest === null) return base;
@@ -187,10 +321,14 @@ export class FooterComponent implements Component {
   private readonly onRefresh: () => void;
   private gitCache: GitStatusCache;
   private gitCacheWorkDir: string;
+  private customStatuslineCache: CustomStatuslineCache | null = null;
+  private customStatuslineCommand: string | undefined;
   private transientHint: string | null = null;
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
   private goalTimer: ReturnType<typeof setInterval> | null = null;
+  /** 1s ticker that re-renders the statusline TTL countdown while it's live. */
+  private ttlTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Non-terminal background-task counts split by kind so the footer can
    * render two distinct badges. `bashTasks` covers `bash-*` BPM tasks
@@ -200,6 +338,8 @@ export class FooterComponent implements Component {
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  private activeBackgroundAgents: readonly ActiveBackgroundAgentStatus[] = [];
+  private backgroundAgentTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
@@ -208,6 +348,8 @@ export class FooterComponent implements Component {
     this.gitCache = createGitStatusCache(state.workDir, { onChange: this.onRefresh });
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
+    this.syncCustomStatuslineCache(state);
+    this.syncTtlTimer(state);
   }
 
   setState(state: AppState): void {
@@ -218,6 +360,8 @@ export class FooterComponent implements Component {
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
     this.state = state;
+    this.syncCustomStatuslineCache(state);
+    this.syncTtlTimer(state);
   }
 
   /**
@@ -239,9 +383,15 @@ export class FooterComponent implements Component {
    * count produces its own bracketed badge on line 1; zeros hide them
    * independently.
    */
-  setBackgroundCounts(counts: { bashTasks: number; agentTasks: number }): void {
+  setBackgroundCounts(counts: {
+    bashTasks: number;
+    agentTasks: number;
+    activeAgents?: readonly ActiveBackgroundAgentStatus[];
+  }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+    this.activeBackgroundAgents = counts.activeAgents ?? [];
+    this.syncBackgroundAgentTimer();
   }
 
   invalidate(): void {}
@@ -357,7 +507,48 @@ export class FooterComponent implements Component {
       line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
     }
 
-    return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
+    const rows = [truncateToWidth(line1, width), truncateToWidth(line2, width)];
+    const statusRow = this.renderStatuslineRow(state, colors, width);
+    if (statusRow !== null) rows.push(statusRow);
+    return rows;
+  }
+
+  /**
+   * Footer line 3 (statusline): full form first; if it overflows, retry in
+   * compact form (no reset hints); truncate as the final guard. Returns null
+   * when the statusline is disabled.
+   */
+  private renderStatuslineRow(state: AppState, colors: ColorPalette, width: number): string | null {
+    if (state.statusline?.enabled !== true) return null;
+    const customLine =
+      this.customStatuslineCache?.getLine(buildCustomStatuslinePayload(state)) ?? null;
+    const agentCells = this.activeBackgroundAgents.map((agent) => formatActiveAgentStatus(agent, colors));
+    const appendAgents = (base: string | null): string | null => {
+      const cells = [...(base === null ? [] : [base]), ...agentCells];
+      return cells.length === 0 ? null : cells.join(chalk.hex(colors.textDim)(' │ '));
+    };
+    let statusRow = appendAgents(buildStatuslineRow(state, colors, false, customLine));
+    if (statusRow === null) return null;
+    if (visibleWidth(statusRow) > width) {
+      statusRow = appendAgents(buildStatuslineRow(state, colors, true, customLine)) ?? statusRow;
+    }
+    return truncateToWidth(statusRow, width);
+  }
+
+  /**
+   * Recreate the custom-statusline cache whenever the configured command
+   * changes (including turning it on/off). Bare 'undefined' is the
+   * "not configured" sentinel so toggling back to the built-in row tears
+   * the cache down instead of leaking a stale spawn cadence.
+   */
+  private syncCustomStatuslineCache(state: AppState): void {
+    const command = state.statusline?.command;
+    if (command === this.customStatuslineCommand) return;
+    this.customStatuslineCommand = command;
+    this.customStatuslineCache =
+      command !== undefined
+        ? createCustomStatuslineCache(command, state.workDir, { onChange: this.onRefresh })
+        : null;
   }
 
   private syncGoalClock(goal: AppState['goal']): void {
@@ -383,10 +574,67 @@ export class FooterComponent implements Component {
     }
   }
 
+  /**
+   * Run a 1s ticker only while the TTL countdown is live: statusline enabled, a
+   * reply has landed, the window hasn't elapsed, and the turn is idle. The cell
+   * freezes at the full window while a turn is active, so ticking then would
+   * just re-render the same value — only the idle count-down needs the ticker.
+   */
+  private syncBackgroundAgentTimer(): void {
+    if (this.activeBackgroundAgents.length > 0) {
+      if (this.backgroundAgentTimer !== null) return;
+      this.backgroundAgentTimer = setInterval(() => this.onRefresh(), 1_000);
+      this.backgroundAgentTimer.unref?.();
+      return;
+    }
+    if (this.backgroundAgentTimer !== null) {
+      clearInterval(this.backgroundAgentTimer);
+      this.backgroundAgentTimer = null;
+    }
+  }
+
+  private syncTtlTimer(state: AppState): void {
+    const live =
+      state.statusline?.enabled === true &&
+      state.streamingPhase === 'idle' &&
+      state.lastReplyAt !== undefined &&
+      Date.now() - state.lastReplyAt < STATUSLINE_TTL_MS;
+    if (live) {
+      if (this.ttlTimer !== null) return;
+      this.ttlTimer = setInterval(() => {
+        const s = this.state;
+        const stillLive =
+          s.statusline?.enabled === true &&
+          s.streamingPhase === 'idle' &&
+          s.lastReplyAt !== undefined &&
+          Date.now() - s.lastReplyAt < STATUSLINE_TTL_MS;
+        if (!stillLive && this.ttlTimer !== null) {
+          clearInterval(this.ttlTimer); // window elapsed: final repaint + stop ticking
+          this.ttlTimer = null;
+        }
+        this.onRefresh();
+      }, 1_000);
+      this.ttlTimer.unref?.();
+      return;
+    }
+    if (this.ttlTimer !== null) {
+      clearInterval(this.ttlTimer);
+      this.ttlTimer = null;
+    }
+  }
+
   dispose(): void {
     if (this.goalTimer !== null) {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
+    }
+    if (this.ttlTimer !== null) {
+      clearInterval(this.ttlTimer);
+      this.ttlTimer = null;
+    }
+    if (this.backgroundAgentTimer !== null) {
+      clearInterval(this.backgroundAgentTimer);
+      this.backgroundAgentTimer = null;
     }
   }
 

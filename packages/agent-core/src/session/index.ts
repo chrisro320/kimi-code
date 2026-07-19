@@ -105,6 +105,11 @@ export interface AgentMeta {
   readonly type: AgentType;
   readonly parentAgentId?: string | null;
   readonly swarmItem?: string;
+  /** Metadata for an external CLI subagent; absent for in-process agents. */
+  readonly externalBackend?: string;
+  readonly externalProfile?: string;
+  readonly externalModelAlias?: string;
+  readonly externalSessionId?: string;
 }
 
 interface ResumedAgent {
@@ -1107,6 +1112,7 @@ export class Session {
 }
 
 export * from './subagent-host';
+export * from './subagent-routing';
 export * from './store';
 
 function initCompletionReminder(agentsMd: string): string {

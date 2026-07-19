@@ -19,6 +19,7 @@ import type { Agent } from '../..';
 import { errorMessage } from '../../loop/errors';
 import { resettableTimeoutOutcome, timeoutOutcome, type ResettableTimeoutPromise } from '../../utils/promise';
 import { escapeXml, escapeXmlAttr } from '../../utils/xml-escape';
+import { isExternalSubagentId } from '../../session/subagent-routing';
 import type { BackgroundTaskOrigin } from '../context';
 import { renderNotificationXml } from '../context/notification-xml';
 import { type BackgroundTaskPersistence } from './persist';
@@ -1056,7 +1057,7 @@ function buildBackgroundTaskNotificationBody(info: BackgroundTaskInfo): string {
   if (info.kind !== 'agent') return baseLine;
   if (info.status === 'completed') return baseLine;
   const agentId = info.agentId;
-  if (agentId === undefined || agentId === info.taskId) return baseLine;
+  if (agentId === undefined || agentId === info.taskId || isExternalSubagentId(agentId)) return baseLine;
 
   const recovery = [
     '',
