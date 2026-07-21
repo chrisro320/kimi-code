@@ -1281,6 +1281,66 @@ command = "vim"
     expect(driver.state.appState.permissionMode).toBe('auto');
   });
 
+  it('routes v2 task lifecycle events into the live background-agent footer', async () => {
+    const { driver } = await makeDriver();
+    driver.state.appState.statusline = { enabled: true };
+    driver.state.footer.setState(driver.state.appState);
+    const startedAt = Date.now() - 5_000;
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'subagent.spawned',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        subagentId: 'agent-live',
+        subagentName: 'coder',
+        backendName: 'claudecode',
+        parentToolCallId: 'tool-agent-live',
+        description: 'Live footer smoke',
+        runInBackground: true,
+      } as Event,
+      () => {},
+    );
+    const taskInfo = {
+      kind: 'agent' as const,
+      taskId: 'agent-task-live',
+      agentId: 'agent-live',
+      subagentType: 'coder',
+      description: 'Live footer smoke',
+      status: 'running' as const,
+      detached: true,
+      startedAt,
+      endedAt: null,
+    };
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'task.started',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        info: taskInfo,
+      } as Event,
+      () => {},
+    );
+
+    const activeFooter = driver.state.footer.render(160).map(stripSgr);
+    expect(activeFooter[0]).toContain('[1 agent running]');
+    expect(activeFooter.at(-1)).toMatch(/claudecode \d+s/);
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'task.terminated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        info: { ...taskInfo, status: 'completed', endedAt: Date.now() },
+      } as Event,
+      () => {},
+    );
+
+    const terminalFooter = driver.state.footer.render(160).map(stripSgr);
+    expect(terminalFooter[0]).not.toContain('agent running');
+    expect(terminalFooter.at(-1)).not.toContain('claudecode');
+  });
+
   it('removes turn-scoped background status entries and restores welcome', async () => {
     const { driver, session } = await makeDriver();
 
