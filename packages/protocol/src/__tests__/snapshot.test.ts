@@ -180,6 +180,7 @@ describe('events — volatile classification', () => {
       'tool.progress',
       'shell.output',
       'shell.started',
+      'shell.completed',
       'agent.status.updated',
       'subagent.progress',
     ]) {
