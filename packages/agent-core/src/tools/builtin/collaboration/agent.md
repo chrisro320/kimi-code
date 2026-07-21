@@ -8,6 +8,7 @@ Writing the prompt:
 
 Usage notes:
 - When the task continues earlier work a subagent already did, prefer resuming that agent (pass its `resume` id) over spawning a fresh instance — the resumed agent keeps its prior context.
+- When an initial delivery has fixable defects, missing requirements, or failed validation, resume the same agent with that concrete evidence before considering a replacement or escalation.
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 30-minute timeout. If one times out, resume the same agent instead of starting over.
 

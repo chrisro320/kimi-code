@@ -1200,6 +1200,33 @@ export class BackgroundManager {
             paths: manifest.paths.map((path) => path.relPath),
           };
           acknowledgePersisted = settlement.candidate.acknowledgePersisted;
+          let replayApplied = false;
+          try {
+            await this.replayCandidate(
+              this.agent.kaos,
+              settlement.candidate.draft,
+              manifest.requestedScope,
+            );
+            replayApplied = true;
+          } catch {
+            // A durable candidate is already available. Keep the exceptional
+            // conflict path actionable without discarding the completed run or
+            // spending another provider attempt.
+          }
+          if (replayApplied) {
+            try {
+              await persistence.writeEditingCandidateResolution(
+                entry.taskId,
+                manifest.candidateHash,
+                { kind: 'approved_applied', resolvedAt: new Date().toISOString() },
+              );
+            } catch {
+              // Replay already applied exactly once. Resolution metadata is
+              // best-effort here; do not expose an applied candidate as an
+              // actionable conflict that a later approval would replay again.
+            }
+            settlement = { status: 'completed' };
+          }
         } catch (error) {
           settlement = {
             status: 'failed',

@@ -70,4 +70,11 @@ describe('deterministic proactive dispatch policy fixtures', () => {
       `- \`${fixture.scenario}\` -> \`${fixture.action}\` / profile \`${fixture.profile}\` / rationale category \`${fixture.rationaleCategory}\``,
     );
   });
+
+  it('repairs a fixable coder delivery by resuming the same agent before escalation', () => {
+    const prompt = DEFAULT_AGENT_PROFILES['agent']?.systemPrompt(promptContext) ?? '';
+    expect(prompt).toContain('Agent(resume=<agent id>)');
+    expect(prompt).toContain('Do not spawn another coder for that scope while the original agent remains resumable.');
+    expect(prompt).toContain('Escalate to `coder-ex` only when the original session is demonstrably non-resumable');
+  });
 });

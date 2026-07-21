@@ -157,9 +157,12 @@ async function createRealCandidateTask(options: {
   readonly sourceText: string;
   readonly companionPath: string;
   readonly companionText: string;
+  readonly beforeRegister?: () => Promise<void>;
+  readonly replayCandidate?: ConstructorParameters<typeof BackgroundManager>[2];
 }): Promise<{
   readonly taskId: string;
   readonly candidate: EditingCandidateDraft;
+  readonly manager: BackgroundManager;
   readonly persistence: BackgroundTaskPersistence;
 }> {
   const worktree = await acquireSubagentWorktree(options.kaos, options.repo, {
@@ -185,16 +188,23 @@ async function createRealCandidateTask(options: {
       acknowledgePersisted: finish.acknowledgePersisted,
     },
   };
+  await options.beforeRegister?.();
   const created = createBackgroundManager({
     sessionDir: options.sessionDir,
     enableWorktreeIsolation: true,
     kaos: options.kaos,
+    replayCandidate: options.replayCandidate,
   });
   const taskId = created.manager.registerTask(
     agentTask(Promise.resolve(completion), 'release demo', { agentId: 'agent-release-demo' }),
   );
   await created.manager.wait(taskId);
-  return { taskId, candidate: finish.candidate, persistence: created.persistence! };
+  return {
+    taskId,
+    candidate: finish.candidate,
+    manager: created.manager,
+    persistence: created.persistence!,
+  };
 }
 
 describe('TaskListTool', () => {
@@ -664,15 +674,21 @@ describe('TaskOutputTool', () => {
         sourceText: 'export const widget = 2;\n',
         companionPath: 'test/widget.test.ts',
         companionText: 'expect(widget).toBe(2);\n',
+        beforeRegister: async () => {
+          await writeFile(join(approveRepo, 'README.md'), `${approveBaseline.readme}unrelated drift\n`);
+        },
+        replayCandidate: applySubagentWorktreeCandidate,
       });
-      expect(await readFile(join(approveRepo, 'src/widget.ts'), 'utf8')).toBe(approveBaseline.source);
-      expect(await readFile(join(approveRepo, 'README.md'), 'utf8')).toBe(approveBaseline.readme);
-      expect(await readFile(join(approveRepo, 'scratch.txt'), 'utf8')).toBe(approveBaseline.scratch);
-      await expect(stat(join(approveRepo, 'test/widget.test.ts'))).rejects.toThrow();
       expect(approveCreated.candidate.paths.map((path) => path.relPath)).toEqual([
         'src/widget.ts',
         'test/widget.test.ts',
       ]);
+      expect(await readFile(join(approveRepo, 'src/widget.ts'), 'utf8')).toBe('export const widget = 2;\n');
+      expect(await readFile(join(approveRepo, 'test/widget.test.ts'), 'utf8')).toBe('expect(widget).toBe(2);\n');
+      expect(await readFile(join(approveRepo, 'README.md'), 'utf8')).toBe(
+        `${approveBaseline.readme}unrelated drift\n`,
+      );
+      expect(await readFile(join(approveRepo, 'scratch.txt'), 'utf8')).toBe(approveBaseline.scratch);
 
       const approveReader = createBackgroundManager({
         sessionDir: approveSession,
@@ -683,22 +699,19 @@ describe('TaskOutputTool', () => {
       await approveReader.loadFromDisk();
       await approveReader.reconcile();
       const inspected = await taskOutput(approveReader, approveCreated.taskId, true);
-      expect(inspected).toContain('status: input_required');
+      expect(inspected).toContain('status: completed');
       expect(inspected).toContain('candidate handoff');
       expect(inspected).toContain(`candidate_hash: ${approveCreated.candidate.candidateHash}`);
+      expect(inspected).toContain('resolution: approved_applied');
 
-      await writeFile(join(approveRepo, 'README.md'), `${approveBaseline.readme}unrelated drift\n`);
-      const approveArgs = {
+      const duplicateApproval = await executeTaskOutput(approveReader, {
         action: 'approve_scope_expansion',
         task_id: approveCreated.taskId,
         candidate_hash: approveCreated.candidate.candidateHash,
         requested_scope: approveCreated.candidate.requestedScope,
-      };
-      const firstApproval = await executeTaskOutput(approveReader, approveArgs);
-      const duplicateApproval = await executeTaskOutput(approveReader, approveArgs);
-      expect(firstApproval.isError, toolContentString(firstApproval)).toBe(false);
-      expect(toolContentString(firstApproval)).toContain('status: completed');
-      expect(toolContentString(firstApproval)).toContain('idempotent: false');
+      });
+      expect(duplicateApproval.isError, toolContentString(duplicateApproval)).toBe(false);
+      expect(toolContentString(duplicateApproval)).toContain('status: completed');
       expect(toolContentString(duplicateApproval)).toContain('idempotent: true');
       expect(await readFile(join(approveRepo, 'src/widget.ts'), 'utf8')).toBe('export const widget = 2;\n');
       expect(await readFile(join(approveRepo, 'test/widget.test.ts'), 'utf8')).toBe('expect(widget).toBe(2);\n');
@@ -720,7 +733,11 @@ describe('TaskOutputTool', () => {
         sourceText: 'export const widget = 3;\n',
         companionPath: 'test/widget.test.ts',
         companionText: 'expect(widget).toBe(3);\n',
+        replayCandidate: vi.fn(async () => {
+          throw new Error('candidate_policy_decision: retained for explicit denial');
+        }),
       });
+      expect(denyCreated.manager.getTask(denyCreated.taskId)).toMatchObject({ status: 'input_required' });
       const denyReader = createBackgroundManager({
         sessionDir: denySession,
         enableWorktreeIsolation: true,
@@ -752,8 +769,14 @@ describe('TaskOutputTool', () => {
         sourceText: 'export const widget = 4;\n',
         companionPath: 'test/widget.test.ts',
         companionText: 'expect(widget).toBe(4);\n',
+        beforeRegister: async () => {
+          await writeFile(join(conflictRepo, 'src/widget.ts'), 'export const widget = 99;\n');
+        },
+        replayCandidate: applySubagentWorktreeCandidate,
       });
-      await writeFile(join(conflictRepo, 'src/widget.ts'), 'export const widget = 99;\n');
+      expect(conflictCreated.manager.getTask(conflictCreated.taskId)).toMatchObject({
+        status: 'input_required',
+      });
       const conflictReader = createBackgroundManager({
         sessionDir: conflictSession,
         enableWorktreeIsolation: true,

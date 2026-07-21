@@ -1998,24 +1998,24 @@ describe('SessionSubagentHost route pools', () => {
     expect(child.agent.config.modelAlias).toBe('fast');
   });
 
-  it('resumes an external subagent through its recorded backend, not a re-derived pool pick', async () => {
-    const echoScript = (marker: string) => `process.stdout.write('${marker}');process.exit(0)`;
+  it('resumes and retries an external coder through its recorded agent, session, backend, and model', async () => {
+    const echoArgsScript =
+      "process.stdout.write(process.argv.slice(1).join('|'));process.exit(0)";
     const config: KimiConfig = {
       providers: {},
       subagent: {
         pools: {
           // The pool would deterministically pick echo-a; the routeOverride
-          // below sends the initial spawn to echo-b instead, so a resume
-          // that incorrectly re-derived its route from the pool would
-          // observe echo-a and fail this assertion.
-          coder: [{ backend: 'echo-a' }],
+          // below sends the initial spawn to echo-b instead, so a continuation
+          // that incorrectly re-derived its route from the pool would fail.
+          coder: [{ backend: 'echo-a', model: 'pool-model' }],
         },
         backends: {
-          'echo-a': { command: process.execPath, args: ['-e', echoScript('FROM_A')] },
+          'echo-a': { command: process.execPath, args: ['-e', echoArgsScript, 'FROM_A'] },
           'echo-b': {
             command: process.execPath,
-            args: ['-e', echoScript('FROM_B')],
-            resumeArgs: ['-e', echoScript('FROM_B_RESUMED')],
+            args: ['-e', echoArgsScript, 'FROM_B', '{model}', '{session_id}'],
+            resumeArgs: ['-e', echoArgsScript, 'FROM_B_RESUMED', '{model}', '{session_id}'],
           },
         },
       },
@@ -2038,21 +2038,45 @@ describe('SessionSubagentHost route pools', () => {
           id: 'card-external',
           title: 'External override card',
           goal: 'Route to echo-b instead of the pool pick',
-          acceptance: 'A later resume also targets echo-b',
-          routeOverride: { backend: 'echo-b' },
+          acceptance: 'Later continuations keep the same route and session',
+          routeOverride: { backend: 'echo-b', model: 'override-model' },
         },
       },
     });
-    await expect(spawned.completion).resolves.toEqual({ result: 'FROM_B' });
+    const externalSessionId = session.metadata.agents[spawned.agentId]?.externalSessionId;
+    expect(externalSessionId).toEqual(expect.any(String));
+    await expect(spawned.completion).resolves.toEqual({
+      result: `FROM_B|override-model|${externalSessionId}`,
+    });
 
     const resumed = await host.resume(spawned.agentId, {
       parentToolCallId: 'call_external_resume',
-      prompt: 'continue externally',
-      description: 'continue externally',
+      prompt: 'repair the initial delivery',
+      description: 'repair the initial delivery',
       runInBackground: false,
       signal,
     });
-    await expect(resumed.completion).resolves.toEqual({ result: 'FROM_B_RESUMED' });
+    expect(resumed).toMatchObject({ agentId: spawned.agentId, resumed: true });
+    await expect(resumed.completion).resolves.toEqual({
+      result: `FROM_B_RESUMED|override-model|${externalSessionId}`,
+    });
+
+    const retried = await host.retry(spawned.agentId, {
+      parentToolCallId: 'call_external_retry',
+      prompt: 'retry after a transient failure',
+      description: 'retry after a transient failure',
+      runInBackground: false,
+      signal,
+    });
+    expect(retried).toMatchObject({ agentId: spawned.agentId, resumed: true });
+    await expect(retried.completion).resolves.toEqual({
+      result: `FROM_B_RESUMED|override-model|${externalSessionId}`,
+    });
+    expect(session.metadata.agents[spawned.agentId]).toMatchObject({
+      externalBackend: 'echo-b',
+      externalModelAlias: 'override-model',
+      externalSessionId,
+    });
   });
 });
 

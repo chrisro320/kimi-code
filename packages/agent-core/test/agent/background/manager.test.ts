@@ -868,17 +868,18 @@ describe('BackgroundManager', () => {
 });
 
 describe('editing candidate lifecycle', () => {
-  it('publishes input_required only after bundle persistence and worktree acknowledgement', async () => {
+  it('automatically replays a safe persisted candidate before acknowledging cleanup', async () => {
     const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-'));
     try {
       let manager!: BackgroundManager;
       let taskId = '';
+      const replayCandidate = vi.fn(async () => ({ applied: true as const }));
       const acknowledgePersisted = vi.fn(async () => {
         expect(await new BackgroundTaskPersistence(sessionDir).readTask(taskId)).toMatchObject({
-          status: 'input_required',
+          status: 'completed',
         });
       });
-      ({ manager } = createBackgroundManager({ sessionDir }));
+      ({ manager } = createBackgroundManager({ sessionDir, replayCandidate }));
       const persistence = new BackgroundTaskPersistence(sessionDir);
       taskId = manager.registerTask(
         agentTask(
@@ -891,7 +892,7 @@ describe('editing candidate lifecycle', () => {
 
       expect(info).toMatchObject({
         kind: 'agent',
-        status: 'input_required',
+        status: 'completed',
         endedAt: expect.any(Number),
         candidate: {
           hash: '960e0ff0617bdc2d4d4a524fbc4370ffcc6273adab91929c1bb271ea013dba85',
@@ -899,14 +900,75 @@ describe('editing candidate lifecycle', () => {
           paths: ['src/widget.ts', 'test/widget.test.ts'],
         },
       });
-      expect(await persistence?.readEditingCandidate(taskId)).toMatchObject({
+      expect(replayCandidate).toHaveBeenCalledTimes(1);
+      expect(replayCandidate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          candidateHash: '960e0ff0617bdc2d4d4a524fbc4370ffcc6273adab91929c1bb271ea013dba85',
+        }),
+        ['src/widget.ts', 'test/widget.test.ts'],
+      );
+      expect(await persistence.readEditingCandidate(taskId)).toMatchObject({
         taskId,
         complete: true,
+        resolution: { kind: 'approved_applied' },
       });
       expect(acknowledgePersisted).toHaveBeenCalledTimes(1);
       expect(await manager.readOutput(taskId)).toBe('candidate handoff');
-      expect(manager.list(true)).toContainEqual(expect.objectContaining({ taskId }));
+      expect(manager.list(true)).not.toContainEqual(expect.objectContaining({ taskId }));
       await expect(manager.waitForActiveTasks((task) => task.taskId === taskId)).resolves.toBeUndefined();
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('completes after a successful replay even when resolution metadata cannot be written', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-resolution-'));
+    try {
+      const replayCandidate = vi.fn(async () => ({ applied: true as const }));
+      const acknowledgePersisted = vi.fn(async () => {});
+      const { manager, persistence } = createBackgroundManager({ sessionDir, replayCandidate });
+      vi.spyOn(persistence!, 'writeEditingCandidateResolution').mockRejectedValueOnce(
+        new Error('resolution write failed'),
+      );
+      const taskId = manager.registerTask(
+        agentTask(
+          Promise.resolve(editingCandidateCompletion({ acknowledgePersisted })),
+          'candidate resolution metadata failure',
+        ),
+      );
+
+      expect(await manager.wait(taskId)).toMatchObject({ status: 'completed' });
+      expect(replayCandidate).toHaveBeenCalledTimes(1);
+      expect((await persistence?.readEditingCandidate(taskId))?.resolution).toBeUndefined();
+      expect(acknowledgePersisted).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a conflicting candidate as input_required without acknowledging early', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-conflict-'));
+    try {
+      const replayCandidate = vi.fn(async () => {
+        throw new Error('candidate_path_diverged: src/widget.ts');
+      });
+      const acknowledgePersisted = vi.fn(async () => {});
+      const { manager, persistence } = createBackgroundManager({ sessionDir, replayCandidate });
+      const taskId = manager.registerTask(
+        agentTask(
+          Promise.resolve(editingCandidateCompletion({ acknowledgePersisted })),
+          'conflicting candidate task',
+        ),
+      );
+
+      expect(await manager.wait(taskId)).toMatchObject({ status: 'input_required' });
+      expect(replayCandidate).toHaveBeenCalledTimes(1);
+      const manifest = await persistence?.readEditingCandidate(taskId);
+      expect(manifest).toMatchObject({ taskId, complete: true });
+      expect(manifest?.resolution).toBeUndefined();
+      expect(acknowledgePersisted).toHaveBeenCalledTimes(1);
+      expect(await manager.readOutput(taskId)).toBe('candidate handoff');
     } finally {
       await rm(sessionDir, { recursive: true, force: true });
     }
