@@ -61,6 +61,22 @@ describe('formatBackgroundTaskTranscript', () => {
     expect(data.headline).toContain('question task started');
   });
 
+  it('renders input_required as an actionable warning', () => {
+    const data = formatBackgroundTaskTranscript(task({ status: 'input_required' }));
+    expect(data.phase).toBe('warning');
+    expect(data.headline).toContain('awaiting scope approval');
+    expect(data.detail).toContain('review TaskOutput');
+  });
+
+  it('renders expansion_denied as a terminal warning', () => {
+    const data = formatBackgroundTaskTranscript(
+      task({ status: 'expansion_denied', endedAt: Date.now() }),
+    );
+    expect(data.phase).toBe('warning');
+    expect(data.headline).toContain('scope expansion denied');
+    expect(data.detail).toContain('no files applied');
+  });
+
   it('renders a completed entry with exit code in detail', () => {
     const data = formatBackgroundTaskTranscript(
       task({ status: 'completed', exitCode: 0, endedAt: Date.now() }),
@@ -109,7 +125,9 @@ describe('formatBackgroundTaskTranscript', () => {
   it('handles every BackgroundTaskStatus without throwing', () => {
     const statuses: BackgroundTaskStatus[] = [
       'running',
+      'input_required',
       'completed',
+      'expansion_denied',
       'failed',
       'timed_out',
       'killed',

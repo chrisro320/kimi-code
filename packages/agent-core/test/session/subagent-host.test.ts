@@ -21,7 +21,10 @@ import {
   resolveSubagentTimeoutMs,
   type QueuedSubagentTask,
 } from '../../src/session/subagent-host';
-import { acquireSubagentWorktree } from '../../src/session/subagent-worktree';
+import {
+  acquireSubagentWorktree,
+  type EditingCandidateDraft,
+} from '../../src/session/subagent-worktree';
 import { abortError, userCancellationReason } from '../../src/utils/abort';
 import { testAgent, type AgentTestContext } from '../agent/harness/agent';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
@@ -38,9 +41,13 @@ vi.mock('../../src/session/git-context', () => ({
 // it is mocked (default: no isolation) so subagent-host tests stay
 // deterministic and assert only the wiring in `SessionSubagentHost worktree
 // isolation` below.
-vi.mock('../../src/session/subagent-worktree', () => ({
-  acquireSubagentWorktree: vi.fn(async () => null),
-}));
+vi.mock('../../src/session/subagent-worktree', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/session/subagent-worktree')>();
+  return {
+    ...actual,
+    acquireSubagentWorktree: vi.fn(async () => null),
+  };
+});
 
 const signal = new AbortController().signal;
 const tempDirs: string[] = [];
@@ -1284,6 +1291,67 @@ describe('SessionSubagentHost worktree isolation', () => {
     expect(finish).toHaveBeenCalledWith({ kind: 'success' });
   });
 
+  it('returns an internal scope-expansion candidate without cleaning up or reporting failure', async () => {
+    const parent = testAgent({
+      experimentalFlags: new FlagResolver({
+        KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: 'true',
+      }),
+    });
+    parent.configure();
+    parent.newEvents();
+
+    const child = testAgent();
+    child.configure();
+    const summary =
+      'Implemented the requested source change and its necessary companion test inside the isolated worktree, preserving a detailed handoff while waiting for explicit approval of the expanded file scope. The candidate remains intact with its original baseline, final payloads, and verification details so the background task can persist it without asking the provider to run again.';
+    child.mockNextResponse({ type: 'text', text: summary });
+
+    const candidate = editingCandidateDraft();
+    const acknowledgePersisted = vi.fn(async () => {});
+    const finish = vi.fn(async () => ({
+      applied: false,
+      reason: 'scope-expansion-required',
+      outsideScope: ['test/widget.test.ts'],
+      candidate,
+      acknowledgePersisted,
+    }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({
+      cwd: '/tmp/kimi-subagent-worktree/internal-candidate',
+      finish,
+    });
+    const host = new SessionSubagentHost(fakeSession(parent.agent, child.agent), 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      parentToolCallUuid: 'logical-run-internal',
+      prompt: 'Implement the source and test change',
+      description: 'Implement widget',
+      runInBackground: true,
+      signal,
+      dispatch: { scope: ['src/widget.ts'] },
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      result: summary,
+      editingCandidate: {
+        draft: candidate,
+        agentId: handle.agentId,
+        logicalRunId: 'logical-run-internal',
+        originalScope: ['src/widget.ts'],
+        requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+        outsideScope: ['test/widget.test.ts'],
+      },
+    });
+    expect(acknowledgePersisted).not.toHaveBeenCalled();
+    expect(parent.allEvents).not.toContainEqual(
+      expect.objectContaining({ type: '[rpc]', event: 'subagent.failed' }),
+    );
+    expect(parent.allEvents).not.toContainEqual(
+      expect.objectContaining({ type: '[rpc]', event: 'subagent.completed' }),
+    );
+  });
+
   it('finishes the isolated worktree as incomplete when the child turn is aborted', async () => {
     const parent = testAgent({
       experimentalFlags: new FlagResolver({
@@ -1431,6 +1499,82 @@ describe('SessionSubagentHost worktree isolation', () => {
     const logged = JSON.stringify(warn.mock.calls);
     expect(logged).toContain('[REDACTED_SECRET]');
     expect(logged).not.toContain(secret);
+  });
+
+  it('returns an external scope-expansion candidate without retrying or cleaning up', async () => {
+    const parent = testAgent({
+      experimentalFlags: new FlagResolver({
+        KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: 'true',
+      }),
+    });
+    parent.configure();
+    parent.newEvents();
+    const candidate = editingCandidateDraft();
+    const acknowledgePersisted = vi.fn(async () => {});
+    const finish = vi.fn(async () => ({
+      applied: false,
+      reason: 'scope-expansion-required',
+      outsideScope: ['test/widget.test.ts'],
+      candidate,
+      acknowledgePersisted,
+    }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: process.cwd(), finish });
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            args: ['-e', "process.stdout.write('external handoff preserved')"],
+            resumeArgs: ['-e', "process.stdout.write('unexpected resume')", '{session_id}'],
+          },
+        },
+      },
+    });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_external_candidate',
+      parentToolCallUuid: 'logical-run-external',
+      prompt: 'Implement the source and test change',
+      description: 'External widget implementation',
+      runInBackground: true,
+      signal,
+      dispatch: {
+        scope: ['src/widget.ts'],
+        workCard: {
+          id: 'external-candidate',
+          title: 'External candidate',
+          goal: 'Implement source and test',
+          acceptance: 'Return a complete handoff',
+          routeOverride: { backend: 'external' },
+        },
+      },
+      enforceDispatch: true,
+    });
+
+    const externalSessionId = session.metadata.agents[handle.agentId]?.externalSessionId;
+    await expect(handle.completion).resolves.toMatchObject({
+      result: 'external handoff preserved',
+      editingCandidate: {
+        draft: candidate,
+        agentId: handle.agentId,
+        logicalRunId: 'logical-run-external',
+        externalSessionId,
+        originalScope: ['src/widget.ts'],
+        requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+        outsideScope: ['test/widget.test.ts'],
+      },
+    });
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(acknowledgePersisted).not.toHaveBeenCalled();
+    expect(parent.allEvents).not.toContainEqual(
+      expect.objectContaining({ type: '[rpc]', event: 'subagent.failed' }),
+    );
+    expect(parent.allEvents).not.toContainEqual(
+      expect.objectContaining({ type: '[rpc]', event: 'subagent.completed' }),
+    );
   });
 
   it('uses dedicated read-only args for spawn, resume, and restart with one external session', async () => {
@@ -2369,6 +2513,38 @@ function fakeSession(
       },
     ),
   } as unknown as Session;
+}
+
+function editingCandidateDraft(): EditingCandidateDraft {
+  return {
+    version: 1,
+    candidateHash: 'candidate-hash',
+    repoRoot: '/repo',
+    commonDir: '/repo/.git',
+    headCommit: 'source-commit',
+    scope: ['src/widget.ts'],
+    requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+    paths: [
+      {
+        relPath: 'src/widget.ts',
+        classification: 'in_scope',
+        before: { state: { kind: 'absent' } },
+        after: {
+          state: { kind: 'regular', mode: 0o100644, sha256: 'source-hash' },
+          payload: Buffer.from('source'),
+        },
+      },
+      {
+        relPath: 'test/widget.test.ts',
+        classification: 'scope_expansion_requested',
+        before: { state: { kind: 'absent' } },
+        after: {
+          state: { kind: 'regular', mode: 0o100644, sha256: 'test-hash' },
+          payload: Buffer.from('test'),
+        },
+      },
+    ],
+  };
 }
 
 function contextProfile(): ResolvedAgentProfile {

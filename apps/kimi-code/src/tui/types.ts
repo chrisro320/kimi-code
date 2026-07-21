@@ -179,7 +179,7 @@ export interface ActiveBackgroundAgentStatus {
   readonly tokens?: number;
 }
 
-export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed';
+export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed' | 'warning';
 
 export interface BackgroundAgentStatusData {
   readonly phase: BackgroundAgentStatusPhase;

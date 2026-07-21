@@ -29,6 +29,9 @@ function phaseFromStatus(status: BackgroundTaskStatus): BackgroundAgentStatusPha
   switch (status) {
     case 'running':
       return 'started';
+    case 'input_required':
+    case 'expansion_denied':
+      return 'warning';
     case 'completed':
       return 'completed';
     case 'failed':
@@ -50,6 +53,10 @@ function headlineFor(info: BackgroundTaskInfo): string {
   switch (info.status) {
     case 'running':
       return `${subject} started in background`;
+    case 'input_required':
+      return `${subject} awaiting scope approval`;
+    case 'expansion_denied':
+      return `${subject} scope expansion denied`;
     case 'completed':
       return `${subject} completed in background`;
     case 'failed':
@@ -72,6 +79,12 @@ function detailFor(info: BackgroundTaskInfo): string | undefined {
     if (info.kind === 'process' && info.exitCode !== null) {
       parts.push(`exit ${info.exitCode}`);
     }
+  }
+  if (info.status === 'input_required') {
+    parts.push('review TaskOutput to approve or deny the requested scope');
+  }
+  if (info.status === 'expansion_denied') {
+    parts.push('candidate retained; no files applied');
   }
   if (info.status === 'killed') {
     const reason = truncate(info.stopReason);

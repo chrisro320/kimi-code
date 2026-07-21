@@ -12,6 +12,12 @@ export interface AgentBackgroundTaskInfo extends BackgroundTaskInfoBase {
   readonly agentId?: string;
   /** Subagent profile name. */
   readonly subagentType?: string;
+  /** Bounded reference to a durable editing candidate bundle. */
+  readonly candidate?: {
+    readonly hash: string;
+    readonly requestedScope: readonly string[];
+    readonly paths: readonly string[];
+  };
 }
 
 export class AgentBackgroundTask implements BackgroundTask {
@@ -43,7 +49,16 @@ export class AgentBackgroundTask implements BackgroundTask {
     try {
       const outcome = await this.handle.completion;
       sink.appendOutput(outcome.result);
-      await sink.settle({ status: 'completed' });
+      await sink.settle(
+        outcome.editingCandidate === undefined
+          ? { status: 'completed' }
+          : {
+              status: 'input_required',
+              candidate: outcome.editingCandidate,
+              handoff: outcome.result,
+              usage: outcome.usage,
+            },
+      );
     } catch (error: unknown) {
       if (sink.signal.aborted && (isAbortError(error) || error === sink.signal.reason)) {
         await sink.settle({ status: 'killed' });

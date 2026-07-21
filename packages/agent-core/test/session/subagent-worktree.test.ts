@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { LocalKaos } from '@moonshot-ai/kaos';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { __testing, acquireSubagentWorktree } from '../../src/session/subagent-worktree';
+import {
+  __testing,
+  acquireSubagentWorktree,
+  applySubagentWorktreeCandidate,
+  type EditingCandidateDraft,
+} from '../../src/session/subagent-worktree';
 
 // These tests drive the real `git` binary through a real `LocalKaos` (the
 // same integration-test posture as `GlobTool integration (real ripgrep)` in
@@ -199,21 +204,21 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await expect(stat(join(repoDir, 'scratch.txt'))).rejects.toThrow();
   });
 
-  it('records worker-side deletions in recovery metadata', async () => {
+  it('records worker-side deletions in the scope-expansion candidate', async () => {
     const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
     expect(handle).not.toBeNull();
     await rm(join(handle!.cwd, 'a.txt'));
 
-    await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/outside its declared scope/);
+    const result = await handle!.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
 
-    const gitCommonDir = git(repoDir, ['rev-parse', '--git-common-dir']).trim();
-    const recoveryRoot = join(repoDir, gitCommonDir, 'kimi-code-subagent-recovery');
-    const ids = await readdir(recoveryRoot);
-    const manifest = JSON.parse(
-      await readFile(join(recoveryRoot, ids[0]!, 'manifest.json'), 'utf8'),
-    ) as { deltaPaths: string[]; deletedPaths: string[] };
-    expect(manifest.deltaPaths).toEqual(['a.txt']);
-    expect(manifest.deletedPaths).toEqual(['a.txt']);
+    expect(result.outsideScope).toEqual(['a.txt']);
+    expect(result.candidate.paths).toContainEqual(expect.objectContaining({
+      relPath: 'a.txt',
+      classification: 'scope_expansion_requested',
+      before: expect.objectContaining({ state: expect.objectContaining({ kind: 'regular' }) }),
+      after: expect.objectContaining({ state: { kind: 'absent' } }),
+    }));
   });
 
   it('ignores baseline-only dirty files outside scope when applying a worker delta', async () => {
@@ -229,55 +234,100 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     expect(await readFile(join(repoDir, 'baseline.txt'), 'utf8')).toBe('baseline noise\n');
   });
 
-  it('preserves only worker delta in recovery, excluding tracked and untracked baseline noise', async () => {
+  it('returns a worker-only scope-expansion candidate without mutating the workspace', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nbaseline edit\n');
     await writeFile(join(repoDir, 'baseline.txt'), 'baseline noise\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
-    expect(handle).not.toBeNull();
-
-    await writeFile(join(handle!.cwd, 'a.txt'), 'hello\nbaseline edit\nworker edit\n');
-    await writeFile(join(handle!.cwd, 'worker-only.txt'), 'worker artifact\n');
-
-    await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/outside its declared scope/);
-
-    const gitCommonDir = git(repoDir, ['rev-parse', '--git-common-dir']).trim();
-    const recoveryRoot = join(repoDir, gitCommonDir, 'kimi-code-subagent-recovery');
-    const ids = await readdir(recoveryRoot);
-    expect(ids).toHaveLength(1);
-    const recoveryDir = join(recoveryRoot, ids[0]!);
-    const manifest = JSON.parse(await readFile(join(recoveryDir, 'manifest.json'), 'utf8')) as {
-      deltaPaths: string[];
-      deletedPaths: string[];
-    };
-    expect(manifest.deltaPaths).toEqual(['a.txt', 'worker-only.txt']);
-    expect(manifest.deletedPaths).toEqual([]);
-    expect(await readFile(join(recoveryDir, 'baseline', 'a.txt'), 'utf8')).toBe('hello\nbaseline edit\n');
-    expect(await readFile(join(recoveryDir, 'worker-final', 'a.txt'), 'utf8')).toBe(
-      'hello\nbaseline edit\nworker edit\n',
-    );
-    await expect(stat(join(recoveryDir, 'worker-final', 'baseline.txt'))).rejects.toThrow();
-    expect(await readFile(join(recoveryDir, 'worker-final', 'worker-only.txt'), 'utf8')).toBe('worker artifact\n');
-  });
-
-  it('rejects and preserves recovery data when the worker edits a file outside its declared scope, leaving the workspace untouched', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
-    await writeFile(join(worktreeCwd, 'a.txt'), 'hello\nout of scope edit\n');
+    await writeFile(join(worktreeCwd, 'a.txt'), 'hello\nbaseline edit\nworker edit\n');
+    await writeFile(join(worktreeCwd, 'a.test.txt'), 'companion test\n');
 
-    await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/outside its declared scope/);
+    const result = await handle!.finish({ kind: 'success' });
 
-    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('hello\n');
+    expect(result).toMatchObject({
+      applied: false,
+      reason: 'scope-expansion-required',
+      outsideScope: ['a.test.txt'],
+    });
+    if (result.candidate === undefined || result.acknowledgePersisted === undefined) {
+      throw new Error('expected a scope-expansion candidate');
+    }
+    expect(result.candidate.scope).toEqual(['a.txt']);
+    expect(result.candidate.requestedScope).toEqual(['a.test.txt', 'a.txt']);
+    expect(result.candidate.paths.map((path) => [path.relPath, path.classification])).toEqual([
+      ['a.test.txt', 'scope_expansion_requested'],
+      ['a.txt', 'in_scope'],
+    ]);
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('hello\nbaseline edit\n');
+    await expect(stat(join(repoDir, 'a.test.txt'))).rejects.toThrow();
+    expect(await readFile(join(repoDir, 'baseline.txt'), 'utf8')).toBe('baseline noise\n');
+    expect(git(repoDir, ['worktree', 'list'])).toContain(worktreeCwd);
+
+    await result.acknowledgePersisted();
     expect(git(repoDir, ['worktree', 'list'])).not.toContain(worktreeCwd);
+  });
 
-    const gitCommonDir = git(repoDir, ['rev-parse', '--git-common-dir']).trim();
-    const recoveryRoot = join(repoDir, gitCommonDir, 'kimi-code-subagent-recovery');
-    const ids = await readdir(recoveryRoot);
-    expect(ids).toHaveLength(1);
-    const recoveryDir = join(recoveryRoot, ids[0]!);
-    expect(await readFile(join(recoveryDir, 'manifest.json'), 'utf8')).toContain('scope-violation');
-    expect(await readFile(join(recoveryDir, 'worker-final', 'a.txt'), 'utf8')).toContain('out of scope edit');
+  it('replays an approved candidate after unrelated HEAD drift but rejects candidate-path divergence', async () => {
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    expect(handle).not.toBeNull();
+    await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
+    await writeFile(join(handle!.cwd, 'a.test.txt'), 'companion test\n');
+    const result = await handle!.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
+
+    await writeFile(join(repoDir, 'unrelated.txt'), 'unrelated change\n');
+    git(repoDir, ['add', 'unrelated.txt']);
+    git(repoDir, ['commit', '-q', '-m', 'unrelated commit']);
+
+    await expect(
+      applySubagentWorktreeCandidate(kaos, result.candidate, result.candidate.requestedScope),
+    ).resolves.toEqual({ applied: true });
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('worker edit\n');
+    expect(await readFile(join(repoDir, 'a.test.txt'), 'utf8')).toBe('companion test\n');
+    expect(await readFile(join(repoDir, 'unrelated.txt'), 'utf8')).toBe('unrelated change\n');
+
+    const conflicting = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    expect(conflicting).not.toBeNull();
+    await writeFile(join(conflicting!.cwd, 'a.txt'), 'second worker edit\n');
+    await writeFile(join(conflicting!.cwd, 'second.test.txt'), 'second companion\n');
+    const conflictResult = await conflicting!.finish({ kind: 'success' });
+    if (conflictResult.candidate === undefined) throw new Error('expected a scope-expansion candidate');
+    await writeFile(join(repoDir, 'a.txt'), 'concurrent human edit\n');
+
+    await expect(
+      applySubagentWorktreeCandidate(kaos, conflictResult.candidate, conflictResult.candidate.requestedScope),
+    ).rejects.toThrow(/candidate_path_diverged: a\.txt/);
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('concurrent human edit\n');
+    await expect(stat(join(repoDir, 'second.test.txt'))).rejects.toThrow();
+  });
+
+  it('rejects a candidate whose immutable payload no longer matches its recorded hash', async () => {
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    expect(handle).not.toBeNull();
+    await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
+    await writeFile(join(handle!.cwd, 'a.test.txt'), 'companion test\n');
+    const result = await handle!.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
+
+    const regularIndex = result.candidate.paths.findIndex((path) => path.after.payload !== undefined);
+    if (regularIndex < 0) throw new Error('expected a regular payload');
+    const regular = result.candidate.paths[regularIndex]!;
+    const tampered: EditingCandidateDraft = {
+      ...result.candidate,
+      paths: result.candidate.paths.map((path, index) =>
+        index === regularIndex
+          ? { ...regular, after: { ...regular.after, payload: Buffer.from('tampered payload\n') } }
+          : path,
+      ),
+    };
+
+    await expect(
+      applySubagentWorktreeCandidate(kaos, tampered, tampered.requestedScope),
+    ).rejects.toThrow(/candidate_corrupt/);
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('hello\n');
+    await expect(stat(join(repoDir, 'a.test.txt'))).rejects.toThrow();
   });
 
   it('rejects and preserves recovery data when the workspace changed underneath the running subagent (baseline mismatch)', async () => {
@@ -337,7 +387,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('first worker\n');
   });
 
-  it('rejects on a new commit landing on the source repo while the subagent was running (HEAD moved)', async () => {
+  it('allows a new commit when no candidate path changed', async () => {
     const handle = await acquireSubagentWorktree(kaos, repoDir);
     expect(handle).not.toBeNull();
 
@@ -345,7 +395,8 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['add', 'b.txt']);
     git(repoDir, ['commit', '-q', '-m', 'second commit']);
 
-    await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/changed while the editing subagent/);
+    await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
+    await expect(readFile(join(repoDir, 'b.txt'), 'utf8')).resolves.toBe('second file\n');
   });
 
   it('uses the nested repository for an outer workspace and translates scope', async () => {
@@ -470,33 +521,29 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await expect(guarded!.finish({ kind: 'success' })).rejects.toThrow(/unsafe non-directory ancestor/);
   });
 
-  it('stores dirty-overlap before and after recovery payloads plus binary and deletion states', async () => {
+  it('stores dirty-overlap before and after candidate payloads plus binary and deletion states', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nbaseline\n');
     await writeFile(join(repoDir, 'binary.bin'), Buffer.from([0, 1, 2, 255]));
     const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
     expect(handle).not.toBeNull();
-    await writeFile(join(handle!.cwd, 'a.txt'), 'hello\nbaseline\nworker\n');
     await writeFile(join(handle!.cwd, 'binary.bin'), Buffer.from([255, 2, 1, 0]));
     await rm(join(handle!.cwd, 'a.txt'));
-    await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/outside its declared scope/);
+    const result = await handle!.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
 
-    const recovery = await onlyRecoveryDir(repoDir);
-    const manifest = JSON.parse(await readFile(join(recovery, 'manifest.json'), 'utf8')) as {
-      version: number;
-      complete: boolean;
-      deltas: Array<{ path: string; baseline: { kind: string }; workerFinal: { kind: string } }>;
-    };
-    expect(manifest.version).toBe(2);
-    expect(manifest.complete).toBe(true);
-    expect(manifest.deltas).toContainEqual(expect.objectContaining({
-      path: 'a.txt',
-      baseline: expect.objectContaining({ kind: 'regular' }),
-      workerFinal: expect.objectContaining({ kind: 'absent' }),
+    expect(result.candidate.paths).toContainEqual(expect.objectContaining({
+      relPath: 'a.txt',
+      before: expect.objectContaining({
+        state: expect.objectContaining({ kind: 'regular' }),
+        payload: Buffer.from('hello\nbaseline\n'),
+      }),
+      after: expect.objectContaining({ state: { kind: 'absent' } }),
     }));
-    expect(await readFile(join(recovery, 'baseline', 'a.txt'), 'utf8')).toBe('hello\nbaseline\n');
-    await expect(stat(join(recovery, 'worker-final', 'a.txt'))).rejects.toThrow();
-    expect(await readFile(join(recovery, 'baseline', 'binary.bin'))).toEqual(Buffer.from([0, 1, 2, 255]));
-    expect(await readFile(join(recovery, 'worker-final', 'binary.bin'))).toEqual(Buffer.from([255, 2, 1, 0]));
+    expect(result.candidate.paths).toContainEqual(expect.objectContaining({
+      relPath: 'binary.bin',
+      before: expect.objectContaining({ payload: Buffer.from([0, 1, 2, 255]) }),
+      after: expect.objectContaining({ payload: Buffer.from([255, 2, 1, 0]) }),
+    }));
   });
 
   it('rolls back every earlier path when a later multi-file operation fails', async () => {

@@ -22,6 +22,7 @@ import { PreToolCallHookPermissionPolicy } from './pre-tool-call-hook';
 import { SessionApprovalHistoryPermissionPolicy } from './session-approval-history';
 import { SwarmModeAgentSwarmApprovePermissionPolicy } from './swarm-mode-agent-swarm-approve';
 import { TaskStopConfirmationAskPermissionPolicy } from './task-stop-confirmation-ask';
+import { TaskOutputResolutionAskPermissionPolicy } from './task-output-resolution-ask';
 import {
   UserConfiguredAllowPermissionPolicy,
   UserConfiguredAskPermissionPolicy,
@@ -52,6 +53,8 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     // A model-issued TaskStop is destructive and must ask even in auto/yolo mode.
     // Internal timeout/shutdown/safety paths call BackgroundManager directly.
     new TaskStopConfirmationAskPermissionPolicy(agent),
+    // TaskOutput resolution mutates workspace or durable task state and always asks.
+    new TaskOutputResolutionAskPermissionPolicy(agent),
     // auto mode → approve (any auto-mode block must be a deny/ask rule above this).
     new AutoModeApprovePermissionPolicy(agent),
     // Approve-for-session memorized rule matches → approve. Runs before user-configured ask rules so an in-session grant beats a still-matching ask rule on later calls.

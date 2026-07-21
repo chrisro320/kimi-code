@@ -53,7 +53,9 @@ export interface TasksBrowserProps {
 
 const STATUS_LABEL: Record<BackgroundTaskStatus, string> = {
   running: 'running',
+  input_required: 'awaiting scope approval',
   completed: 'completed',
+  expansion_denied: 'scope expansion denied',
   failed: 'failed',
   timed_out: 'timed out',
   killed: 'killed',
@@ -72,10 +74,13 @@ const LIST_COL_MIN = 28;
 const LIST_COL_MAX = 44;
 const LIST_COL_RATIO = 0.32;
 
-function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'error' {
+function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'warning' | 'error' {
   switch (status) {
     case 'running':
       return 'success';
+    case 'input_required':
+    case 'expansion_denied':
+      return 'warning';
     case 'completed':
       return 'textMuted';
     case 'failed':
@@ -89,6 +94,7 @@ function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'e
 function isTerminal(status: BackgroundTaskStatus): boolean {
   return (
     status === 'completed' ||
+    status === 'expansion_denied' ||
     status === 'failed' ||
     status === 'timed_out' ||
     status === 'killed' ||
@@ -149,19 +155,33 @@ function compareTasks(a: BackgroundTaskInfo, b: BackgroundTaskInfo): number {
 
 interface StatusCounts {
   running: number;
+  awaitingInput: number;
   completed: number;
   terminalFailed: number;
+  denied: number;
 }
 
 function countByStatus(tasks: readonly BackgroundTaskInfo[]): StatusCounts {
-  const counts: StatusCounts = { running: 0, completed: 0, terminalFailed: 0 };
+  const counts: StatusCounts = {
+    running: 0,
+    awaitingInput: 0,
+    completed: 0,
+    terminalFailed: 0,
+    denied: 0,
+  };
   for (const t of tasks) {
     switch (t.status) {
       case 'running':
         counts.running += 1;
         break;
+      case 'input_required':
+        counts.awaitingInput += 1;
+        break;
       case 'completed':
         counts.completed += 1;
+        break;
+      case 'expansion_denied':
+        counts.denied += 1;
         break;
       case 'failed':
       case 'timed_out':
@@ -346,8 +366,14 @@ export class TasksBrowserApp extends Container implements Focusable {
     const countSegments: string[] = [];
     if (counts.running > 0)
       countSegments.push(currentTheme.fg('success', ` ${String(counts.running)} running `));
+    if (counts.awaitingInput > 0)
+      countSegments.push(
+        currentTheme.fg('warning', ` ${String(counts.awaitingInput)} awaiting approval `),
+      );
     if (counts.completed > 0)
       countSegments.push(currentTheme.fg('textDim', ` ${String(counts.completed)} completed `));
+    if (counts.denied > 0)
+      countSegments.push(currentTheme.fg('warning', ` ${String(counts.denied)} denied `));
     if (counts.terminalFailed > 0)
       countSegments.push(
         currentTheme.fg('error', ` ${String(counts.terminalFailed)} interrupted `),
@@ -565,9 +591,11 @@ export class TasksBrowserApp extends Container implements Focusable {
     const timing =
       task.status === 'running'
         ? `running ${formatRelativeTime(task.startedAt)}`
-        : task.endedAt !== null && task.endedAt !== undefined
-          ? `finished ${formatRelativeTime(task.endedAt)}`
-          : '';
+        : task.status === 'input_required'
+          ? `awaiting approval ${formatRelativeTime(task.endedAt ?? task.startedAt)}`
+          : task.endedAt !== null && task.endedAt !== undefined
+            ? `finished ${formatRelativeTime(task.endedAt)}`
+            : '';
     if (timing.length > 0) lines.push(`${label('Time:')}${currentTheme.fg('textMuted', timing)}`);
     if (task.kind === 'process' && task.pid > 0) {
       lines.push(`${label('Pid:')}${currentTheme.fg('textMuted', String(task.pid))}`);

@@ -57,7 +57,9 @@ export class BackgroundAgentStatusComponent implements Component {
         ? 'primary'
         : this.data.phase === 'completed'
           ? 'success'
-          : 'error';
+          : this.data.phase === 'warning'
+            ? 'warning'
+            : 'error';
 
     const bullet =
       this.data.phase === 'failed' ? currentTheme.fg(tone, FAILURE_MARK) : currentTheme.fg(tone, STATUS_BULLET);

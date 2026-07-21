@@ -102,7 +102,9 @@ export interface SystemTriggerOrigin {
 
 export type TaskLifecycleStatus =
   | 'running'
+  | 'input_required'
   | 'completed'
+  | 'expansion_denied'
   | 'failed'
   | 'timed_out'
   | 'killed'
@@ -364,6 +366,11 @@ export interface AgentTaskInfo extends TaskInfoBase {
   readonly kind: 'agent';
   readonly agentId?: string;
   readonly subagentType?: string;
+  readonly candidate?: {
+    readonly hash: string;
+    readonly requestedScope: readonly string[];
+    readonly paths: readonly string[];
+  };
 }
 
 export interface QuestionTaskInfo extends TaskInfoBase {
@@ -1065,7 +1072,9 @@ export const systemTriggerOriginSchema = z.object({
 
 export const taskLifecycleStatusSchema = z.enum([
   'running',
+  'input_required',
   'completed',
+  'expansion_denied',
   'failed',
   'timed_out',
   'killed',
@@ -1311,6 +1320,11 @@ export const agentTaskInfoSchema = taskInfoBaseSchema.extend({
   kind: z.literal('agent'),
   agentId: z.string().optional(),
   subagentType: z.string().optional(),
+  candidate: z.object({
+    hash: z.string(),
+    requestedScope: z.array(z.string()),
+    paths: z.array(z.string()),
+  }).optional(),
 }) satisfies z.ZodType<AgentTaskInfo>;
 
 export const questionTaskInfoSchema = taskInfoBaseSchema.extend({

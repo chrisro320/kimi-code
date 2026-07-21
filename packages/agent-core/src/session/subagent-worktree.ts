@@ -42,6 +42,9 @@ export interface SubagentWorktreeFinishResult {
   readonly applied: boolean;
   readonly reason?: string;
   readonly recoveryPath?: string;
+  readonly outsideScope?: readonly string[];
+  readonly candidate?: EditingCandidateDraft;
+  readonly acknowledgePersisted?: () => Promise<void>;
 }
 
 export interface SubagentWorktreeHandle {
@@ -49,7 +52,9 @@ export interface SubagentWorktreeHandle {
   finish(outcome: SubagentWorktreeOutcome): Promise<SubagentWorktreeFinishResult>;
 }
 
-type PathState =
+export type EditingCandidatePathClassification = 'in_scope' | 'scope_expansion_requested';
+
+export type EditingCandidatePathState =
   | { readonly kind: 'absent' }
   | { readonly kind: 'regular'; readonly mode: number; readonly sha256: string }
   | { readonly kind: 'directory'; readonly mode: number }
@@ -57,16 +62,32 @@ type PathState =
   | { readonly kind: 'special'; readonly mode: number }
   | { readonly kind: 'unreadable'; readonly error: string };
 
-interface PathSnapshot {
-  readonly state: PathState;
+export interface EditingCandidatePathSnapshot {
+  readonly state: EditingCandidatePathState;
   readonly payload?: Buffer;
 }
 
-interface Delta {
+export interface EditingCandidatePath {
   readonly relPath: string;
-  readonly before: PathSnapshot;
-  readonly after: PathSnapshot;
+  readonly classification: EditingCandidatePathClassification;
+  readonly before: EditingCandidatePathSnapshot;
+  readonly after: EditingCandidatePathSnapshot;
 }
+
+export interface EditingCandidateDraft {
+  readonly version: 1;
+  readonly candidateHash: string;
+  readonly repoRoot: string;
+  readonly commonDir: string;
+  readonly headCommit: string;
+  readonly scope: readonly string[];
+  readonly requestedScope: readonly string[];
+  readonly paths: readonly EditingCandidatePath[];
+}
+
+type PathState = EditingCandidatePathState;
+type PathSnapshot = EditingCandidatePathSnapshot;
+type Delta = Omit<EditingCandidatePath, 'classification'>;
 
 interface WorktreeContext {
   readonly repoRoot: string;
@@ -226,30 +247,25 @@ async function finishWorktree(
     ? []
     : deltas.filter((delta) => !isPathInScope(delta.relPath, ctx.scope)).map((delta) => delta.relPath);
   if (outside.length > 0) {
-    const result = await finishWithRecovery(kaos, ctx, `scope-violation: ${outside.join(', ')}`);
-    throw new Error(
-      `Editing subagent changed file(s) outside its declared scope: ${outside.join(', ')}. ` +
-      `Changes were not applied to the workspace; recovery data preserved at ${result.recoveryPath}.`,
-    );
+    const candidate = createEditingCandidateDraft(ctx, deltas);
+    return {
+      applied: false,
+      reason: 'scope-expansion-required',
+      outsideScope: outside,
+      candidate,
+      acknowledgePersisted: () => removeWorktree(kaos, ctx.repoRoot, ctx.worktreeRoot),
+    };
   }
 
   if (deltas.length === 0) {
-    const currentHead = await gitStdout(kaos, ctx.repoRoot, ['rev-parse', 'HEAD']);
-    if (currentHead !== ctx.headCommit) {
-      const result = await finishWithRecovery(kaos, ctx, `baseline-mismatch: HEAD moved from ${ctx.headCommit} to ${currentHead ?? 'unknown'}`);
-      throw new Error(
-        `The main workspace changed while the editing subagent was running (HEAD moved). ` +
-        `Changes were not applied to the workspace; recovery data preserved at ${result.recoveryPath}.`,
-      );
-    }
     await removeWorktree(kaos, ctx.repoRoot, ctx.worktreeRoot);
     return { applied: true };
   }
 
   try {
     await withRepoApplyLock(kaos, ctx.commonDir, async () => {
-      await assertHeadAndBaseline(kaos, ctx, deltas);
-      await applyDeltaPlan(kaos, ctx, deltas);
+      await assertCandidateBaseline(kaos, ctx.repoRoot, ctx.capabilities, deltas, 'worker delta path(s) diverged');
+      await applyDeltaPlan(kaos, ctx.repoRoot, deltas);
     });
   } catch (error) {
     const reason = `apply-failed: ${errorMessage(error)}`;
@@ -301,25 +317,114 @@ async function collectDeltas(kaos: Kaos, ctx: WorktreeContext): Promise<Delta[]>
   return deltas.sort((left, right) => left.relPath.localeCompare(right.relPath));
 }
 
-async function assertHeadAndBaseline(kaos: Kaos, ctx: WorktreeContext, deltas: readonly Delta[]): Promise<void> {
-  if (!ctx.capabilities.stateMaterialization) throw new Error('backend does not support safe POSIX state materialization');
-  const currentHead = await gitStdout(kaos, ctx.repoRoot, ['rev-parse', 'HEAD']);
-  if (currentHead !== ctx.headCommit) {
-    throw new Error(`HEAD moved from ${ctx.headCommit} to ${currentHead ?? 'unknown'}`);
+function createEditingCandidateDraft(ctx: WorktreeContext, deltas: readonly Delta[]): EditingCandidateDraft {
+  const paths: EditingCandidatePath[] = deltas.map((delta) => ({
+    ...delta,
+    classification: isPathInScope(delta.relPath, ctx.scope)
+      ? 'in_scope'
+      : 'scope_expansion_requested',
+  }));
+  const requestedScope = canonicalizePathSet([
+    ...ctx.scope,
+    ...paths
+      .filter((path) => path.classification === 'scope_expansion_requested')
+      .map((path) => path.relPath),
+  ]);
+  const draft = {
+    version: 1 as const,
+    candidateHash: '',
+    repoRoot: ctx.repoRoot,
+    commonDir: ctx.commonDir,
+    headCommit: ctx.headCommit,
+    scope: ctx.scope,
+    requestedScope,
+    paths,
+  };
+  return { ...draft, candidateHash: candidateDigest(draft) };
+}
+
+function candidateDigest(candidate: Omit<EditingCandidateDraft, 'candidateHash'>): string {
+  return createHash('sha256').update(JSON.stringify({
+    version: candidate.version,
+    repoRoot: candidate.repoRoot,
+    commonDir: candidate.commonDir,
+    headCommit: candidate.headCommit,
+    scope: candidate.scope,
+    requestedScope: candidate.requestedScope,
+    paths: candidate.paths.map((path) => ({
+      relPath: path.relPath,
+      classification: path.classification,
+      before: path.before.state,
+      after: path.after.state,
+    })),
+  })).digest('hex');
+}
+
+export function assertSubagentWorktreeCandidateIntegrity(
+  candidate: EditingCandidateDraft,
+): void {
+  const { candidateHash, ...unsigned } = candidate;
+  if (candidateDigest(unsigned) !== candidateHash) throw new Error('candidate_corrupt: manifest hash mismatch');
+  const canonicalPaths = canonicalizePathSet(candidate.paths.map((path) => path.relPath));
+  if (canonicalPaths.some((path) => isSecretPath(path))) {
+    throw new Error('candidate_corrupt: secret path is not allowed');
   }
-  for (const delta of deltas) {
-    await assertSafeExistingAncestors(kaos, ctx.repoRoot, delta.relPath);
+  if (JSON.stringify(canonicalPaths) !== JSON.stringify(candidate.paths.map((path) => path.relPath))) {
+    throw new Error('candidate_corrupt: paths are not canonical and sorted');
   }
-  for (const delta of deltas) {
-    const current = await capturePath(kaos, pathe.join(ctx.repoRoot, delta.relPath));
-    if (!snapshotsEqual(current, delta.before)) {
-      throw new Error(`worker delta path(s) diverged: ${delta.relPath}`);
+  for (const path of candidate.paths) {
+    for (const [side, snapshot] of [['before', path.before], ['after', path.after]] as const) {
+      if (snapshot.state.kind !== 'regular') continue;
+      if (snapshot.payload === undefined || digest(snapshot.payload) !== snapshot.state.sha256) {
+        throw new Error(`candidate_corrupt: ${path.relPath} ${side} payload hash mismatch`);
+      }
     }
   }
 }
 
-async function applyDeltaPlan(kaos: Kaos, ctx: WorktreeContext, deltas: readonly Delta[]): Promise<void> {
-  const stageRoot = pathe.join(ctx.repoRoot, `.kimi-code-subagent-apply-${randomId()}`);
+async function assertCandidateBaseline(
+  kaos: Kaos,
+  repoRoot: string,
+  capabilities: Capabilities,
+  deltas: readonly Delta[],
+  reason: string,
+): Promise<void> {
+  if (!capabilities.stateMaterialization) throw new Error('backend does not support safe POSIX state materialization');
+  for (const delta of deltas) {
+    await assertSafeExistingAncestors(kaos, repoRoot, delta.relPath);
+  }
+  for (const delta of deltas) {
+    const current = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
+    if (!snapshotsEqual(current, delta.before)) throw new Error(`${reason}: ${delta.relPath}`);
+  }
+}
+
+export async function applySubagentWorktreeCandidate(
+  kaos: Kaos,
+  candidate: EditingCandidateDraft,
+  approvedScope: readonly string[],
+): Promise<{ readonly applied: true }> {
+  assertSubagentWorktreeCandidateIntegrity(candidate);
+  const normalizedScope = normalizeScope(approvedScope);
+  if (JSON.stringify(normalizedScope) !== JSON.stringify(candidate.requestedScope)) {
+    throw new Error('candidate_identity_mismatch: requested scope does not match');
+  }
+  for (const path of candidate.paths) {
+    if (!isPathInScope(path.relPath, normalizedScope)) {
+      throw new Error(`candidate_identity_mismatch: approved scope excludes ${path.relPath}`);
+    }
+  }
+  const capabilities = getCapabilities(kaos);
+  const deltas: Delta[] = candidate.paths.map(({ relPath, before, after }) => ({ relPath, before, after }));
+  await withRepoApplyLock(kaos, candidate.commonDir, async () => {
+    await assertCandidateBaseline(kaos, candidate.repoRoot, capabilities, deltas, 'candidate_path_diverged');
+    await applyDeltaPlan(kaos, candidate.repoRoot, deltas);
+  });
+  return { applied: true };
+}
+
+async function applyDeltaPlan(kaos: Kaos, repoRoot: string, deltas: readonly Delta[]): Promise<void> {
+  const stageRoot = pathe.join(repoRoot, `.kimi-code-subagent-apply-${randomId()}`);
   const staged = new Map<string, string>();
   await kaos.mkdir(stageRoot, { parents: false, existOk: false });
   try {
@@ -344,23 +449,23 @@ async function applyDeltaPlan(kaos: Kaos, ctx: WorktreeContext, deltas: readonly
       for (const delta of deltas) {
         operation += 1;
         if (testApplyFailureAt === operation) throw new Error(`test-injected apply failure at operation ${operation}`);
-        await assertSafeExistingAncestors(kaos, ctx.repoRoot, delta.relPath);
-        const current = await capturePath(kaos, pathe.join(ctx.repoRoot, delta.relPath));
+        await assertSafeExistingAncestors(kaos, repoRoot, delta.relPath);
+        const current = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
         if (!snapshotsEqual(current, delta.before)) throw new Error(`worker delta path(s) diverged: ${delta.relPath}`);
-        await materializeState(kaos, ctx.repoRoot, delta.relPath, delta.after, staged.get(delta.relPath));
-        const final = await capturePath(kaos, pathe.join(ctx.repoRoot, delta.relPath));
+        await materializeState(kaos, repoRoot, delta.relPath, delta.after, staged.get(delta.relPath));
+        const final = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
         if (!snapshotsEqual(final, delta.after)) throw new Error(`postcondition failed for ${delta.relPath}`);
         completed.push(delta);
       }
       for (const delta of deltas) {
-        const final = await capturePath(kaos, pathe.join(ctx.repoRoot, delta.relPath));
+        const final = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
         if (!snapshotsEqual(final, delta.after)) throw new Error(`postcondition failed for ${delta.relPath}`);
       }
     } catch (error) {
       const rollbackErrors: string[] = [];
       for (const delta of completed.reverse()) {
         try {
-          await guardedRollback(kaos, ctx.repoRoot, delta);
+          await guardedRollback(kaos, repoRoot, delta);
         } catch (rollbackError) {
           rollbackErrors.push(`${delta.relPath}: ${errorMessage(rollbackError)}`);
         }

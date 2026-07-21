@@ -1,9 +1,10 @@
 /**
  * Background task persistence helpers.
  *
- * Each task lives at `<sessionDir>/tasks/<taskId>.json` so a CLI
- * restart can list previously-running tasks (now lost) and emit terminal
- * notifications.
+ * Each task lives at `<sessionDir>/tasks/<taskId>.json` so a CLI restart can
+ * restore durable statuses. Only previously-running tasks become lost;
+ * `input_required` tasks remain actionable with their immutable candidate
+ * bundle under `<sessionDir>/tasks/<taskId>/candidate/`.
  *
  * The per-id JSON layer (write / read / list) is delegated to
  * `createPerIdJsonStore`, which centralises atomic-write +
@@ -12,9 +13,20 @@
  * background-specific shape and the output.log helpers together.
  */
 
-import { appendFile, mkdir, open, stat } from 'node:fs/promises';
-import { dirname, join } from 'pathe';
+import { createHash } from 'node:crypto';
+import { appendFile, mkdir, open, readFile, stat } from 'node:fs/promises';
+import { dirname, join, normalize } from 'pathe';
 
+import type { TokenUsage } from '@moonshot-ai/kosong';
+
+import type { SubagentEditingCandidate } from '../../session/subagent-host';
+import {
+  assertSubagentWorktreeCandidateIntegrity,
+  type EditingCandidateDraft,
+  type EditingCandidatePathClassification,
+  type EditingCandidatePathState,
+} from '../../session/subagent-worktree';
+import { atomicWrite } from '../../utils/fs';
 import { createPerIdJsonStore, type PerIdJsonStore } from '../../utils/per-id-json-store';
 import type { BackgroundTaskInfo, BackgroundTaskStatus } from './task';
 
@@ -31,6 +43,51 @@ const VALID_TASK_ID: RegExp = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-z]{8}$/;
 type PersistedTask = BackgroundTaskInfo;
 
 type DiskPersistedTask = PersistedTask | LegacyPersistedTask;
+
+export interface EditingCandidateManifestPath {
+  readonly relPath: string;
+  readonly classification: EditingCandidatePathClassification;
+  readonly before: EditingCandidatePathState;
+  readonly after: EditingCandidatePathState;
+  readonly beforePayload: boolean;
+  readonly afterPayload: boolean;
+}
+
+export type EditingCandidateResolution =
+  | { readonly kind: 'approved_applied'; readonly resolvedAt: string }
+  | { readonly kind: 'denied'; readonly resolvedAt: string };
+
+export interface EditingCandidateManifestV1 {
+  readonly version: 1;
+  readonly taskId: string;
+  readonly agentId: string;
+  readonly logicalRunId: string;
+  readonly externalSessionId?: string;
+  readonly repoRoot: string;
+  readonly commonDir: string;
+  readonly headCommit: string;
+  readonly originalScope: readonly string[];
+  readonly requestedScope: readonly string[];
+  readonly candidateHash: string;
+  readonly createdAt: string;
+  readonly handoff: string;
+  readonly usage?: TokenUsage;
+  readonly validationEvidence: readonly string[];
+  readonly complete: true;
+  readonly errors: readonly string[];
+  readonly paths: readonly EditingCandidateManifestPath[];
+  readonly resolution?: EditingCandidateResolution;
+}
+
+export interface LoadedEditingCandidate {
+  readonly manifest: EditingCandidateManifestV1;
+  readonly draft: EditingCandidateDraft;
+}
+
+export interface EditingCandidateResolutionWriteResult {
+  readonly manifest: EditingCandidateManifestV1;
+  readonly idempotent: boolean;
+}
 
 function tasksDirOf(sessionDir: string): string {
   return join(sessionDir, 'tasks');
@@ -67,6 +124,134 @@ export class BackgroundTaskPersistence {
   /** Atomically write a task's persisted state. Creates dirs as needed. */
   async writeTask(task: PersistedTask): Promise<void> {
     await this.store.write(task.taskId, task);
+  }
+
+  async writeEditingCandidate(
+    taskId: string,
+    candidate: SubagentEditingCandidate,
+    handoff: string,
+    usage?: TokenUsage,
+  ): Promise<EditingCandidateManifestV1> {
+    assertSubagentWorktreeCandidateIntegrity(candidate.draft);
+    if (
+      JSON.stringify(candidate.originalScope) !== JSON.stringify(candidate.draft.scope) ||
+      JSON.stringify(candidate.requestedScope) !== JSON.stringify(candidate.draft.requestedScope)
+    ) {
+      throw new Error('candidate_identity_mismatch: candidate scope metadata does not match draft');
+    }
+    const candidateDir = join(taskOutputDir(this.sessionDir, taskId), 'candidate');
+    await mkdir(candidateDir, { recursive: true, mode: 0o700 });
+    const paths: EditingCandidateManifestPath[] = [];
+    for (const path of candidate.draft.paths) {
+      assertCandidateRelativePath(path.relPath);
+      await writeCandidatePayload(candidateDir, 'baseline', path.relPath, path.before.payload);
+      await writeCandidatePayload(candidateDir, 'worker-final', path.relPath, path.after.payload);
+      paths.push({
+        relPath: path.relPath,
+        classification: path.classification,
+        before: path.before.state,
+        after: path.after.state,
+        beforePayload: path.before.payload !== undefined,
+        afterPayload: path.after.payload !== undefined,
+      });
+    }
+    const manifest: EditingCandidateManifestV1 = {
+      version: 1,
+      taskId,
+      agentId: candidate.agentId,
+      logicalRunId: candidate.logicalRunId,
+      externalSessionId: candidate.externalSessionId,
+      repoRoot: candidate.draft.repoRoot,
+      commonDir: candidate.draft.commonDir,
+      headCommit: candidate.draft.headCommit,
+      originalScope: candidate.originalScope,
+      requestedScope: candidate.requestedScope,
+      candidateHash: candidate.draft.candidateHash,
+      createdAt: new Date().toISOString(),
+      handoff,
+      usage,
+      validationEvidence: ['candidate manifest and regular payload hashes verified'],
+      complete: true,
+      errors: [],
+      paths,
+    };
+    await verifyCandidatePayloads(candidateDir, manifest);
+    await atomicWrite(join(candidateDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    return manifest;
+  }
+
+  async loadEditingCandidate(taskId: string): Promise<LoadedEditingCandidate> {
+    const candidateDir = join(taskOutputDir(this.sessionDir, taskId), 'candidate');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(join(candidateDir, 'manifest.json'), 'utf-8'));
+    } catch {
+      throw new Error('candidate_corrupt: manifest is missing or invalid');
+    }
+    if (!isEditingCandidateManifest(parsed)) {
+      throw new Error('candidate_corrupt: manifest schema is invalid');
+    }
+    if (parsed.taskId !== taskId) {
+      throw new Error('candidate_corrupt: manifest task id mismatch');
+    }
+    for (const path of parsed.paths) assertCandidateRelativePath(path.relPath);
+    await verifyCandidatePayloads(candidateDir, parsed);
+    const draft: EditingCandidateDraft = {
+      version: 1,
+      candidateHash: parsed.candidateHash,
+      repoRoot: parsed.repoRoot,
+      commonDir: parsed.commonDir,
+      headCommit: parsed.headCommit,
+      scope: parsed.originalScope,
+      requestedScope: parsed.requestedScope,
+      paths: await Promise.all(parsed.paths.map(async (path) => ({
+        relPath: path.relPath,
+        classification: path.classification,
+        before: {
+          state: path.before,
+          payload: path.before.kind === 'regular'
+            ? await readCandidatePayload(candidateDir, 'baseline', path.relPath)
+            : undefined,
+        },
+        after: {
+          state: path.after,
+          payload: path.after.kind === 'regular'
+            ? await readCandidatePayload(candidateDir, 'worker-final', path.relPath)
+            : undefined,
+        },
+      }))),
+    };
+    assertSubagentWorktreeCandidateIntegrity(draft);
+    return { manifest: parsed, draft };
+  }
+
+  async readEditingCandidate(taskId: string): Promise<EditingCandidateManifestV1 | undefined> {
+    try {
+      return (await this.loadEditingCandidate(taskId)).manifest;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async writeEditingCandidateResolution(
+    taskId: string,
+    expectedCandidateHash: string,
+    resolution: EditingCandidateResolution,
+  ): Promise<EditingCandidateResolutionWriteResult> {
+    const { manifest } = await this.loadEditingCandidate(taskId);
+    if (manifest.candidateHash !== expectedCandidateHash) {
+      throw new Error('candidate_identity_mismatch: candidate hash does not match');
+    }
+    if (manifest.resolution !== undefined) {
+      if (manifest.resolution.kind !== resolution.kind) {
+        throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+      }
+      return { manifest, idempotent: true };
+    }
+    const resolved: EditingCandidateManifestV1 = { ...manifest, resolution };
+    const manifestPath = join(taskOutputDir(this.sessionDir, taskId), 'candidate', 'manifest.json');
+    await atomicWrite(manifestPath, JSON.stringify(resolved, null, 2));
+    return { manifest: resolved, idempotent: false };
   }
 
   /** Read a single task file. Returns undefined when missing/corrupt/unrecognized. */
@@ -164,6 +349,136 @@ export class BackgroundTaskPersistence {
     const tasks = await this.store.list();
     return tasks.map(normalizePersistedTask);
   }
+}
+
+async function writeCandidatePayload(
+  candidateDir: string,
+  side: 'baseline' | 'worker-final',
+  relPath: string,
+  payload: Buffer | undefined,
+): Promise<void> {
+  if (payload === undefined) return;
+  const target = join(candidateDir, side, relPath);
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  await atomicWrite(target, payload);
+}
+
+async function readCandidatePayload(
+  candidateDir: string,
+  side: 'baseline' | 'worker-final',
+  relPath: string,
+): Promise<Buffer> {
+  try {
+    return await readFile(join(candidateDir, side, relPath));
+  } catch {
+    throw new Error(`candidate_corrupt: missing ${side} payload for ${relPath}`);
+  }
+}
+
+async function verifyCandidatePayloads(
+  candidateDir: string,
+  manifest: EditingCandidateManifestV1,
+): Promise<void> {
+  for (const path of manifest.paths) {
+    for (const [side, state, present] of [
+      ['baseline', path.before, path.beforePayload],
+      ['worker-final', path.after, path.afterPayload],
+    ] as const) {
+      if (state.kind !== 'regular') {
+        if (present) throw new Error(`candidate_corrupt: unexpected ${side} payload for ${path.relPath}`);
+        continue;
+      }
+      if (!present) throw new Error(`candidate_corrupt: missing ${side} payload for ${path.relPath}`);
+      const payload = await readCandidatePayload(candidateDir, side, path.relPath);
+      if (createHash('sha256').update(payload).digest('hex') !== state.sha256) {
+        throw new Error(`candidate_corrupt: ${side} payload hash mismatch for ${path.relPath}`);
+      }
+    }
+  }
+}
+
+function assertCandidateRelativePath(relPath: string): void {
+  const canonical = normalize(relPath).replace(/^\.\//, '');
+  if (
+    relPath.length === 0 ||
+    relPath.startsWith('/') ||
+    relPath.includes('\\') ||
+    canonical !== relPath ||
+    relPath === '..' ||
+    relPath.startsWith('../')
+  ) {
+    throw new Error(`candidate_corrupt: invalid path ${relPath}`);
+  }
+}
+
+function isEditingCandidateManifest(value: unknown): value is EditingCandidateManifestV1 {
+  if (!isRecord(value)) return false;
+  const paths = value['paths'];
+  const resolution = value['resolution'];
+  return (
+    value['version'] === 1 &&
+    typeof value['taskId'] === 'string' &&
+    typeof value['agentId'] === 'string' &&
+    typeof value['logicalRunId'] === 'string' &&
+    (value['externalSessionId'] === undefined || typeof value['externalSessionId'] === 'string') &&
+    typeof value['repoRoot'] === 'string' &&
+    typeof value['commonDir'] === 'string' &&
+    typeof value['headCommit'] === 'string' &&
+    isStringArray(value['originalScope']) &&
+    isStringArray(value['requestedScope']) &&
+    typeof value['candidateHash'] === 'string' &&
+    typeof value['createdAt'] === 'string' &&
+    typeof value['handoff'] === 'string' &&
+    isStringArray(value['validationEvidence']) &&
+    value['complete'] === true &&
+    isStringArray(value['errors']) &&
+    Array.isArray(paths) &&
+    paths.every(isEditingCandidateManifestPath) &&
+    (resolution === undefined || isEditingCandidateResolution(resolution))
+  );
+}
+
+function isEditingCandidateManifestPath(value: unknown): value is EditingCandidateManifestPath {
+  return (
+    isRecord(value) &&
+    typeof value['relPath'] === 'string' &&
+    (value['classification'] === 'in_scope' || value['classification'] === 'scope_expansion_requested') &&
+    isEditingCandidatePathState(value['before']) &&
+    isEditingCandidatePathState(value['after']) &&
+    typeof value['beforePayload'] === 'boolean' &&
+    typeof value['afterPayload'] === 'boolean'
+  );
+}
+
+function isEditingCandidatePathState(value: unknown): value is EditingCandidatePathState {
+  if (!isRecord(value) || typeof value['kind'] !== 'string') return false;
+  switch (value['kind']) {
+    case 'absent':
+      return true;
+    case 'regular':
+      return typeof value['mode'] === 'number' && typeof value['sha256'] === 'string';
+    case 'directory':
+    case 'special':
+      return typeof value['mode'] === 'number';
+    case 'symlink':
+      return typeof value['mode'] === 'number' && typeof value['target'] === 'string';
+    case 'unreadable':
+      return typeof value['error'] === 'string';
+    default:
+      return false;
+  }
+}
+
+function isEditingCandidateResolution(value: unknown): value is EditingCandidateResolution {
+  return (
+    isRecord(value) &&
+    (value['kind'] === 'approved_applied' || value['kind'] === 'denied') &&
+    typeof value['resolvedAt'] === 'string'
+  );
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 }
 
 function normalizePersistedTask(task: DiskPersistedTask): PersistedTask {

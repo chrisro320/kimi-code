@@ -20,6 +20,7 @@ import {
 import {
   agentTask,
   createBackgroundManager,
+  editingCandidateCompletion,
   registerProcess,
   waitForOutput,
   waitForTerminal,
@@ -866,6 +867,68 @@ describe('BackgroundManager', () => {
   }, 15_000);
 });
 
+describe('editing candidate lifecycle', () => {
+  it('publishes input_required only after bundle persistence and worktree acknowledgement', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-'));
+    try {
+      let manager!: BackgroundManager;
+      let taskId = '';
+      const acknowledgePersisted = vi.fn(async () => {
+        expect(await new BackgroundTaskPersistence(sessionDir).readTask(taskId)).toMatchObject({
+          status: 'input_required',
+        });
+      });
+      ({ manager } = createBackgroundManager({ sessionDir }));
+      const persistence = new BackgroundTaskPersistence(sessionDir);
+      taskId = manager.registerTask(
+        agentTask(
+          Promise.resolve(editingCandidateCompletion({ acknowledgePersisted })),
+          'candidate task',
+        ),
+      );
+
+      const info = await manager.wait(taskId);
+
+      expect(info).toMatchObject({
+        kind: 'agent',
+        status: 'input_required',
+        endedAt: expect.any(Number),
+        candidate: {
+          hash: '960e0ff0617bdc2d4d4a524fbc4370ffcc6273adab91929c1bb271ea013dba85',
+          requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+          paths: ['src/widget.ts', 'test/widget.test.ts'],
+        },
+      });
+      expect(await persistence?.readEditingCandidate(taskId)).toMatchObject({
+        taskId,
+        complete: true,
+      });
+      expect(acknowledgePersisted).toHaveBeenCalledTimes(1);
+      expect(await manager.readOutput(taskId)).toBe('candidate handoff');
+      expect(manager.list(true)).toContainEqual(expect.objectContaining({ taskId }));
+      await expect(manager.waitForActiveTasks((task) => task.taskId === taskId)).resolves.toBeUndefined();
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails without acknowledging cleanup when candidate persistence fails', async () => {
+    const acknowledgePersisted = vi.fn(async () => {});
+    const { manager } = createBackgroundManager();
+    const taskId = manager.registerTask(
+      agentTask(
+        Promise.resolve(editingCandidateCompletion({ acknowledgePersisted })),
+        'candidate without persistence',
+      ),
+    );
+
+    expect(await manager.wait(taskId)).toMatchObject({
+      status: 'failed',
+      stopReason: expect.stringContaining('candidate persistence'),
+    });
+    expect(acknowledgePersisted).not.toHaveBeenCalled();
+  });
+});
 
 describe('waitForActiveTasks', () => {
   function deferred<T>(): {

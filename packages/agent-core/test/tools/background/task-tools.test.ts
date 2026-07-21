@@ -2,13 +2,14 @@
  * Covers: TaskListTool, TaskOutputTool, TaskStopTool.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
 import type { Writable } from 'node:stream';
-import { join } from 'pathe';
+import { dirname, join } from 'pathe';
 
-import type { KaosProcess } from '@moonshot-ai/kaos';
+import { LocalKaos, type KaosProcess } from '@moonshot-ai/kaos';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -20,8 +21,14 @@ import { TaskListTool } from '../../../src/tools/background/task-list';
 import { TaskOutputTool } from '../../../src/tools/background/task-output';
 import { TaskStopTool } from '../../../src/tools/background/task-stop';
 import {
+  acquireSubagentWorktree,
+  applySubagentWorktreeCandidate,
+  type EditingCandidateDraft,
+} from '../../../src/session/subagent-worktree';
+import {
   agentTask,
   createBackgroundManager,
+  editingCandidateCompletion,
   registerProcess,
   waitForOutput,
 } from '../../agent/background/helpers';
@@ -96,6 +103,98 @@ async function taskOutput(manager: BackgroundManager, taskId: string, block = fa
   );
   expect(result.isError).toBe(false);
   return toolContentString(result);
+}
+
+async function executeTaskOutput(
+  manager: BackgroundManager,
+  args: Record<string, unknown>,
+): Promise<Awaited<ReturnType<typeof executeTool>>> {
+  return executeTool(new TaskOutputTool(manager), context('task_output_resolution', args));
+}
+
+async function createCandidateTask(options: {
+  readonly sessionDir: string;
+  readonly replayCandidate?: ConstructorParameters<typeof BackgroundManager>[2];
+}): Promise<{ taskId: string; manager: BackgroundManager; persistence: BackgroundTaskPersistence }> {
+  const { manager, persistence } = createBackgroundManager({
+    sessionDir: options.sessionDir,
+    enableWorktreeIsolation: true,
+    replayCandidate: options.replayCandidate,
+  });
+  const taskId = manager.registerTask(
+    agentTask(Promise.resolve(editingCandidateCompletion()), 'candidate resolution task'),
+  );
+  await manager.wait(taskId);
+  return { taskId, manager, persistence: persistence! };
+}
+
+const candidateIdentity = {
+  candidate_hash: '960e0ff0617bdc2d4d4a524fbc4370ffcc6273adab91929c1bb271ea013dba85',
+  requested_scope: ['src/widget.ts', 'test/widget.test.ts'],
+} as const;
+
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+async function initReleaseDemoRepo(): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), 'kimi-bg-release-demo-repo-'));
+  git(repo, ['init', '-q', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'test@example.com']);
+  git(repo, ['config', 'user.name', 'Test']);
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src/widget.ts'), 'export const widget = 1;\n');
+  await writeFile(join(repo, 'README.md'), 'release demo\n');
+  git(repo, ['add', '.']);
+  git(repo, ['commit', '-q', '-m', 'init']);
+  return repo;
+}
+
+async function createRealCandidateTask(options: {
+  readonly repo: string;
+  readonly sessionDir: string;
+  readonly kaos: LocalKaos;
+  readonly sourceText: string;
+  readonly companionPath: string;
+  readonly companionText: string;
+}): Promise<{
+  readonly taskId: string;
+  readonly candidate: EditingCandidateDraft;
+  readonly persistence: BackgroundTaskPersistence;
+}> {
+  const worktree = await acquireSubagentWorktree(options.kaos, options.repo, {
+    scope: ['src/widget.ts'],
+  });
+  if (worktree === null) throw new Error('expected local Git worktree isolation');
+  await writeFile(join(worktree.cwd, 'src/widget.ts'), options.sourceText);
+  await mkdir(dirname(join(worktree.cwd, options.companionPath)), { recursive: true });
+  await writeFile(join(worktree.cwd, options.companionPath), options.companionText);
+  const finish = await worktree.finish({ kind: 'success' });
+  if (finish.candidate === undefined || finish.acknowledgePersisted === undefined) {
+    throw new Error('expected scope-expansion candidate');
+  }
+  const completion = {
+    result: 'candidate handoff\nvalidation: local fixture passed',
+    editingCandidate: {
+      draft: finish.candidate,
+      agentId: 'agent-release-demo',
+      logicalRunId: 'logical-release-demo',
+      originalScope: finish.candidate.scope,
+      requestedScope: finish.candidate.requestedScope,
+      outsideScope: finish.outsideScope ?? [],
+      acknowledgePersisted: finish.acknowledgePersisted,
+    },
+  };
+  const created = createBackgroundManager({
+    sessionDir: options.sessionDir,
+    enableWorktreeIsolation: true,
+    kaos: options.kaos,
+  });
+  const taskId = created.manager.registerTask(
+    agentTask(Promise.resolve(completion), 'release demo', { agentId: 'agent-release-demo' }),
+  );
+  await created.manager.wait(taskId);
+  return { taskId, candidate: finish.candidate, persistence: created.persistence! };
 }
 
 describe('TaskListTool', () => {
@@ -430,6 +529,351 @@ describe('TaskOutputTool', () => {
 
       expect(result.isError).toBe(true);
       expect(await new BackgroundTaskPersistence(sessionDir).listTasks()).toEqual([]);
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+
+  it('inspects an input_required candidate without blocking and exposes stable actions', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-inspect-'));
+    try {
+      const { manager, taskId } = await createCandidateTask({ sessionDir });
+      const content = await taskOutput(manager, taskId, true);
+
+      expect(content).toContain('retrieval_status: success');
+      expect(content).toContain('status: input_required');
+      expect(content).toContain(`candidate_hash: ${candidateIdentity.candidate_hash}`);
+      expect(content).toContain('requested_scope: src/widget.ts,test/widget.test.ts');
+      expect(content).toContain('available_actions: approve_scope_expansion,deny_scope_expansion');
+      expect(content).toContain('[output]\ncandidate handoff');
+      expect(content).not.toContain('next_step:');
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('denies after restart, retains the bundle, and makes identical denial idempotent', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-deny-'));
+    try {
+      const created = await createCandidateTask({ sessionDir });
+      const reader = createBackgroundManager({
+        sessionDir,
+        enableWorktreeIsolation: true,
+      }).manager;
+      await reader.loadFromDisk();
+      await reader.reconcile();
+
+      const args = {
+        action: 'deny_scope_expansion',
+        task_id: created.taskId,
+        ...candidateIdentity,
+      };
+      const first = await executeTaskOutput(reader, args);
+      const duplicate = await executeTaskOutput(reader, args);
+      const reverse = await executeTaskOutput(reader, {
+        ...args,
+        action: 'approve_scope_expansion',
+      });
+
+      expect(first.isError).toBe(false);
+      expect(toolContentString(first)).toContain('status: expansion_denied');
+      expect(toolContentString(first)).toContain('idempotent: false');
+      expect(duplicate.isError).toBe(false);
+      expect(toolContentString(duplicate)).toContain('idempotent: true');
+      expect(reverse.isError).toBe(true);
+      expect(toolContentString(reverse)).toContain('resolution_reason: candidate_already_resolved');
+      expect(await created.persistence.readEditingCandidate(created.taskId)).toMatchObject({
+        resolution: { kind: 'denied' },
+      });
+      expect(await readFile(created.persistence.taskOutputFile(created.taskId), 'utf-8')).toBe('candidate handoff');
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('approves after restart exactly once and preserves the immutable bundle', async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-approve-'));
+    const replayCandidate = vi.fn(async () => ({ applied: true as const }));
+    try {
+      const created = await createCandidateTask({ sessionDir });
+      const reader = createBackgroundManager({
+        sessionDir,
+        enableWorktreeIsolation: true,
+        replayCandidate,
+      }).manager;
+      await reader.loadFromDisk();
+      await reader.reconcile();
+      const args = {
+        action: 'approve_scope_expansion',
+        task_id: created.taskId,
+        ...candidateIdentity,
+      };
+
+      const [first, duplicate] = await Promise.all([
+        executeTaskOutput(reader, args),
+        executeTaskOutput(reader, args),
+      ]);
+
+      expect(first.isError).toBe(false);
+      expect(toolContentString(first)).toContain('status: completed');
+      expect(toolContentString(first)).toContain('idempotent: false');
+      expect(duplicate.isError).toBe(false);
+      expect(toolContentString(duplicate)).toContain('idempotent: true');
+      expect(replayCandidate).toHaveBeenCalledTimes(1);
+      expect(replayCandidate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ candidateHash: candidateIdentity.candidate_hash }),
+        candidateIdentity.requested_scope,
+      );
+      expect(await created.persistence.readEditingCandidate(created.taskId)).toMatchObject({
+        resolution: { kind: 'approved_applied' },
+      });
+      expect(await readFile(created.persistence.taskOutputFile(created.taskId), 'utf-8')).toBe('candidate handoff');
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the complete local Git release demonstration without provider or tool dispatch', async () => {
+    const roots: string[] = [];
+    const kaos = await LocalKaos.create();
+    const providerBoundary = {
+      generation: vi.fn(),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      routeSubstitution: vi.fn(),
+      Agent: vi.fn(),
+      AgentSwarm: vi.fn(),
+    };
+    try {
+      const approveRepo = await initReleaseDemoRepo();
+      const approveSession = await mkdtemp(join(tmpdir(), 'kimi-bg-release-demo-approve-'));
+      roots.push(approveRepo, approveSession);
+      await writeFile(join(approveRepo, 'README.md'), 'release demo\ndirty tracked baseline\n');
+      await writeFile(join(approveRepo, 'scratch.txt'), 'dirty untracked baseline\n');
+      const approveBaseline = {
+        source: await readFile(join(approveRepo, 'src/widget.ts'), 'utf8'),
+        readme: await readFile(join(approveRepo, 'README.md'), 'utf8'),
+        scratch: await readFile(join(approveRepo, 'scratch.txt'), 'utf8'),
+      };
+      const approveCreated = await createRealCandidateTask({
+        repo: approveRepo,
+        sessionDir: approveSession,
+        kaos,
+        sourceText: 'export const widget = 2;\n',
+        companionPath: 'test/widget.test.ts',
+        companionText: 'expect(widget).toBe(2);\n',
+      });
+      expect(await readFile(join(approveRepo, 'src/widget.ts'), 'utf8')).toBe(approveBaseline.source);
+      expect(await readFile(join(approveRepo, 'README.md'), 'utf8')).toBe(approveBaseline.readme);
+      expect(await readFile(join(approveRepo, 'scratch.txt'), 'utf8')).toBe(approveBaseline.scratch);
+      await expect(stat(join(approveRepo, 'test/widget.test.ts'))).rejects.toThrow();
+      expect(approveCreated.candidate.paths.map((path) => path.relPath)).toEqual([
+        'src/widget.ts',
+        'test/widget.test.ts',
+      ]);
+
+      const approveReader = createBackgroundManager({
+        sessionDir: approveSession,
+        enableWorktreeIsolation: true,
+        kaos,
+        replayCandidate: applySubagentWorktreeCandidate,
+      }).manager;
+      await approveReader.loadFromDisk();
+      await approveReader.reconcile();
+      const inspected = await taskOutput(approveReader, approveCreated.taskId, true);
+      expect(inspected).toContain('status: input_required');
+      expect(inspected).toContain('candidate handoff');
+      expect(inspected).toContain(`candidate_hash: ${approveCreated.candidate.candidateHash}`);
+
+      await writeFile(join(approveRepo, 'README.md'), `${approveBaseline.readme}unrelated drift\n`);
+      const approveArgs = {
+        action: 'approve_scope_expansion',
+        task_id: approveCreated.taskId,
+        candidate_hash: approveCreated.candidate.candidateHash,
+        requested_scope: approveCreated.candidate.requestedScope,
+      };
+      const firstApproval = await executeTaskOutput(approveReader, approveArgs);
+      const duplicateApproval = await executeTaskOutput(approveReader, approveArgs);
+      expect(firstApproval.isError, toolContentString(firstApproval)).toBe(false);
+      expect(toolContentString(firstApproval)).toContain('status: completed');
+      expect(toolContentString(firstApproval)).toContain('idempotent: false');
+      expect(toolContentString(duplicateApproval)).toContain('idempotent: true');
+      expect(await readFile(join(approveRepo, 'src/widget.ts'), 'utf8')).toBe('export const widget = 2;\n');
+      expect(await readFile(join(approveRepo, 'test/widget.test.ts'), 'utf8')).toBe('expect(widget).toBe(2);\n');
+      expect(await readFile(join(approveRepo, 'README.md'), 'utf8')).toBe(
+        `${approveBaseline.readme}unrelated drift\n`,
+      );
+      expect(await readFile(join(approveRepo, 'scratch.txt'), 'utf8')).toBe(approveBaseline.scratch);
+      expect(await approveCreated.persistence.readEditingCandidate(approveCreated.taskId)).toMatchObject({
+        resolution: { kind: 'approved_applied' },
+      });
+
+      const denyRepo = await initReleaseDemoRepo();
+      const denySession = await mkdtemp(join(tmpdir(), 'kimi-bg-release-demo-deny-'));
+      roots.push(denyRepo, denySession);
+      const denyCreated = await createRealCandidateTask({
+        repo: denyRepo,
+        sessionDir: denySession,
+        kaos,
+        sourceText: 'export const widget = 3;\n',
+        companionPath: 'test/widget.test.ts',
+        companionText: 'expect(widget).toBe(3);\n',
+      });
+      const denyReader = createBackgroundManager({
+        sessionDir: denySession,
+        enableWorktreeIsolation: true,
+        kaos,
+      }).manager;
+      await denyReader.loadFromDisk();
+      await denyReader.reconcile();
+      const denial = await executeTaskOutput(denyReader, {
+        action: 'deny_scope_expansion',
+        task_id: denyCreated.taskId,
+        candidate_hash: denyCreated.candidate.candidateHash,
+        requested_scope: denyCreated.candidate.requestedScope,
+      });
+      expect(denial.isError).toBe(false);
+      expect(toolContentString(denial)).toContain('status: expansion_denied');
+      expect(await readFile(join(denyRepo, 'src/widget.ts'), 'utf8')).toBe('export const widget = 1;\n');
+      await expect(stat(join(denyRepo, 'test/widget.test.ts'))).rejects.toThrow();
+      expect(await denyCreated.persistence.readEditingCandidate(denyCreated.taskId)).toMatchObject({
+        resolution: { kind: 'denied' },
+      });
+
+      const conflictRepo = await initReleaseDemoRepo();
+      const conflictSession = await mkdtemp(join(tmpdir(), 'kimi-bg-release-demo-conflict-'));
+      roots.push(conflictRepo, conflictSession);
+      const conflictCreated = await createRealCandidateTask({
+        repo: conflictRepo,
+        sessionDir: conflictSession,
+        kaos,
+        sourceText: 'export const widget = 4;\n',
+        companionPath: 'test/widget.test.ts',
+        companionText: 'expect(widget).toBe(4);\n',
+      });
+      await writeFile(join(conflictRepo, 'src/widget.ts'), 'export const widget = 99;\n');
+      const conflictReader = createBackgroundManager({
+        sessionDir: conflictSession,
+        enableWorktreeIsolation: true,
+        kaos,
+        replayCandidate: applySubagentWorktreeCandidate,
+      }).manager;
+      await conflictReader.loadFromDisk();
+      await conflictReader.reconcile();
+      const conflict = await executeTaskOutput(conflictReader, {
+        action: 'approve_scope_expansion',
+        task_id: conflictCreated.taskId,
+        candidate_hash: conflictCreated.candidate.candidateHash,
+        requested_scope: conflictCreated.candidate.requestedScope,
+      });
+      expect(conflict.isError).toBe(true);
+      expect(toolContentString(conflict)).toContain('resolution_reason: candidate_path_diverged');
+      expect(await readFile(join(conflictRepo, 'src/widget.ts'), 'utf8')).toBe(
+        'export const widget = 99;\n',
+      );
+      await expect(stat(join(conflictRepo, 'test/widget.test.ts'))).rejects.toThrow();
+      expect(conflictReader.getTask(conflictCreated.taskId)).toMatchObject({ status: 'input_required' });
+      expect(
+        (await conflictCreated.persistence.readEditingCandidate(conflictCreated.taskId))?.resolution,
+      ).toBeUndefined();
+
+      for (const spy of Object.values(providerBoundary)) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+    }
+  });
+
+  it('rejects disabled, stale identity, replay conflicts, and corrupt payload without state mutation', async () => {
+    const cases = [
+      {
+        label: 'disabled',
+        managerOptions: { enableWorktreeIsolation: false },
+        args: candidateIdentity,
+        expected: 'candidate_resolution_disabled',
+      },
+      {
+        label: 'stale hash',
+        managerOptions: { enableWorktreeIsolation: true },
+        args: { ...candidateIdentity, candidate_hash: 'stale-hash' },
+        expected: 'candidate_identity_mismatch',
+      },
+      {
+        label: 'stale scope',
+        managerOptions: { enableWorktreeIsolation: true },
+        args: { ...candidateIdentity, requested_scope: ['src/widget.ts'] },
+        expected: 'candidate_identity_mismatch',
+      },
+      {
+        label: 'path conflict',
+        managerOptions: {
+          enableWorktreeIsolation: true,
+          replayCandidate: vi.fn(async () => { throw new Error('candidate_path_diverged: src/widget.ts'); }),
+        },
+        args: candidateIdentity,
+        expected: 'candidate_path_diverged',
+      },
+      {
+        label: 'rolled back apply failure',
+        managerOptions: {
+          enableWorktreeIsolation: true,
+          replayCandidate: vi.fn(async () => { throw new Error('write failed'); }),
+        },
+        args: candidateIdentity,
+        expected: 'apply_failed_rolled_back',
+      },
+      {
+        label: 'incomplete rollback',
+        managerOptions: {
+          enableWorktreeIsolation: true,
+          replayCandidate: vi.fn(async () => { throw new Error('write failed; guarded rollback incomplete: src/widget.ts'); }),
+        },
+        args: candidateIdentity,
+        expected: 'apply_failed_recovery_required',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const sessionDir = await mkdtemp(join(tmpdir(), `kimi-bg-candidate-${testCase.label}-`));
+      try {
+        const created = await createCandidateTask({ sessionDir });
+        const reader = createBackgroundManager({
+          sessionDir,
+          ...testCase.managerOptions,
+        }).manager;
+        await reader.loadFromDisk();
+        const result = await executeTaskOutput(reader, {
+          action: 'approve_scope_expansion',
+          task_id: created.taskId,
+          ...testCase.args,
+        });
+        expect(result.isError).toBe(true);
+        expect(toolContentString(result)).toContain(`resolution_reason: ${testCase.expected}`);
+        expect(reader.getTask(created.taskId)).toMatchObject({ status: 'input_required' });
+        expect((await created.persistence.readEditingCandidate(created.taskId))?.resolution).toBeUndefined();
+      } finally {
+        await rm(sessionDir, { recursive: true, force: true });
+      }
+    }
+
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-candidate-corrupt-'));
+    try {
+      const created = await createCandidateTask({ sessionDir });
+      await writeFile(
+        join(sessionDir, 'tasks', created.taskId, 'candidate', 'worker-final', 'src/widget.ts'),
+        'tampered payload',
+      );
+      const reader = createBackgroundManager({ sessionDir, enableWorktreeIsolation: true }).manager;
+      await reader.loadFromDisk();
+      const result = await executeTaskOutput(reader, {
+        action: 'approve_scope_expansion',
+        task_id: created.taskId,
+        ...candidateIdentity,
+      });
+      expect(result.isError).toBe(true);
+      expect(toolContentString(result)).toContain('resolution_reason: candidate_corrupt');
+      expect(reader.getTask(created.taskId)).toMatchObject({ status: 'input_required' });
     } finally {
       await rm(sessionDir, { recursive: true, force: true });
     }

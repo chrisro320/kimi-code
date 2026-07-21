@@ -31,7 +31,9 @@
  *            question  → tool
  *
  *   status:  running   → running
+ *            input_required → running   (actionable, non-executing)
  *            completed → completed
+ *            expansion_denied → cancelled
  *            failed    → failed
  *            timed_out → failed       (lossy — stopReason carries hint)
  *            killed    → cancelled
@@ -63,9 +65,12 @@ function mapKind(k: BackgroundTaskInfo['kind']): BackgroundTaskKind {
 function mapStatus(s: BackgroundTaskInfo['status']): BackgroundTaskStatus {
   switch (s) {
     case 'running':
+    case 'input_required':
       return 'running';
     case 'completed':
       return 'completed';
+    case 'expansion_denied':
+      return 'cancelled';
     case 'failed':
       return 'failed';
     case 'timed_out':

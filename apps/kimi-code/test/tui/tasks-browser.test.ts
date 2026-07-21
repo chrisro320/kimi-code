@@ -106,15 +106,19 @@ describe('TasksBrowserApp — full-screen rendering', () => {
     const props: Partial<TasksBrowserProps> = {
       tasks: [
         task({ taskId: 'bash-aaaaaaaa', status: 'running' }),
-        task({ taskId: 'agent-bbbbbbbb', status: 'completed' }),
+        task({ taskId: 'agent-bbbbbbbb', status: 'input_required' }),
+        task({ taskId: 'agent-cccccccc', status: 'expansion_denied', endedAt: Date.now() }),
+        task({ taskId: 'agent-dddddddd', status: 'completed' }),
       ],
     };
     const out = strip(makeApp(props).render(120).join('\n'));
     expect(out).toContain('TASK BROWSER');
     expect(out).toContain('filter=ALL');
     expect(out).toContain('1 running');
+    expect(out).toContain('1 awaiting approval');
+    expect(out).toContain('1 denied');
     expect(out).toContain('1 completed');
-    expect(out).toContain('2 total');
+    expect(out).toContain('4 total');
   });
 
   it('renders three framed panes: Tasks / Detail / Preview Output', () => {
@@ -208,14 +212,18 @@ describe('TasksBrowserApp — full-screen rendering', () => {
     expect(out).toContain('No background tasks');
   });
 
-  it('filters out terminal tasks when filter=active', () => {
+  it('keeps input_required actionable but filters expansion_denied when filter=active', () => {
     const tasks = [
+      task({ taskId: 'agent-awaiting', status: 'input_required' }),
       task({ taskId: 'bash-aaaaaaaa', status: 'running' }),
       task({ taskId: 'bash-bbbbbbbb', status: 'completed' }),
+      task({ taskId: 'agent-denied', status: 'expansion_denied', endedAt: Date.now() }),
     ];
     const out = strip(makeApp({ tasks, filter: 'active' }).render(120).join('\n'));
     expect(out).toContain('bash-aaaaaaaa');
+    expect(out).toContain('agent-awaiting');
     expect(out).not.toContain('bash-bbbbbbbb');
+    expect(out).not.toContain('agent-denied');
   });
 
   it('filters out foreground tasks (detached === false)', () => {
@@ -256,7 +264,9 @@ describe('TasksBrowserApp — full-screen rendering', () => {
   it('renders without throwing for every BackgroundTaskStatus', () => {
     const statuses: BackgroundTaskStatus[] = [
       'running',
+      'input_required',
       'completed',
+      'expansion_denied',
       'failed',
       'killed',
       'lost',

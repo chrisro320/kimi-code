@@ -20,9 +20,13 @@ import { errorMessage } from '../../loop/errors';
 import { resettableTimeoutOutcome, timeoutOutcome, type ResettableTimeoutPromise } from '../../utils/promise';
 import { escapeXml, escapeXmlAttr } from '../../utils/xml-escape';
 import { isExternalSubagentId } from '../../session/subagent-routing';
+import { applySubagentWorktreeCandidate } from '../../session/subagent-worktree';
 import type { BackgroundTaskOrigin } from '../context';
 import { renderNotificationXml } from '../context/notification-xml';
-import { type BackgroundTaskPersistence } from './persist';
+import {
+  type BackgroundTaskPersistence,
+  type EditingCandidateManifestV1,
+} from './persist';
 import {
   TERMINAL_STATUSES,
   type BackgroundTask,
@@ -41,6 +45,14 @@ import {
  */
 export function isBackgroundTaskTerminal(status: BackgroundTaskStatus): boolean {
   return TERMINAL_STATUSES.has(status);
+}
+
+export function isBackgroundTaskExecuting(status: BackgroundTaskStatus): boolean {
+  return status === 'running';
+}
+
+export function isBackgroundTaskAwaitingInput(status: BackgroundTaskStatus): boolean {
+  return status === 'input_required';
 }
 
 export { AgentBackgroundTask } from './agent-task';
@@ -73,6 +85,7 @@ interface ManagedTask {
    */
   outputLimitTripped: boolean;
   status: BackgroundTaskStatus;
+  candidate?: Extract<BackgroundTaskInfo, { kind: 'agent' }>['candidate'];
   /** Normalized registration options. Current mutable state stays on ManagedTask. */
   readonly options: RegisterBackgroundTaskOptions;
   readonly startedAt: number;
@@ -240,6 +253,25 @@ type TerminalOutcome =
   | { readonly kind: 'timeout' }
   | { readonly kind: 'stop'; readonly request: StopRequest };
 
+export type ScopeExpansionResolutionAction = 'approve' | 'deny';
+
+export interface ScopeExpansionResolutionRequest {
+  readonly taskId: string;
+  readonly action: ScopeExpansionResolutionAction;
+  readonly candidateHash: string;
+  readonly requestedScope: readonly string[];
+}
+
+export interface ScopeExpansionResolutionResult {
+  readonly task: BackgroundTaskInfo;
+  readonly candidateHash: string;
+  readonly requestedScope: readonly string[];
+  readonly resolution: 'approved_applied' | 'denied';
+  readonly idempotent: boolean;
+}
+
+type CandidateReplay = typeof applySubagentWorktreeCandidate;
+
 // ── Manager ──────────────────────────────────────────────────────────
 
 export class BackgroundManager {
@@ -253,17 +285,19 @@ export class BackgroundManager {
 
   private readonly scheduledNotificationKeys = new Set<string>();
   private readonly deliveredNotificationKeys = new Set<string>();
+  private readonly resolutionQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly agent: Agent,
     private readonly persistence?: BackgroundTaskPersistence,
+    private readonly replayCandidate: CandidateReplay = applySubagentWorktreeCandidate,
   ) { }
 
-  private fireTerminalEffects(entry: ManagedTask): void {
+  private fireCompletionEffects(entry: ManagedTask): void {
     if (!this.isDetached(entry)) return;
     const info = this.toInfo(entry);
     void this.notifyBackgroundTask(info).catch(() => { });
-    this.emitTaskTerminated(info);
+    if (isBackgroundTaskTerminal(info.status)) this.emitTaskTerminated(info);
   }
 
   private emitTaskStarted(info: BackgroundTaskInfo): void {
@@ -293,7 +327,7 @@ export class BackgroundManager {
   private activeBackgroundAdmissionCount(): number {
     let count = 0;
     for (const entry of this.tasks.values()) {
-      if (!TERMINAL_STATUSES.has(entry.status) && this.startedInBackground(entry)) count++;
+      if (isBackgroundTaskExecuting(entry.status) && this.startedInBackground(entry)) count++;
     }
     return count;
   }
@@ -370,6 +404,151 @@ export class BackgroundManager {
     return this.ghosts.get(taskId);
   }
 
+  async inspectCandidate(taskId: string): Promise<EditingCandidateManifestV1 | undefined> {
+    if (!this.agent.experimentalFlags.enabled('subagent-worktree-isolation')) return undefined;
+    if (this.getTask(taskId)?.kind !== 'agent') return undefined;
+    return this.persistence?.readEditingCandidate(taskId);
+  }
+
+  async resolveScopeExpansion(
+    request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult> {
+    const previous = this.resolutionQueues.get(request.taskId) ?? Promise.resolve();
+    const resolution = previous
+      .catch(() => {})
+      .then(() => this.resolveScopeExpansionSerialized(request));
+    const tracked = resolution.then(() => {}, () => {});
+    this.resolutionQueues.set(request.taskId, tracked);
+    try {
+      return await resolution;
+    } finally {
+      if (this.resolutionQueues.get(request.taskId) === tracked) {
+        this.resolutionQueues.delete(request.taskId);
+      }
+    }
+  }
+
+  private async resolveScopeExpansionSerialized(
+    request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult> {
+    if (!this.agent.experimentalFlags.enabled('subagent-worktree-isolation')) {
+      throw new Error('candidate_resolution_disabled: subagent worktree isolation is disabled');
+    }
+    const persistence = this.persistence;
+    if (persistence === undefined) {
+      throw new Error('candidate_corrupt: candidate persistence is unavailable');
+    }
+    const info = this.getTask(request.taskId);
+    if (info === undefined) throw new Error(`Task not found: ${request.taskId}`);
+    if (info.kind !== 'agent') {
+      throw new Error('candidate_identity_mismatch: task is not an agent task');
+    }
+
+    const { manifest, draft } = await persistence.loadEditingCandidate(request.taskId);
+    this.assertScopeExpansionIdentity(info, manifest, request);
+    const resolutionKind = request.action === 'approve' ? 'approved_applied' : 'denied';
+    if (manifest.resolution !== undefined && manifest.resolution.kind !== resolutionKind) {
+      throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+    }
+    if (manifest.resolution === undefined && info.status !== 'input_required') {
+      throw new Error(`candidate_already_resolved: task status is ${info.status}`);
+    }
+
+    let idempotent = manifest.resolution !== undefined;
+    if (!idempotent) {
+      if (request.action === 'approve') {
+        try {
+          await this.replayCandidate(this.agent.kaos, draft, request.requestedScope);
+        } catch (error) {
+          const message = errorMessage(error);
+          if (message.startsWith('candidate_') || message.startsWith('apply_failed_')) throw error;
+          throw new Error(
+            message.includes('guarded rollback incomplete')
+              ? `apply_failed_recovery_required: ${message}`
+              : `apply_failed_rolled_back: ${message}`,
+          );
+        }
+      }
+      const write = await persistence.writeEditingCandidateResolution(
+        request.taskId,
+        request.candidateHash,
+        { kind: resolutionKind, resolvedAt: new Date().toISOString() },
+      );
+      idempotent = write.idempotent;
+    }
+
+    const status: BackgroundTaskStatus = request.action === 'approve' ? 'completed' : 'expansion_denied';
+    const task = await this.setResolvedTaskStatus(request.taskId, status);
+    return {
+      task,
+      candidateHash: manifest.candidateHash,
+      requestedScope: manifest.requestedScope,
+      resolution: resolutionKind,
+      idempotent,
+    };
+  }
+
+  private assertScopeExpansionIdentity(
+    info: Extract<BackgroundTaskInfo, { kind: 'agent' }>,
+    manifest: EditingCandidateManifestV1,
+    request: ScopeExpansionResolutionRequest,
+  ): void {
+    if (
+      manifest.candidateHash !== request.candidateHash ||
+      JSON.stringify(manifest.requestedScope) !== JSON.stringify(request.requestedScope) ||
+      info.candidate?.hash !== manifest.candidateHash ||
+      JSON.stringify(info.candidate.requestedScope) !== JSON.stringify(manifest.requestedScope) ||
+      (info.agentId !== undefined && info.agentId !== manifest.agentId)
+    ) {
+      throw new Error('candidate_identity_mismatch: candidate hash or requested scope does not match');
+    }
+  }
+
+  private async setResolvedTaskStatus(
+    taskId: string,
+    status: 'completed' | 'expansion_denied',
+  ): Promise<BackgroundTaskInfo> {
+    const live = this.tasks.get(taskId);
+    if (live !== undefined) {
+      const previous = {
+        status: live.status,
+        stopReason: live.stopReason,
+        endedAt: live.endedAt,
+      };
+      const changed = live.status !== status;
+      live.status = status;
+      live.stopReason = undefined;
+      live.endedAt ??= Date.now();
+      try {
+        await this.persistLive(live, true);
+      } catch (error) {
+        live.status = previous.status;
+        live.stopReason = previous.stopReason;
+        live.endedAt = previous.endedAt;
+        throw error;
+      }
+      if (changed) this.fireCompletionEffects(live);
+      return this.toInfo(live);
+    }
+
+    const ghost = this.ghosts.get(taskId);
+    if (ghost === undefined) throw new Error(`Task not found: ${taskId}`);
+    const changed = ghost.status !== status;
+    const updated: BackgroundTaskInfo = {
+      ...ghost,
+      status,
+      stopReason: undefined,
+      endedAt: ghost.endedAt ?? Date.now(),
+    };
+    await this.persistence!.writeTask(updated);
+    this.ghosts.set(taskId, updated);
+    if (changed) {
+      void this.notifyBackgroundTask(updated).catch(() => {});
+      this.emitTaskTerminated(updated);
+    }
+    return updated;
+  }
+
   /**
    * List tasks, optionally filtering to active-only.
    *
@@ -385,12 +564,10 @@ export class BackgroundManager {
       result.push(info);
       if (limit !== undefined && result.length >= limit) return result;
     }
-    if (!activeOnly) {
-      for (const ghost of this.ghosts.values()) {
-        if (!this.shouldListTask(ghost, activeOnly)) continue;
-        result.push(ghost);
-        if (limit !== undefined && result.length >= limit) return result;
-      }
+    for (const ghost of this.ghosts.values()) {
+      if (!this.shouldListTask(ghost, activeOnly)) continue;
+      result.push(ghost);
+      if (limit !== undefined && result.length >= limit) return result;
     }
     return result;
   }
@@ -501,10 +678,24 @@ export class BackgroundManager {
     this.startOutputPersist(entry);
   }
 
-  /** Stop a running task. SIGTERM → 5s grace → SIGKILL. */
+  /** Stop a running or awaiting-input task. SIGTERM → 5s grace → SIGKILL for live workers. */
   async stop(taskId: string, reason?: string): Promise<BackgroundTaskInfo | undefined> {
     const entry = this.tasks.get(taskId);
-    if (!entry) return undefined;
+    if (!entry) {
+      const ghost = this.ghosts.get(taskId);
+      if (ghost === undefined || !isBackgroundTaskAwaitingInput(ghost.status)) return undefined;
+      const trimmedReason = reason?.trim();
+      const updated: BackgroundTaskInfo = {
+        ...ghost,
+        status: 'killed',
+        stopReason:
+          trimmedReason === undefined || trimmedReason.length === 0 ? undefined : trimmedReason,
+      };
+      this.ghosts.set(taskId, updated);
+      await this.persistence?.writeTask(updated);
+      this.emitTaskTerminated(updated);
+      return updated;
+    }
     // Normalize at this shared boundary: every public stop path (the TaskStop
     // tool, SDK/RPC) funnels through here, so a blank or whitespace-only
     // reason must never be recorded as an empty stopReason.
@@ -514,6 +705,13 @@ export class BackgroundManager {
     // Terminal tasks short-circuit.
     if (TERMINAL_STATUSES.has(entry.status)) {
       await entry.persistWriteQueue;
+      return this.toInfo(entry);
+    }
+    if (isBackgroundTaskAwaitingInput(entry.status)) {
+      entry.status = 'killed';
+      entry.stopReason = stopReason;
+      await this.persistLive(entry);
+      this.fireCompletionEffects(entry);
       return this.toInfo(entry);
     }
 
@@ -531,13 +729,13 @@ export class BackgroundManager {
   }
 
   /**
-   * Wait for a task to reach a terminal state.
-   * Returns immediately if already terminal. Times out after `timeoutMs`.
+   * Wait for a task to stop executing.
+   * Returns immediately if terminal or awaiting input. Times out after `timeoutMs`.
    */
   async wait(taskId: string, timeoutMs = 30_000): Promise<BackgroundTaskInfo | undefined> {
     const entry = this.tasks.get(taskId);
-    if (!entry) return undefined;
-    if (TERMINAL_STATUSES.has(entry.status)) {
+    if (!entry) return this.ghosts.get(taskId);
+    if (TERMINAL_STATUSES.has(entry.status) || isBackgroundTaskAwaitingInput(entry.status)) {
       await entry.persistWriteQueue;
       return this.toInfo(entry);
     }
@@ -555,7 +753,8 @@ export class BackgroundManager {
   }
 
   /**
-   * Wait until no active (non-terminal) task matching `predicate` remains.
+   * Wait until no executing task matching `predicate` remains.
+   * Awaiting-input tasks are actionable but do not hold the drain open.
    *
    * Used by print-mode (`kimi -p`) turn draining to hold a turn open while
    * background subagents are still running. Re-enumerates after each batch
@@ -575,7 +774,9 @@ export class BackgroundManager {
     const signal = options.signal;
     while (true) {
       signal?.throwIfAborted();
-      const active = this.list(true).filter(predicate);
+      const active = this.list(true).filter(
+        (info) => isBackgroundTaskExecuting(info.status) && predicate(info),
+      );
       if (active.length === 0) return;
       let perTaskTimeout: number | undefined;
       if (deadline !== undefined) {
@@ -648,8 +849,8 @@ export class BackgroundManager {
     const lostInfo: BackgroundTaskInfo[] = [];
     const persistence = this.persistence;
     for (const [id, info] of this.ghosts) {
-      // Any non-terminal ghost is lost.
-      if (TERMINAL_STATUSES.has(info.status)) continue;
+      // Only an executing process becomes lost; awaiting-input ghosts remain actionable.
+      if (!isBackgroundTaskExecuting(info.status)) continue;
       const updated: BackgroundTaskInfo = {
         ...info,
         status: 'lost',
@@ -676,14 +877,13 @@ export class BackgroundManager {
    * Persist the current state of a live ManagedTask. Called from
    * `registerTask()` and the lifecycle finally block. No-op unless attached.
    */
-  private persistLive(entry: ManagedTask): Promise<void> {
+  private persistLive(entry: ManagedTask, strict = false): Promise<void> {
     const persistence = this.persistence;
     if (persistence === undefined) return Promise.resolve();
     const info = this.toInfo(entry);
-    entry.persistWriteQueue = entry.persistWriteQueue
-      .then(() => persistence.writeTask(info))
-      .catch(() => { });
-    return entry.persistWriteQueue;
+    const write = entry.persistWriteQueue.then(() => persistence.writeTask(info));
+    entry.persistWriteQueue = write.catch(() => {});
+    return strict ? write : entry.persistWriteQueue;
   }
 
   private appendOutput(entry: ManagedTask, chunk: string): void {
@@ -766,7 +966,7 @@ export class BackgroundManager {
 
   private async restoreBackgroundTaskNotifications(): Promise<void> {
     for (const info of this.list(false)) {
-      if (!isBackgroundTaskTerminal(info.status)) continue;
+      if (!isBackgroundTaskTerminal(info.status) && !isBackgroundTaskAwaitingInput(info.status)) continue;
       await this.restoreBackgroundTaskNotification(info);
     }
   }
@@ -976,22 +1176,67 @@ export class BackgroundManager {
     entry: ManagedTask,
     settlement: BackgroundTaskSettlement,
   ): Promise<void> {
+    let acknowledgePersisted: (() => Promise<void>) | undefined;
+    if (settlement.status === 'input_required') {
+      this.startOutputPersist(entry);
+      await entry.outputWriteQueue;
+      const persistence = this.persistence;
+      if (persistence === undefined) {
+        settlement = {
+          status: 'failed',
+          stopReason: 'Editing candidate persistence is unavailable; the isolated worktree was retained.',
+        };
+      } else {
+        try {
+          const manifest = await persistence.writeEditingCandidate(
+            entry.taskId,
+            settlement.candidate,
+            settlement.handoff,
+            settlement.usage,
+          );
+          entry.candidate = {
+            hash: manifest.candidateHash,
+            requestedScope: manifest.requestedScope,
+            paths: manifest.paths.map((path) => path.relPath),
+          };
+          acknowledgePersisted = settlement.candidate.acknowledgePersisted;
+        } catch (error) {
+          settlement = {
+            status: 'failed',
+            stopReason: `Editing candidate persistence failed; the isolated worktree was retained: ${errorMessage(error)}`,
+          };
+        }
+      }
+    }
     entry.status = settlement.status;
     entry.endedAt = Date.now();
     entry.stopReason =
-      settlement.stopReason ?? (settlement.status === 'killed' ? entry.stopReason : undefined);
+      'stopReason' in settlement
+        ? settlement.stopReason ?? (settlement.status === 'killed' ? entry.stopReason : undefined)
+        : undefined;
     // Persist the terminal record only when the task actually touched disk:
     // detached tasks, and foreground tasks that spilled past the in-memory
     // buffer. A foreground task whose output stayed in memory leaves nothing on
     // disk — release the buffer and skip persistence so it never accumulates as
     // an undiscoverable log.
     if (entry.outputPersistStarted) {
-      await this.persistLive(entry);
+      try {
+        await this.persistLive(entry, acknowledgePersisted !== undefined);
+      } catch (error) {
+        acknowledgePersisted = undefined;
+        entry.status = 'failed';
+        entry.stopReason =
+          `Editing candidate task-state persistence failed; the isolated worktree was retained: ${errorMessage(error)}`;
+        await this.persistLive(entry);
+      }
     } else {
       entry.pendingOutput = [];
       entry.pendingOutputBytes = 0;
     }
-    this.fireTerminalEffects(entry);
+    if (acknowledgePersisted !== undefined) {
+      await acknowledgePersisted().catch(() => {});
+    }
+    this.fireCompletionEffects(entry);
     entry.foregroundRelease?.resolve('terminal');
     entry.terminal.resolve();
   }
@@ -1008,7 +1253,9 @@ export class BackgroundManager {
       terminalNotificationSuppressed: entry.terminalNotificationSuppressed,
       timeoutMs: entry.options.timeoutMs,
     };
-    return entry.task.toInfo(base);
+    const info = entry.task.toInfo(base);
+    if (info.kind !== 'agent' || entry.candidate === undefined) return info;
+    return { ...info, candidate: entry.candidate };
   }
 }
 
@@ -1055,7 +1302,7 @@ function buildBackgroundTaskNotificationBody(info: BackgroundTaskInfo): string {
         : `${info.description} ${info.status}.`;
 
   if (info.kind !== 'agent') return baseLine;
-  if (info.status === 'completed') return baseLine;
+  if (info.status === 'completed' || info.status === 'input_required') return baseLine;
   const agentId = info.agentId;
   if (agentId === undefined || agentId === info.taskId || isExternalSubagentId(agentId)) return baseLine;
 

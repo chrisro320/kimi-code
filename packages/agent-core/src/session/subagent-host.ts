@@ -36,6 +36,8 @@ import {
 import { collectGitContext } from './git-context';
 import {
   acquireSubagentWorktree,
+  type EditingCandidateDraft,
+  type SubagentWorktreeFinishResult,
   type SubagentWorktreeHandle,
   type SubagentWorktreeOutcome,
 } from './subagent-worktree';
@@ -180,9 +182,21 @@ export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly enforceDispatch?: boolean;
 }
 
-type SubagentCompletion = {
+export interface SubagentEditingCandidate {
+  readonly draft: EditingCandidateDraft;
+  readonly agentId: string;
+  readonly logicalRunId: string;
+  readonly externalSessionId?: string;
+  readonly originalScope: readonly string[];
+  readonly requestedScope: readonly string[];
+  readonly outsideScope: readonly string[];
+  readonly acknowledgePersisted: () => Promise<void>;
+}
+
+export type SubagentCompletion = {
   readonly result: string;
   readonly usage?: TokenUsage;
+  readonly editingCandidate?: SubagentEditingCandidate;
 };
 
 export type SubagentHandle = {
@@ -251,10 +265,18 @@ export class SessionSubagentHost {
           try {
             await this.configureChild(parent, agent, profile, route.modelAlias, worktree?.cwd, childRunOptions);
             const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
-            if (worktree) {
-              await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'));
-            }
-            return result;
+            const finishResult = worktree
+              ? await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'))
+              : undefined;
+            const completion = this.completeWorktreeResult(
+              result,
+              finishResult,
+              id,
+              childRunOptions,
+            );
+            this.emitSubagentCompleted(parent, id, completion, agent.context.tokenCount);
+            this.triggerSubagentStop(parent, profile.name, result.result);
+            return completion;
           } catch (error) {
             if (worktree) {
               await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'failure')).catch(() => {});
@@ -511,17 +533,19 @@ export class SessionSubagentHost {
           sessionId,
           launcher,
         );
-        if (worktree) {
-          await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'));
-        }
-        parent.emitEvent({
-          type: 'subagent.completed',
-          subagentId: id,
-          resultSummary: completion.result,
-          usage: completion.usage,
-        });
+        const finishResult = worktree
+          ? await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'))
+          : undefined;
+        const result = this.completeWorktreeResult(
+          completion,
+          finishResult,
+          id,
+          runOptions,
+          sessionId,
+        );
+        this.emitSubagentCompleted(parent, id, result);
         this.triggerSubagentStop(parent, profileName, completion.result);
-        return completion;
+        return result;
       } catch (error) {
         if (worktree) {
           await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'failure')).catch(() => {});
@@ -549,7 +573,10 @@ export class SessionSubagentHost {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
         child.config.update({ modelAlias: parent.config.modelAlias });
-        return await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
+        const result = await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
+        this.emitSubagentCompleted(parent, agentId, result, child.context.tokenCount);
+        this.triggerSubagentStop(parent, profileName, result.result);
+        return result;
       } catch (error) {
         this.emitSubagentFailed(parent, agentId, runOptions, error);
         throw error;
@@ -621,7 +648,16 @@ export class SessionSubagentHost {
           throw new Error(`Agent instance "${agentId}" could not start a retry turn`);
         }
         this.observeFirstRequest(child, runOptions);
-        return await this.waitForChildCompletion(parent, agentId, child, profileName, runOptions);
+        const result = await this.waitForChildCompletion(
+          parent,
+          agentId,
+          child,
+          profileName,
+          runOptions,
+        );
+        this.emitSubagentCompleted(parent, agentId, result, child.context.tokenCount);
+        this.triggerSubagentStop(parent, profileName, result.result);
+        return result;
       } catch (error) {
         this.emitSubagentFailed(parent, agentId, runOptions, error);
         throw error;
@@ -802,14 +838,6 @@ export class SessionSubagentHost {
       result = lastAssistantText(child);
     }
     const usage = child.usage.data().total;
-    parent.emitEvent({
-      type: 'subagent.completed',
-      subagentId: childId,
-      resultSummary: result,
-      usage,
-      contextTokens: child.context.tokenCount,
-    });
-    this.triggerSubagentStop(parent, profileName, result);
     return { result, usage };
   }
 
@@ -999,6 +1027,52 @@ export class SessionSubagentHost {
     parent.emitEvent({
       type: 'subagent.started',
       subagentId: childId,
+    });
+  }
+
+  private completeWorktreeResult(
+    completion: SubagentCompletion,
+    finishResult: SubagentWorktreeFinishResult | undefined,
+    agentId: string,
+    options: RunSubagentOptions,
+    externalSessionId?: string,
+  ): SubagentCompletion {
+    if (
+      finishResult?.reason !== 'scope-expansion-required' ||
+      finishResult.candidate === undefined ||
+      finishResult.acknowledgePersisted === undefined
+    ) {
+      return completion;
+    }
+    const originalScope = options.dispatch?.scope ?? finishResult.candidate.scope;
+    return {
+      ...completion,
+      editingCandidate: {
+        draft: finishResult.candidate,
+        agentId,
+        logicalRunId: options.parentToolCallUuid ?? options.parentToolCallId,
+        externalSessionId,
+        originalScope,
+        requestedScope: finishResult.candidate.requestedScope,
+        outsideScope: finishResult.outsideScope ?? [],
+        acknowledgePersisted: finishResult.acknowledgePersisted,
+      },
+    };
+  }
+
+  private emitSubagentCompleted(
+    parent: Agent,
+    childId: string,
+    completion: SubagentCompletion,
+    contextTokens?: number,
+  ): void {
+    if (completion.editingCandidate !== undefined) return;
+    parent.emitEvent({
+      type: 'subagent.completed',
+      subagentId: childId,
+      resultSummary: completion.result,
+      usage: completion.usage,
+      contextTokens,
     });
   }
 

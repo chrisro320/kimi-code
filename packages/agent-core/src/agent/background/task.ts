@@ -1,10 +1,15 @@
+import type { TokenUsage } from '@moonshot-ai/kosong';
+
+import type { SubagentEditingCandidate } from '../../session/subagent-host';
 import type { AgentBackgroundTaskInfo } from './agent-task';
 import type { ProcessBackgroundTaskInfo } from './process-task';
 import type { QuestionBackgroundTaskInfo } from './question-task';
 
 export type BackgroundTaskStatus =
   | 'running'
+  | 'input_required'
   | 'completed'
+  | 'expansion_denied'
   | 'failed'
   | 'timed_out'
   | 'killed'
@@ -12,6 +17,7 @@ export type BackgroundTaskStatus =
 
 export const TERMINAL_STATUSES: ReadonlySet<BackgroundTaskStatus> = new Set<BackgroundTaskStatus>([
   'completed',
+  'expansion_denied',
   'failed',
   'timed_out',
   'killed',
@@ -19,11 +25,18 @@ export const TERMINAL_STATUSES: ReadonlySet<BackgroundTaskStatus> = new Set<Back
 ]);
 export type BackgroundTaskSettlementStatus = 'completed' | 'failed' | 'timed_out' | 'killed';
 
-export interface BackgroundTaskSettlement {
-  readonly status: BackgroundTaskSettlementStatus;
-  /** Human-readable reason for the terminal status, when available. */
-  readonly stopReason?: string;
-}
+export type BackgroundTaskSettlement =
+  | {
+      readonly status: BackgroundTaskSettlementStatus;
+      /** Human-readable reason for the terminal status, when available. */
+      readonly stopReason?: string;
+    }
+  | {
+      readonly status: 'input_required';
+      readonly candidate: SubagentEditingCandidate;
+      readonly handoff: string;
+      readonly usage?: TokenUsage;
+    };
 
 export interface BackgroundTaskInfoBase {
   readonly taskId: string;

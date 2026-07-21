@@ -2,7 +2,7 @@
  * Background task persistence tests.
  */
 
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
@@ -134,6 +134,89 @@ describe('BackgroundTaskPersistence', () => {
     expect(await persistence.readTask('bash-noexis00')).toBeUndefined();
     const top = await readdir(sessionDir);
     expect(top.includes('tasks')).toBe(false);
+  });
+
+  it('writes and verifies a complete immutable editing candidate bundle', async () => {
+    const candidate = {
+      draft: {
+        version: 1 as const,
+        candidateHash: '7008ad278dff49e8f0ba02787d7a3699a6b27046fdd4c5ee50fcd47aef681178',
+        repoRoot: '/repo',
+        commonDir: '/repo/.git',
+        headCommit: 'source-commit',
+        scope: ['src/widget.ts'],
+        requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+        paths: [
+          {
+            relPath: 'src/widget.ts',
+            classification: 'in_scope' as const,
+            before: { state: { kind: 'absent' as const } },
+            after: {
+              state: { kind: 'regular' as const, mode: 0o100644, sha256: '18432423c770c61fe19e0282020eb7749c3cfea665a33e200d5d9bc1afb47cd7' },
+              payload: Buffer.from('source payload'),
+            },
+          },
+          {
+            relPath: 'test/widget.test.ts',
+            classification: 'scope_expansion_requested' as const,
+            before: {
+              state: { kind: 'regular' as const, mode: 0o100644, sha256: '4b2d97ea65a085b392c984fb76e79c1f746743df45c66354e110a1d2bd77d4c7' },
+              payload: Buffer.from('baseline payload'),
+            },
+            after: {
+              state: { kind: 'regular' as const, mode: 0o100644, sha256: 'a1298562c91e9bf2d9b3afb4a265ee2f8c4ae51a93f955b904c31ed431172287' },
+              payload: Buffer.from('worker payload'),
+            },
+          },
+        ],
+      },
+      agentId: 'agent-child',
+      logicalRunId: 'logical-run',
+      externalSessionId: 'external-session',
+      originalScope: ['src/widget.ts'],
+      requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+      outsideScope: ['test/widget.test.ts'],
+      acknowledgePersisted: async () => {},
+    };
+
+    const manifest = await persistence.writeEditingCandidate(
+      'agent-cand0000',
+      candidate,
+      'final handoff',
+      undefined,
+    );
+
+    expect(manifest).toMatchObject({
+      version: 1,
+      taskId: 'agent-cand0000',
+      candidateHash: '7008ad278dff49e8f0ba02787d7a3699a6b27046fdd4c5ee50fcd47aef681178',
+      complete: true,
+      handoff: 'final handoff',
+      paths: [
+        expect.objectContaining({ relPath: 'src/widget.ts', afterPayload: true }),
+        expect.objectContaining({
+          relPath: 'test/widget.test.ts',
+          beforePayload: true,
+          afterPayload: true,
+        }),
+      ],
+    });
+    expect(await persistence.readEditingCandidate('agent-cand0000')).toEqual(manifest);
+    expect(
+      await readFile(
+        join(sessionDir, 'tasks', 'agent-cand0000', 'candidate', 'worker-final', 'src/widget.ts'),
+        'utf-8',
+      ),
+    ).toBe('source payload');
+    expect(
+      await readFile(
+        join(sessionDir, 'tasks', 'agent-cand0000', 'candidate', 'baseline', 'test/widget.test.ts'),
+        'utf-8',
+      ),
+    ).toBe('baseline payload');
+    await expect(
+      access(join(sessionDir, 'tasks', 'agent-cand0000', 'candidate', 'manifest.json')),
+    ).resolves.toBeUndefined();
   });
 
   describe('readTaskOutputBytes / taskOutputSizeBytes', () => {

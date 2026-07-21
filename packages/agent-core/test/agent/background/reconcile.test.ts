@@ -80,6 +80,45 @@ describe('BackgroundManager — loadFromDisk + reconcile', () => {
     });
   });
 
+  it('keeps input_required ghosts actionable and non-executing across restart', async () => {
+    const taskId = 'agent-input000';
+    await persistence.writeTask({
+      taskId,
+      kind: 'agent',
+      description: 'candidate awaiting approval',
+      status: 'input_required',
+      detached: true,
+      startedAt: 1_700_000_000,
+      endedAt: 1_700_000_010,
+      agentId: 'agent-child',
+      subagentType: 'coder',
+      candidate: {
+        hash: 'candidate-hash',
+        requestedScope: ['src/widget.ts', 'test/widget.test.ts'],
+        paths: ['src/widget.ts', 'test/widget.test.ts'],
+      },
+    });
+    const { agent, manager } = createBackgroundManager({ sessionDir });
+
+    await manager.loadFromDisk();
+    await manager.reconcile();
+
+    expect(manager.getTask(taskId)).toMatchObject({ status: 'input_required' });
+    expect(manager.list(true)).toContainEqual(
+      expect.objectContaining({ taskId, status: 'input_required' }),
+    );
+    expect(await manager.wait(taskId)).toMatchObject({ status: 'input_required' });
+    await expect(
+      manager.waitForActiveTasks((task) => task.taskId === taskId),
+    ).resolves.toBeUndefined();
+    expect(await persistence.readTask(taskId)).toMatchObject({ status: 'input_required' });
+    expect(agent.emittedEvents).toEqual([]);
+    expect(agent.context.appendUserMessage).toHaveBeenCalledWith(
+      [expect.objectContaining({ type: 'text', text: expect.stringContaining('task.input_required') })],
+      expect.objectContaining({ taskId, status: 'input_required' }),
+    );
+  });
+
   it('does not reclassify already-terminal tasks', async () => {
     await persistence.writeTask(
       persistedProcess({

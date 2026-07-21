@@ -34,17 +34,22 @@ export interface TaskOutputViewerProps {
 
 const STATUS_LABEL: Record<BackgroundTaskStatus, string> = {
   running: 'running',
+  input_required: 'awaiting scope approval',
   completed: 'completed',
+  expansion_denied: 'scope expansion denied',
   failed: 'failed',
   timed_out: 'timed out',
   killed: 'killed',
   lost: 'lost',
 };
 
-function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'error' {
+function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'warning' | 'error' {
   switch (status) {
     case 'running':
       return 'success';
+    case 'input_required':
+    case 'expansion_denied':
+      return 'warning';
     case 'completed':
       return 'textMuted';
     case 'failed':

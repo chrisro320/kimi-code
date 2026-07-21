@@ -17,11 +17,13 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../agent/tool';
 import {
   type BackgroundManager,
+  isBackgroundTaskAwaitingInput,
   isBackgroundTaskTerminal,
   type BackgroundTaskInfo,
   type BackgroundTaskOutputSnapshot,
   type BackgroundTaskStatus,
 } from '../../agent/background';
+import { errorMessage } from '../../loop/errors';
 import type { ExecutableToolResult, ToolExecution } from '../../loop/types';
 import { toInputJsonSchema } from '../support/input-schema';
 import { matchesGlobRuleSubject } from '../support/rule-match';
@@ -40,7 +42,8 @@ const PAGING_HINT_LINES = 300;
 
 // ── Input schema ─────────────────────────────────────────────────────
 
-export const TaskOutputInputSchema = z.object({
+const TaskOutputInspectInputSchema = z.object({
+  action: z.literal('inspect').optional(),
   task_id: z.string().describe('The background task ID to inspect.'),
   block: z
     .boolean()
@@ -59,6 +62,21 @@ export const TaskOutputInputSchema = z.object({
     .optional(),
 });
 
+const TaskOutputResolutionInputSchema = z.object({
+  action: z.enum(['approve_scope_expansion', 'deny_scope_expansion']),
+  task_id: z.string().describe('The background agent task ID whose candidate should be resolved.'),
+  candidate_hash: z.string().describe('The exact candidate hash reported by TaskOutput inspect.'),
+  requested_scope: z
+    .array(z.string())
+    .min(1)
+    .describe('The exact requested scope revision reported by TaskOutput inspect.'),
+});
+
+export const TaskOutputInputSchema = z.union([
+  TaskOutputResolutionInputSchema,
+  TaskOutputInspectInputSchema,
+]);
+
 export type TaskOutputInput = z.Infer<typeof TaskOutputInputSchema>;
 
 // ── Implementation ───────────────────────────────────────────────────
@@ -67,8 +85,12 @@ function retrievalStatus(
   status: BackgroundTaskStatus,
   block: boolean | undefined,
 ): 'success' | 'timeout' | 'not_ready' {
-  if (isBackgroundTaskTerminal(status)) return 'success';
+  if (isBackgroundTaskTerminal(status) || isBackgroundTaskAwaitingInput(status)) return 'success';
   return block ? 'timeout' : 'not_ready';
+}
+
+function resolutionReason(error: unknown): string {
+  return errorMessage(error).split(':', 1)[0] ?? 'resolution_failed';
 }
 
 function terminalReason(info: BackgroundTaskInfo): 'timed_out' | 'stopped' | 'failed' | undefined {
@@ -104,8 +126,12 @@ export class TaskOutputTool implements BuiltinTool<TaskOutputInput> {
   constructor(private readonly manager: BackgroundManager) {}
 
   resolveExecution(args: TaskOutputInput): ToolExecution {
+    const action = args.action ?? 'inspect';
     return {
-      description: `Reading output of task ${args.task_id}`,
+      description:
+        action === 'inspect'
+          ? `Reading output of task ${args.task_id}`
+          : `${action === 'approve_scope_expansion' ? 'Approving' : 'Denying'} scope expansion for task ${args.task_id}`,
       approvalRule: this.name,
       matchesRule: (ruleArgs) => matchesGlobRuleSubject(ruleArgs, args.task_id),
       execute: () => this.execute(args),
@@ -113,6 +139,51 @@ export class TaskOutputTool implements BuiltinTool<TaskOutputInput> {
   }
 
   private async execute(args: TaskOutputInput): Promise<ExecutableToolResult> {
+    if ('candidate_hash' in args) {
+      return this.executeResolution(args);
+    }
+    return this.executeInspect(args);
+  }
+
+  private async executeResolution(
+    args: z.infer<typeof TaskOutputResolutionInputSchema>,
+  ): Promise<ExecutableToolResult> {
+    try {
+      const resolved = await this.manager.resolveScopeExpansion({
+        taskId: args.task_id,
+        action: args.action === 'approve_scope_expansion' ? 'approve' : 'deny',
+        candidateHash: args.candidate_hash,
+        requestedScope: args.requested_scope,
+      });
+      return {
+        isError: false,
+        output: formatPlainObject({
+          action: args.action,
+          resolution: resolved.resolution,
+          idempotent: resolved.idempotent,
+          candidateHash: resolved.candidateHash,
+          requestedScope: resolved.requestedScope,
+          ...resolved.task,
+        }),
+        message: 'Scope expansion resolved.',
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        output: formatPlainObject({
+          action: args.action,
+          taskId: args.task_id,
+          resolutionReason: resolutionReason(error),
+          error: errorMessage(error),
+          currentStatus: this.manager.getTask(args.task_id)?.status,
+        }),
+      };
+    }
+  }
+
+  private async executeInspect(
+    args: z.infer<typeof TaskOutputInspectInputSchema>,
+  ): Promise<ExecutableToolResult> {
     const info = this.manager.getTask(args.task_id);
     if (!info) {
       return { isError: true, output: `Task not found: ${args.task_id}` };
@@ -128,6 +199,8 @@ export class TaskOutputTool implements BuiltinTool<TaskOutputInput> {
       return { isError: true, output: `Task not found: ${args.task_id}` };
     }
 
+    const candidate = await this.manager.inspectCandidate(args.task_id);
+
     // A single manager-owned snapshot drives the tail window and every
     // reported metric below. Persisted logs remain authoritative when
     // available; detached managers fall back to their live ring buffer.
@@ -137,6 +210,16 @@ export class TaskOutputTool implements BuiltinTool<TaskOutputInput> {
       formatPlainObject({
         retrievalStatus: retrievalStatus(current.status, args.block),
         ...current,
+        candidateHash: candidate?.candidateHash,
+        requestedScope: candidate?.requestedScope,
+        candidatePaths: candidate?.paths.map((path) => path.relPath),
+        validationEvidence: candidate?.validationEvidence,
+        usage: candidate?.usage,
+        resolution: candidate?.resolution?.kind,
+        availableActions:
+          current.status === 'input_required' && candidate?.resolution === undefined
+            ? ['approve_scope_expansion', 'deny_scope_expansion']
+            : undefined,
         outputPath: output.outputPath,
         terminalReason: terminalReason(current),
         outputSizeBytes: output.outputSizeBytes,
@@ -148,7 +231,7 @@ export class TaskOutputTool implements BuiltinTool<TaskOutputInput> {
         fullOutputHint: fullOutputHint(output),
         // Nudge at the exact point of misuse: a blocking wait that timed out.
         nextStep:
-          args.block === true && !isBackgroundTaskTerminal(current.status)
+          args.block === true && !isBackgroundTaskTerminal(current.status) && !isBackgroundTaskAwaitingInput(current.status)
             ? 'The task is still running after waiting. Do not block on it again — continue with other work or hand back to the user; you will be notified automatically when it completes.'
             : undefined,
       }),

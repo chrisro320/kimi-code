@@ -185,6 +185,7 @@ export class TasksBrowserController {
         : tasks.filter(
             (t) =>
               t.status !== 'completed' &&
+              t.status !== 'expansion_denied' &&
               t.status !== 'failed' &&
               t.status !== 'timed_out' &&
               t.status !== 'killed' &&

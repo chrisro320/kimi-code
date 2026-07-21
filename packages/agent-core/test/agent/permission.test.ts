@@ -24,6 +24,7 @@ import { FallbackAskPermissionPolicy } from '../../src/agent/permission/policies
 import { createPermissionDecisionPolicies } from '../../src/agent/permission/policies';
 import { SwarmModeAgentSwarmApprovePermissionPolicy } from '../../src/agent/permission/policies/swarm-mode-agent-swarm-approve';
 import { TaskStopConfirmationAskPermissionPolicy } from '../../src/agent/permission/policies/task-stop-confirmation-ask';
+import { TaskOutputResolutionAskPermissionPolicy } from '../../src/agent/permission/policies/task-output-resolution-ask';
 import { YoloModeApprovePermissionPolicy } from '../../src/agent/permission/policies/yolo-mode-approve';
 import { ToolAccesses } from '../../src/loop';
 import type { ToolInputDisplay } from '../../src/tools/display';
@@ -760,6 +761,7 @@ describe('Permission policy chain', () => {
       'plan-mode-guard-deny',
       'user-configured-deny',
       'task-stop-confirmation-ask',
+      'task-output-resolution-ask',
       'auto-mode-approve',
       'session-approval-history',
       'user-configured-ask',
@@ -855,6 +857,55 @@ describe('Permission policy chain', () => {
       );
     },
   );
+
+  it.each([
+    ['manual', 'approve_scope_expansion'],
+    ['manual', 'deny_scope_expansion'],
+    ['auto', 'approve_scope_expansion'],
+    ['auto', 'deny_scope_expansion'],
+    ['yolo', 'approve_scope_expansion'],
+    ['yolo', 'deny_scope_expansion'],
+  ] as const)('requires explicit approval for TaskOutput %s in %s mode', async (mode, action) => {
+    const background = {
+      getTask: vi.fn(() => ({
+        taskId: 'agent-input-required',
+        kind: 'agent',
+        status: 'input_required',
+        startedAt: Date.now() - 30_000,
+      })),
+    } as unknown as Agent['background'];
+    const { manager, requestApproval, telemetryTrack } = makePermissionManager(
+      async () => ({ decision: 'approved' }),
+      { background },
+    );
+    manager.mode = mode;
+
+    await expect(
+      manager.beforeToolCall(
+        hookContext({
+          id: `call_task_output_${mode}_${action}`,
+          toolName: 'TaskOutput',
+          args: {
+            action,
+            task_id: 'agent-input-required',
+            candidate_hash: 'candidate-hash',
+            requested_scope: ['src/companion.ts'],
+          },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect(telemetryTrack).toHaveBeenCalledWith(
+      'permission_policy_decision',
+      expect.objectContaining({
+        policy_name: 'task-output-resolution-ask',
+        tool_name: 'TaskOutput',
+        permission_mode: mode,
+        decision: 'ask',
+      }),
+    );
+  });
 });
 
 describe('Simple permission policy direct behavior', () => {
@@ -1084,6 +1135,101 @@ describe('Simple permission policy direct behavior', () => {
         }),
       ),
     ).toBeUndefined();
+  });
+
+
+  it('asks for TaskOutput resolution while leaving inspection and TOCTOU validation downstream', () => {
+    let taskStatus = 'input_required';
+    const agent = {
+      background: {
+        getTask: vi.fn(() => ({
+          taskId: 'agent-input-required',
+          kind: 'agent',
+          status: taskStatus,
+          startedAt: Date.now() - 30_000,
+        })),
+      },
+    } as unknown as Agent;
+    const policy = new TaskOutputResolutionAskPermissionPolicy(agent);
+    const resolutionArgs = {
+      task_id: 'agent-input-required',
+      candidate_hash: 'candidate-hash',
+      requested_scope: ['src/companion.ts', 'test/companion.test.ts'],
+    };
+
+    expect(
+      policy.evaluate(
+        hookContext({
+          id: 'call_approve_scope_expansion',
+          toolName: 'TaskOutput',
+          args: { action: 'approve_scope_expansion', ...resolutionArgs },
+        }),
+      ),
+    ).toEqual({
+      kind: 'ask',
+      reason: {
+        scope_expansion_resolution: true,
+        action: 'approve_scope_expansion',
+        task_id: 'agent-input-required',
+        task_status: 'input_required',
+        candidate_hash: 'candidate-hash',
+        requested_scope: 'src/companion.ts,test/companion.test.ts',
+      },
+    });
+    expect(
+      policy.evaluate(
+        hookContext({
+          id: 'call_deny_scope_expansion',
+          toolName: 'TaskOutput',
+          args: { action: 'deny_scope_expansion', ...resolutionArgs },
+        }),
+      ),
+    ).toMatchObject({ kind: 'ask' });
+
+    expect(
+      policy.evaluate(
+        hookContext({
+          id: 'call_task_output_inspect',
+          toolName: 'TaskOutput',
+          args: { action: 'inspect', task_id: 'agent-input-required' },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      policy.evaluate(
+        hookContext({
+          id: 'call_task_output_default_inspect',
+          toolName: 'TaskOutput',
+          args: { task_id: 'agent-input-required' },
+        }),
+      ),
+    ).toBeUndefined();
+
+    taskStatus = 'completed';
+    expect(
+      policy.evaluate(
+        hookContext({
+          id: 'call_terminal_stale_resolution',
+          toolName: 'TaskOutput',
+          args: {
+            action: 'approve_scope_expansion',
+            task_id: 'agent-input-required',
+            candidate_hash: 'stale-hash',
+            requested_scope: ['src/stale.ts'],
+          },
+        }),
+      ),
+    ).toEqual({
+      kind: 'ask',
+      reason: {
+        scope_expansion_resolution: true,
+        action: 'approve_scope_expansion',
+        task_id: 'agent-input-required',
+        task_status: 'completed',
+        candidate_hash: 'stale-hash',
+        requested_scope: 'src/stale.ts',
+      },
+    });
   });
 });
 
