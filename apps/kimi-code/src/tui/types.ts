@@ -18,6 +18,38 @@ import type { ColorToken, ThemeName } from './theme';
 
 export type BannerDisplay = 'always' | 'once' | 'cooldown';
 
+export interface AgoraPeerStatus {
+  readonly id?: string;
+  readonly name: string;
+  readonly backend?: string;
+  readonly model?: string;
+  readonly status: string;
+}
+
+/** Live Agora review state mirrored from the orchestration/session layer. */
+export interface AgoraStatus {
+  readonly runId?: string;
+  readonly focus?: string;
+  readonly phase: string;
+  readonly hostRoute: string;
+  readonly hostModel?: string;
+  readonly originTask?: string;
+  readonly insertedTask?: string;
+  readonly startedAtMs?: number;
+  readonly peers: readonly AgoraPeerStatus[];
+  readonly terminalState?: string;
+}
+
+export type ResearchPhase = 'starting' | 'auditing' | 'synthesizing' | 'cancelling';
+
+/** Live session-scoped reference audit state. */
+export interface ResearchStatus {
+  readonly focus: string;
+  readonly phase: ResearchPhase;
+  readonly startedAtMs: number;
+  readonly fallbackReason?: string;
+}
+
 export interface BannerState {
   key: string;
   tag: string | null;
@@ -85,6 +117,10 @@ export interface AppState {
   mcpServersSummary: string | null;
   /** Optional banner shown below the welcome panel; null means no banner to render. */
   banner?: BannerState | null;
+  /** Active Agora review context; absent outside Agora. */
+  agora?: AgoraStatus | null;
+  /** Active session-scoped reference audit; absent outside /research. */
+  research?: ResearchStatus | null;
 }
 
 export interface ToolCallBlockData {

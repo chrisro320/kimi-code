@@ -1,6 +1,9 @@
 import type { Agent } from '../..';
 import type { PermissionPolicy } from '../types';
 import { AgentSwarmExclusiveDenyPermissionPolicy } from './agent-swarm-exclusive-deny';
+import { AgoraConfirmationAskPermissionPolicy } from './agora-confirmation-ask';
+import { AssetPipelineConfirmationAskPermissionPolicy } from './asset-pipeline-confirmation-ask';
+import { ReferenceAuditOverrideAskPermissionPolicy } from './reference-audit-override-ask';
 import { AutoModeApprovePermissionPolicy } from './auto-mode-approve';
 import { AutoModeAskUserQuestionDenyPermissionPolicy } from './auto-mode-ask-user-question-deny';
 import { DispatchModeGuardPermissionPolicy } from './dispatch-mode-guard';
@@ -33,6 +36,11 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     new PreToolCallHookPermissionPolicy(agent),
     // AgentSwarm is batch-exclusive and must run alone, regardless of permission mode.
     new AgentSwarmExclusiveDenyPermissionPolicy(),
+    // Agora packet dispatch is a user-confirmed external fan-out; model args cannot authorize it.
+    new AgoraConfirmationAskPermissionPolicy(agent),
+    new ReferenceAuditOverrideAskPermissionPolicy(agent),
+    // Asset side effects require a user-confirmed batch bound to an exact candidate snapshot.
+    new AssetPipelineConfirmationAskPermissionPolicy(agent),
     // auto mode + AskUserQuestion → deny.
     new AutoModeAskUserQuestionDenyPermissionPolicy(agent),
     // dispatch mode ask/off: Agent/AgentSwarm needs confirmation (D3); auto mode is a no-op here.

@@ -12,6 +12,7 @@ import {
   type RPCMethods,
   type SDKAPI,
   type TelemetryClient,
+  type AgoraLifecycleAdapter,
 } from '@moonshot-ai/agent-core';
 import type { Kaos } from '@moonshot-ai/kaos';
 import { assertKimiHostIdentity, createKimiDefaultHeaders } from '@moonshot-ai/kimi-code-oauth';
@@ -43,6 +44,8 @@ export interface SDKRpcClientOptions {
    * `'print'`.
    */
   readonly uiMode?: string;
+  /** Optional adapter for materializing an Agora lifecycle into a typed handoff. */
+  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export class SDKRpcClient extends SDKRpcClientBase {
@@ -85,6 +88,7 @@ export class SDKRpcClient extends SDKRpcClientBase {
       telemetry: this.telemetry,
       appVersion: this.identity?.version,
       uiMode: options.uiMode,
+      agoraLifecycleAdapter: options.agoraLifecycleAdapter,
     });
     this.ready = sdkRpc(new ClientAPI(this));
   }

@@ -40,17 +40,29 @@ describe('default agent profiles', () => {
     );
   });
 
-  it('lists the goal tools on the agent profile but not on subagent profiles', () => {
+  it('lists main-only goal and collaboration tools on the agent profile but not on subagent profiles', () => {
     const agentTools = DEFAULT_AGENT_PROFILES['agent']?.tools ?? [];
     expect(agentTools).toEqual(
-      expect.arrayContaining(['CreateGoal', 'GetGoal', 'SetGoalBudget', 'UpdateGoal']),
+      expect.arrayContaining([
+        'CreateGoal',
+        'GetGoal',
+        'SetGoalBudget',
+        'UpdateGoal',
+        'Agora',
+        'ReferenceAudit',
+        'AssetPipeline',
+      ]),
     );
-    for (const name of ['coder', 'coder-ex', 'debugger', 'explore', 'reviewer', 'frontend-artist']) {
+    expect(DEFAULT_AGENT_PROFILES['agent']?.subagents?.['agora-peer']).toBeDefined();
+    for (const name of ['coder', 'coder-ex', 'debugger', 'explore', 'reviewer', 'agora-peer', 'frontend-artist']) {
       const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
       expect(tools).not.toContain('CreateGoal');
       expect(tools).not.toContain('GetGoal');
       expect(tools).not.toContain('SetGoalBudget');
       expect(tools).not.toContain('UpdateGoal');
+      expect(tools).not.toContain('Agora');
+      expect(tools).not.toContain('ReferenceAudit');
+      expect(tools).not.toContain('AssetPipeline');
     }
   });
 

@@ -81,6 +81,31 @@ describe('events / display re-exports', () => {
     ).toBe(true);
   });
 
+  it('validates capability-free Agora lifecycle events', () => {
+    const parsed = eventSchema.parse({
+      type: 'agora.lifecycle.updated',
+      agentId: 'main',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      phase: 'peer_review',
+      originTask: '.trellis/tasks/origin',
+      insertedTask: '.trellis/tasks/review',
+      sourceSessionId: 'session-1',
+      materializationHandoffPath: '.trellis/tasks/target/agora-handoff.json',
+      materializationDigest: 'a'.repeat(64),
+      capability: { secret: 'must-not-survive' },
+      capabilityEpoch: 'must-not-survive',
+    });
+
+    expect(parsed).toMatchObject({
+      type: 'agora.lifecycle.updated',
+      runId: 'run-1',
+      phase: 'peer_review',
+    });
+    expect(parsed).not.toHaveProperty('capability');
+    expect(parsed).not.toHaveProperty('capabilityEpoch');
+  });
+
   it('rejects unknown event types through the full agent event union', () => {
     expect(
       agentEventSchema.safeParse({

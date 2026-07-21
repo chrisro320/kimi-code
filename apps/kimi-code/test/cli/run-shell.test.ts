@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => {
     flushDiagnosticLogsSync: vi.fn(),
     harnessCreatesDeviceIdOnConstruction: false,
     execSync: vi.fn(),
+    execFile: vi.fn(),
     TuiConfigParseError,
   };
 });
@@ -143,6 +144,7 @@ vi.mock('../../src/migration/index', () => ({
 
 vi.mock('node:child_process', () => ({
   execSync: mocks.execSync,
+  execFile: mocks.execFile,
 }));
 
 describe('runShell', () => {
@@ -269,6 +271,39 @@ describe('runShell', () => {
     expect(mocks.kimiHarnessConstructor).toHaveBeenCalledWith(
       expect.objectContaining({ skillDirs: ['/skills'] }),
     );
+  });
+
+  it('installs a typed Agora lifecycle adapter on the harness options', async () => {
+    mocks.loadTuiConfig.mockResolvedValue({
+      theme: 'dark',
+      editorCommand: null,
+      notifications: { enabled: true, condition: 'unfocused' },
+    });
+    mocks.tuiStart.mockResolvedValue(undefined);
+
+    await runShell(
+      {
+        session: undefined,
+        continue: false,
+        yolo: false,
+        auto: false,
+        plan: false,
+        model: undefined,
+        outputFormat: undefined,
+        prompt: undefined,
+        skillsDirs: [],
+      },
+      '1.2.3-test',
+    );
+
+    const [harnessOptions] = mocks.kimiHarnessConstructor.mock.calls[0] as [
+      { readonly agoraLifecycleAdapter?: Record<string, unknown> },
+    ];
+    expect(harnessOptions.agoraLifecycleAdapter).toEqual({
+      insert: expect.any(Function),
+      cancel: expect.any(Function),
+      materialize: expect.any(Function),
+    });
   });
 
   it('tracks first launch when device id creation reports first launch', async () => {

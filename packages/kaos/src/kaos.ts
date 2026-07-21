@@ -1,6 +1,7 @@
 import type { Environment } from './environment';
 import type { KaosProcess } from './process';
 import type { StatResult } from './types';
+import type { KaosTransactionalFileCapability } from './transactional-file';
 
 /**
  * Kimi Agent Operating System (KAOS) interface.
@@ -19,6 +20,8 @@ export interface Kaos {
    * `LocalKaos`, a remote probe for `SSHKaos`).
    */
   readonly osEnv: Environment;
+  /** Present only when this backend can provide race-aware binary publication. */
+  readonly transactionalFiles?: KaosTransactionalFileCapability;
 
   // ── Path operations (sync) ──────────────────────────────────────────
 

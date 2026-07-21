@@ -233,6 +233,15 @@ model = "fast"
 command = "custom-agent"
 args = ["--model", "{model}", "--cwd", "{cwd}"]
 resume_args = ["--resume", "{session_id}", "--cwd", "{cwd}"]
+
+[subagent.backends.custom-cli.read_only_launcher]
+command = "custom-agent-read-only"
+args = ["--read-only", "--model", "{model}", "--cwd", "{cwd}"]
+resume_args = ["--read-only", "--resume", "{session_id}", "--cwd", "{cwd}"]
+
+[subagent.backends.custom-cli.read_only_launcher.sandbox]
+filesystem = "read_only"
+network = "none"
 `;
     const config = parseConfigString(toml, configPath);
     expect(config.subagent).toEqual({
@@ -242,6 +251,12 @@ resume_args = ["--resume", "{session_id}", "--cwd", "{cwd}"]
           command: 'custom-agent',
           args: ['--model', '{model}', '--cwd', '{cwd}'],
           resumeArgs: ['--resume', '{session_id}', '--cwd', '{cwd}'],
+          readOnlyLauncher: {
+            command: 'custom-agent-read-only',
+            args: ['--read-only', '--model', '{model}', '--cwd', '{cwd}'],
+            resumeArgs: ['--read-only', '--resume', '{session_id}', '--cwd', '{cwd}'],
+            sandbox: { filesystem: 'read_only', network: 'none' },
+          },
         },
       },
     });
@@ -250,6 +265,8 @@ resume_args = ["--resume", "{session_id}", "--cwd", "{cwd}"]
     const text = await readFile(configPath, 'utf-8');
     expect(text).toContain('[subagent.routing.coder]');
     expect(text).toContain('[subagent.backends.custom-cli]');
+    expect(text).toContain('[subagent.backends.custom-cli.read_only_launcher]');
+    expect(text).toContain('[subagent.backends.custom-cli.read_only_launcher.sandbox]');
     expect(parseConfigString(text, configPath).subagent).toEqual(config.subagent);
   });
 

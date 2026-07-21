@@ -8,6 +8,7 @@ export interface KimiBuildInfo {
   readonly channel?: string;
   readonly commit?: string;
   readonly buildTarget?: string;
+  readonly features: readonly string[];
 }
 
 function optionalBuildString(value: unknown): string | undefined {
@@ -31,4 +32,5 @@ export const KIMI_BUILD_INFO: KimiBuildInfo = {
     typeof __KIMI_CODE_BUILD_TARGET__ === 'string'
       ? optionalBuildString(__KIMI_CODE_BUILD_TARGET__)
       : undefined,
+  features: ['agora', 'reference-audit', 'asset-pipeline'],
 };

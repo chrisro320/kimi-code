@@ -7,6 +7,7 @@ import {
   flushDiagnosticLogsSync,
   log,
   type KimiHarness,
+  type KimiHarnessOptions,
   type TelemetryClient,
 } from '@moonshot-ai/kimi-code-sdk';
 import {
@@ -28,6 +29,7 @@ import { combineStartupNotice } from '#/tui/utils/startup';
 import { toTerminalHyperlink } from '#/utils/terminal-hyperlink';
 import { restoreTerminalModes } from '#/utils/terminal-restore';
 
+import { createAgoraLifecycleAdapter } from './agora-lifecycle-adapter';
 import type { CLIOptions } from './options';
 import { createCliTelemetryBootstrap, initializeCliTelemetry } from './telemetry';
 import { createKimiCodeHostIdentity } from './version';
@@ -60,7 +62,7 @@ export async function runShell(
     withContext: withTelemetryContext,
     setContext: setTelemetryContext,
   };
-  const harness = createKimiHarness({
+  const harnessOptions: KimiHarnessOptions = {
     homeDir: telemetryBootstrap.homeDir,
     identity: createKimiCodeHostIdentity(version),
     skillDirs: opts.skillsDirs,
@@ -76,7 +78,9 @@ export async function runShell(
       });
     },
     sessionStartedProperties: { yolo: opts.yolo, auto: opts.auto, plan: opts.plan, afk: false },
-  });
+    agoraLifecycleAdapter: createAgoraLifecycleAdapter({ workDir }),
+  };
+  const harness = createKimiHarness(harnessOptions);
   log.info('kimi-code starting', {
     version,
     uiMode: CLI_UI_MODE,

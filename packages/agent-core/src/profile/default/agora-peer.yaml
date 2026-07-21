@@ -1,0 +1,8 @@
+name: agora-peer
+description: Read-only Agora peer for evidence review
+systemPromptPath: ./system.md
+tools:
+  - Read
+  - Grep
+  - Glob
+  - ReadMediaFile

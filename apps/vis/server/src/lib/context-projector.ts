@@ -520,6 +520,14 @@ export function projectContext(
       case 'llm.tools_snapshot':
       case 'llm.request':
       case 'mcp.tools_discovered':
+      case 'agora.lifecycle':
+      case 'agora.materialization_confirmation':
+      case 'agora.run':
+      case 'agora.override':
+      case 'reference_audit.state':
+      case 'reference_audit.override':
+      case 'reference_audit.run':
+      case 'asset_pipeline.run':
         break;
       default: {
         const _exhaustive: never = rec;

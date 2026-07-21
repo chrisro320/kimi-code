@@ -1,7 +1,22 @@
-import type { KimiConfig, SubagentBackend, SubagentPoolRoute } from '#/config/schema';
+import type {
+  KimiConfig,
+  SubagentBackend,
+  SubagentLauncher,
+  SubagentPoolRoute,
+} from '#/config/schema';
 
 export const INTERNAL_SUBAGENT_BACKEND = 'kimi';
 export const EXTERNAL_SUBAGENT_ID_PREFIX = 'external-';
+
+const READ_ONLY_ENFORCEMENT_MARKERS: readonly RegExp[] = [
+  /^--read-only(?:=true)?$/i,
+  /^--readonly(?:=true)?$/i,
+  /^--sandbox=(?:read-only|ro)$/i,
+  /^--permission-mode=plan$/i,
+  /^--tools=$/i,
+  /^CLAUDE_TOOLS_DISABLED(?:=1|=true)?$/i,
+  /^GROK_SANDBOX_READ_ONLY(?:=1|=true)?$/i,
+];
 
 export type ResolvedSubagentRoute =
   | {
@@ -29,17 +44,18 @@ export function resolveSubagentRoute(
  * Shared resolution core behind {@link resolveSubagentRoute}, the one-shot
  * work-card `routeOverride`, and pool-entry selection: given an explicit
  * backend name (`undefined`/`"kimi"` for the in-process subagent) and model
- * alias, validate both against `config` and produce a `ResolvedSubagentRoute`.
+ * string, validate internal Kimi aliases against `config.models`, validate
+ * external backend names, and produce a `ResolvedSubagentRoute`.
  */
 export function resolveRouteByNames(
   config: KimiConfig,
   backendName: string | undefined,
   modelAlias: string | undefined,
 ): ResolvedSubagentRoute {
-  if (modelAlias !== undefined && config.models?.[modelAlias] === undefined) {
-    throw new Error(`Subagent model alias "${modelAlias}" is not defined in config.models.`);
-  }
   if (backendName === undefined || backendName === INTERNAL_SUBAGENT_BACKEND) {
+    if (modelAlias !== undefined && config.models?.[modelAlias] === undefined) {
+      throw new Error(`Subagent model alias "${modelAlias}" is not defined in config.models.`);
+    }
     return { kind: 'internal', modelAlias };
   }
   const backend = config.subagent?.backends?.[backendName];
@@ -51,7 +67,12 @@ export function resolveRouteByNames(
 }
 
 export function validateBackendTemplate(name: string, backend: SubagentBackend): void {
-  for (const arg of [...(backend.args ?? []), ...(backend.resumeArgs ?? [])]) {
+  for (const arg of [
+    ...(backend.args ?? []),
+    ...(backend.resumeArgs ?? []),
+    ...(backend.readOnlyLauncher?.args ?? []),
+    ...(backend.readOnlyLauncher?.resumeArgs ?? []),
+  ]) {
     const placeholders = arg.match(/\{[^}]+\}/g) ?? [];
     for (const placeholder of placeholders) {
       if (
@@ -66,6 +87,46 @@ export function validateBackendTemplate(name: string, backend: SubagentBackend):
       }
     }
   }
+}
+
+export function resolveExternalSubagentLauncher(
+  route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+  readOnly: boolean,
+): SubagentLauncher {
+  if (!readOnly) return route.backend;
+  const launcher = route.backend.readOnlyLauncher;
+  if (launcher === undefined) {
+    throw new Error(
+      `Read-only external dispatch refused: backend "${route.backendName}" does not define ` +
+        'subagent.backends.<name>.read_only_launcher with an enforced read-only command and arguments.',
+    );
+  }
+  if (launcher.sandbox?.filesystem !== 'read_only') {
+    throw new Error(
+      `Read-only external dispatch refused: backend "${route.backendName}" read_only_launcher ` +
+        'must declare sandbox.filesystem = "read_only".',
+    );
+  }
+  if (!hasReadOnlyEnforcementMarker([launcher.command, ...(launcher.args ?? [])])) {
+    throw new Error(
+      `Read-only external dispatch refused: backend "${route.backendName}" read_only_launcher ` +
+        'must include a verifiable read-only enforcement marker in command or args.',
+    );
+  }
+  if (
+    launcher.resumeArgs !== undefined &&
+    !hasReadOnlyEnforcementMarker([launcher.command, ...launcher.resumeArgs])
+  ) {
+    throw new Error(
+      `Read-only external dispatch refused: backend "${route.backendName}" read_only_launcher.resume_args ` +
+        'must include a verifiable read-only enforcement marker.',
+    );
+  }
+  return launcher;
+}
+
+function hasReadOnlyEnforcementMarker(tokens: readonly string[]): boolean {
+  return tokens.some((token) => READ_ONLY_ENFORCEMENT_MARKERS.some((pattern) => pattern.test(token)));
 }
 
 export function materializeBackendArgs(

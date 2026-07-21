@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { ErrorCodes, KimiError } from '#/errors';
 import { getRootLogger, log } from '#/logging/logger';
 import { PluginManager } from '#/plugin';
+import type { AgoraLifecycleAdapter } from '../agora/lifecycle';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
@@ -76,12 +77,14 @@ import type {
   ArchiveSessionPayload,
   BeginGlobalMcpServerAuthResult,
   BeginCompactionPayload,
+  CancelAgoraReviewPayload,
   CancelGlobalMcpServerAuthPayload,
   CancelPayload,
   CancelPlanPayload,
   CancelShellCommandPayload,
   CloseSessionPayload,
   CompleteGlobalMcpServerAuthPayload,
+  ConfirmAgoraMaterializationPayload,
   ConfigDiagnostics,
   CoreAPI,
   CoreInfo,
@@ -101,15 +104,18 @@ import type {
   ExportSessionPayload,
   ExportSessionResult,
   ForkSessionPayload,
+  GetAgoraReviewPayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
   GetCronTasksResult,
   GetKimiConfigPayload,
   GetPluginInfoPayload,
+  InsertAgoraReviewPayload,
   InstallPluginPayload,
   ImportContextPayload,
   ListSessionsPayload,
   ListWorkspaceSkillsPayload,
+  MaterializeAgoraReviewPayload,
   McpServerInfo,
   McpStartupMetrics,
   PluginInfo,
@@ -188,6 +194,8 @@ export interface KimiCoreOptions {
    * `applyPrintModeConfigDefaults` (user-set values still win).
    */
   readonly uiMode?: string | undefined;
+  /** Optional adapter for materializing an Agora lifecycle into a typed handoff. */
+  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export class KimiCore implements PromisableMethods<CoreAPI> {
@@ -219,6 +227,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private readonly printMode: boolean;
   /** Owner-scoped [image] limits; reload pushes the new config via setConfig. */
   readonly imageLimits: ImageLimits;
+  private readonly agoraLifecycleAdapter: AgoraLifecycleAdapter | undefined;
 
   constructor(
     protected readonly rpcClient: CoreRPCClient,
@@ -238,6 +247,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     this.telemetry = options.telemetry ?? noopTelemetryClient;
     this.appVersion = options.appVersion;
     this.printMode = options.uiMode === 'print';
+    this.agoraLifecycleAdapter = options.agoraLifecycleAdapter;
     ensureKimiHome(this.homeDir);
     // Schema errors degrade (invalid sections are dropped with warnings) so a
     // typo cannot prevent startup, but a file that cannot be used at all —
@@ -377,6 +387,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       appVersion: this.appVersion,
       additionalDirs,
       drainAgentTasksOnStop: options.drainAgentTasksOnStop,
+      agoraLifecycleAdapter: this.agoraLifecycleAdapter,
     });
     try {
       session.metadata = {
@@ -522,6 +533,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       pluginCommands,
       appVersion: this.appVersion,
       additionalDirs,
+      agoraLifecycleAdapter: this.agoraLifecycleAdapter,
     });
     let warning: string | undefined;
     try {
@@ -1034,6 +1046,26 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     ...payload
   }: SessionScopedPayload<AddAdditionalDirPayload>): Promise<AddAdditionalDirResult> {
     return this.requireSession(sessionId).addAdditionalDir(payload.path, payload.persist);
+  }
+
+  insertAgoraReview({ sessionId, ...payload }: SessionScopedPayload<InsertAgoraReviewPayload>) {
+    return this.sessionApi(sessionId).insertAgoraReview(payload);
+  }
+
+  getAgoraReview({ sessionId, ...payload }: SessionScopedPayload<GetAgoraReviewPayload>) {
+    return this.sessionApi(sessionId).getAgoraReview(payload);
+  }
+
+  cancelAgoraReview({ sessionId, ...payload }: SessionScopedPayload<CancelAgoraReviewPayload>) {
+    return this.sessionApi(sessionId).cancelAgoraReview(payload);
+  }
+
+  confirmAgoraMaterialization({ sessionId, ...payload }: SessionScopedPayload<ConfirmAgoraMaterializationPayload>) {
+    return this.sessionApi(sessionId).confirmAgoraMaterialization(payload);
+  }
+
+  materializeAgoraReview({ sessionId, ...payload }: SessionScopedPayload<MaterializeAgoraReviewPayload>) {
+    return this.sessionApi(sessionId).materializeAgoraReview(payload);
   }
 
   startBtw({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>): Promise<string> {

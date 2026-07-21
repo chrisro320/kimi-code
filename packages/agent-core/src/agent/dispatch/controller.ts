@@ -329,7 +329,7 @@ export class DispatchController {
 
   private scopeAvailable(reservation: Reservation): boolean {
     if (!reservation.isEditingCapable || reservation.workCard === undefined) return true;
-    for (const [id, existing] of this.reservations) {
+    for (const existing of this.reservations.values()) {
       if (existing === reservation || existing.state !== 'started' || !existing.isEditingCapable) continue;
       if (scopesOverlap(reservation.scope, existing.scope)) return false;
     }

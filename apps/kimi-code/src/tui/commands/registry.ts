@@ -32,6 +32,16 @@ const DISPATCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'off', description: 'No proactive delegation; explicit calls still confirm' },
 ];
 
+const AGORA_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
+  { value: 'status', description: 'Show the active Agora review' },
+  { value: 'cancel', description: 'Cancel Agora and restore its origin task' },
+];
+
+const RESEARCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
+  { value: 'status', description: 'Show the active research audit' },
+  { value: 'cancel', description: 'Cancel the active research audit' },
+];
+
 const ADD_DIR_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'list', description: 'Show configured additional workspace directories' },
 ];
@@ -58,6 +68,16 @@ export function swarmArgumentCompletions(argumentPrefix: string): AutocompleteIt
 /** Argument autocompletion for the `/dispatch` command (mode names). */
 export function dispatchArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   return completeLeadingArg(DISPATCH_ARG_COMPLETIONS, argumentPrefix);
+}
+
+/** Argument autocompletion for the `/agora` command. */
+export function agoraArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  return completeLeadingArg(AGORA_ARG_COMPLETIONS, argumentPrefix);
+}
+
+/** Argument autocompletion for the `/research` command. */
+export function researchArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  return completeLeadingArg(RESEARCH_ARG_COMPLETIONS, argumentPrefix);
 }
 
 /** Argument autocompletion for the `/add-dir` command. */
@@ -232,6 +252,24 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Ask a forked side agent a question',
     priority: 90,
     availability: 'always',
+  },
+  {
+    name: 'agora',
+    aliases: [],
+    description: 'Request an Agora expert-team review',
+    priority: 90,
+    argumentHint: '[review focus] | status | cancel',
+    completeArgs: agoraArgumentCompletions,
+    availability: (args) => /^(?:status|cancel)\s*$/i.test(args) ? 'always' : 'idle-only',
+  },
+  {
+    name: 'research',
+    aliases: [],
+    description: 'Run or inspect a read-only reference audit',
+    priority: 90,
+    argumentHint: '<focus> | status | cancel',
+    completeArgs: researchArgumentCompletions,
+    availability: (args) => /^(?:status|cancel)\s*$/i.test(args) ? 'always' : 'idle-only',
   },
   {
     name: 'help',

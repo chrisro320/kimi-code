@@ -900,6 +900,20 @@ export interface PromptSteeredEvent {
   readonly steeredAt: string;
 }
 
+export interface AgoraLifecycleUpdatedEvent {
+  readonly type: 'agora.lifecycle.updated';
+  readonly runId: string;
+  readonly phase: string;
+  readonly originTask?: string;
+  readonly insertedTask?: string;
+  readonly targetTask?: string;
+  readonly terminalState?: string;
+  readonly sourceSessionId: string;
+  readonly envelopeRevision?: number;
+  readonly materializationHandoffPath?: string;
+  readonly materializationDigest?: string;
+}
+
 export type ToolListUpdatedReason = 'mcp.connected' | 'mcp.disconnected' | 'mcp.failed';
 
 export interface ToolListUpdatedEvent {
@@ -972,7 +986,8 @@ export type AgentEvent =
   | PromptSubmittedEvent
   | PromptCompletedEvent
   | PromptAbortedEvent
-  | PromptSteeredEvent;
+  | PromptSteeredEvent
+  | AgoraLifecycleUpdatedEvent;
 
 export type Event = AgentEvent & { agentId: string; sessionId: string };
 
@@ -1798,6 +1813,20 @@ export const mcpServerStatusEventSchema = z.object({
   server: mcpServerStatusPayloadSchema,
 }) satisfies z.ZodType<McpServerStatusEvent>;
 
+export const agoraLifecycleUpdatedEventSchema = z.object({
+  type: z.literal('agora.lifecycle.updated'),
+  runId: z.string(),
+  phase: z.string(),
+  originTask: z.string().optional(),
+  insertedTask: z.string().optional(),
+  targetTask: z.string().optional(),
+  terminalState: z.string().optional(),
+  sourceSessionId: z.string(),
+  envelopeRevision: z.number().optional(),
+  materializationHandoffPath: z.string().optional(),
+  materializationDigest: z.string().optional(),
+}) satisfies z.ZodType<AgoraLifecycleUpdatedEvent>;
+
 export const agentEventSchema = z.discriminatedUnion('type', [
   errorEventSchema,
   warningEventSchema,
@@ -1849,6 +1878,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   promptCompletedEventSchema,
   promptAbortedEventSchema,
   promptSteeredEventSchema,
+  agoraLifecycleUpdatedEventSchema,
 ]) satisfies z.ZodType<AgentEvent>;
 
 export const eventSchema = agentEventSchema.and(

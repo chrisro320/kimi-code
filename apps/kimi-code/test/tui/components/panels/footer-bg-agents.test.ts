@@ -1,7 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import chalk from 'chalk';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FooterComponent } from '#/tui/components/chrome/footer';
+import { currentTheme } from '#/tui/theme';
 import type { AppState } from '#/tui/types';
+
+function hexToRgb(hex: string): [number, number, number] {
+  const value = hex.replace('#', '');
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+  ];
+}
 
 const ANSI_SGR = /\[[0-9;]*m/g;
 function strip(text: string): string {
@@ -34,6 +45,16 @@ function baseState(overrides: Partial<AppState> = {}): AppState {
 }
 
 describe('FooterComponent — background task / agent badges', () => {
+  const previousChalkLevel = chalk.level;
+
+  beforeEach(() => {
+    chalk.level = 3;
+  });
+
+  afterEach(() => {
+    chalk.level = previousChalkLevel;
+  });
+
   it('omits both badges when counts are 0', () => {
     const footer = new FooterComponent(baseState());
     const [line1] = footer.render(120);
@@ -104,6 +125,37 @@ describe('FooterComponent — background task / agent badges', () => {
     footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0, activeAgents: [] });
     expect(footer.render(160).map(strip).at(-1)).not.toContain('claudecode');
     footer.dispose();
+  });
+
+  it('renders research in blue and gives orange Agora precedence', () => {
+    const research = {
+      focus: 'public game references',
+      phase: 'synthesizing' as const,
+      startedAtMs: 100,
+      fallbackReason: 'provider quota exhausted',
+    };
+    const researchFooter = new FooterComponent(baseState({
+      statusline: { enabled: true },
+      research,
+    }));
+    const researchRow = researchFooter.render(240).at(-1)!;
+    expect(strip(researchRow)).toContain('[Research synthesizing · public game references · main-model fallback:provider quota exhausted]');
+    expect(researchRow).toContain(`38;2;${hexToRgb(currentTheme.palette.primary).join(';')}`);
+
+    const agoraFooter = new FooterComponent(baseState({
+      statusline: { enabled: true },
+      research,
+      agora: {
+        phase: 'main_model_fallback',
+        hostRoute: 'coder-ex',
+        peers: [{ id: 'judge', name: 'Future Judge', status: 'main-model-fallback' }],
+        terminalState: 'degraded_not_consensus',
+      },
+    }));
+    const agoraRow = agoraFooter.render(240).at(-1)!;
+    expect(strip(agoraRow)).toContain('[Agora main_model_fallback');
+    expect(strip(agoraRow)).not.toContain('[Research');
+    expect(agoraRow).toContain(`38;2;${hexToRgb(currentTheme.palette.warning).join(';')}`);
   });
 
   it('clamps negative counts to 0', () => {

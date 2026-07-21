@@ -4,7 +4,9 @@ import type { SwarmMode } from '../../../agent/swarm';
 import { isEditingCapableProfile } from '../../../agent/dispatch/profile';
 import type { DispatchWorkCard } from '../../../agent/dispatch/controller';
 import { normalizeScopeList, scopesOverlap } from '../../../agent/dispatch/scope';
+import type { Agent } from '../../../agent';
 import type { BuiltinTool } from '../../../agent/tool';
+import { requireReferenceAuditForEditing } from '../../../reference-audit';
 import type { ResolvedAgentProfile } from '../../../profile';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -69,6 +71,8 @@ export const AgentSwarmToolInputSchema = z
       .record(
         z.string(),
         z.object({
+          reference_dependent: z.boolean().optional(),
+          reference_override_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
           rationale: z
             .string()
             .trim()
@@ -152,6 +156,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     // SubagentBatch arms no timer for non-positive timeouts.
     private readonly subagentTimeoutMs?: number,
     private readonly subagents?: ResolvedAgentProfile['subagents'],
+    private readonly records?: Agent['records'],
   ) {}
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
@@ -174,6 +179,13 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     context: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
     try {
+      const referenceDispatches = Object.values(args.item_dispatch ?? {}).filter((dispatch) => dispatch.reference_dependent === true);
+      if (referenceDispatches.length > 0) {
+        if (this.records === undefined) throw new Error('Reference-dependent editing swarm requires durable agent records.');
+        const hashes = new Set(referenceDispatches.map((dispatch) => dispatch.reference_override_hash));
+        if (hashes.size > 1) throw new Error('Reference-dependent swarm items must share one approved reference override.');
+        requireReferenceAuditForEditing(this.records, referenceDispatches[0]?.reference_override_hash, context.toolCallId);
+      }
       this.swarmMode.enter('tool');
       const result = await this.runSwarm(args, context.signal, context.toolCallId);
       return {

@@ -11,6 +11,20 @@ function makeSession() {
     resumeGoal: vi.fn(async () => ({ goalId: 'g1' })),
     cancelGoal: vi.fn(async () => ({ goalId: 'g1' })),
     getCronTasks: vi.fn(async () => ({ tasks: [] })),
+    insertAgoraReview: vi.fn(async () => ({
+      handle: { sessionId: 'ses_goal', runId: 'run-1', epoch: 'epoch-1', operationId: 'operation-1' },
+      snapshot: { runId: 'run-1', transitionId: 't-1', phase: 'packet_confirmation', sourceSessionId: 'ses_goal' },
+    })),
+    getAgoraReview: vi.fn(async () => undefined),
+    cancelAgoraReview: vi.fn(async () => ({ runId: 'run-1', phase: 'cancelled', cancelled: true })),
+    confirmAgoraMaterialization: vi.fn(async () => ({
+      runId: 'run-1',
+      sourceSessionId: 'ses_goal',
+      proposalRevision: 1,
+      proposalHash: 'a'.repeat(64),
+      confirmedBy: 'host',
+    })),
+    materializeAgoraReview: vi.fn(async () => ({ runId: 'run-1', success: false })),
     clearSessionHandlers: vi.fn(),
   } as unknown as SDKRpcClientBase;
   const session = new Session({ id: 'ses_goal', workDir: '/tmp/work', rpc });
@@ -60,6 +74,74 @@ describe('Session goal methods', () => {
     const result = await session.getCronTasks();
     expect(rpc.getCronTasks).toHaveBeenCalledWith({ sessionId: 'ses_goal' });
     expect(result).toEqual({ tasks: [] });
+  });
+
+  it('forwards typed Agora lifecycle methods without arbitrary argv', async () => {
+    const { session, rpc } = makeSession();
+    const inserted = await session.insertAgoraReview({
+      runId: 'run-1',
+      transitionId: 't-1',
+      title: 'Typed review',
+      slug: 'typed-review',
+    });
+    expect(rpc.insertAgoraReview).toHaveBeenCalledWith({
+      sessionId: 'ses_goal',
+      runId: 'run-1',
+      transitionId: 't-1',
+      title: 'Typed review',
+      slug: 'typed-review',
+      capability: undefined,
+    });
+    const firstInsert = vi.mocked(rpc.insertAgoraReview).mock.calls[0]?.[0];
+    expect(firstInsert).not.toHaveProperty('argv');
+
+    const proposal = {
+      revision: 1,
+      disposition: { kind: 'resume' as const },
+      mode: 'acceptance' as const,
+      prd: '# PRD',
+      design: '# Design',
+      implement: 'Resume here',
+      resumeAnchor: 'Resume here',
+      acceptance: { state: 'confirmed' as const, criteria: ['done'] },
+      validation: { state: 'confirmed' as const, commands: ['pnpm test'] },
+      decisionBrief: { decision: 'Resume.', rationale: 'Evidence converged.', unresolved: [] },
+      peerEvidence: [{ peer: 'claude', disposition: 'accepted' as const, summary: 'ok' }],
+      runEvidence: ['durable run'],
+    };
+    const confirmation = await session.confirmAgoraMaterialization({
+      runId: 'run-1',
+      capability: inserted.handle,
+      proposal,
+    });
+    const confirmationProof = {
+      runId: confirmation.runId,
+      sourceSessionId: confirmation.sourceSessionId,
+      proposalRevision: confirmation.proposalRevision,
+      proposalHash: confirmation.proposalHash,
+    };
+    await session.materializeAgoraReview({
+      runId: 'run-1',
+      transitionId: 't-3',
+      capability: inserted.handle,
+      proposal,
+      confirmation: confirmationProof,
+    });
+    expect(rpc.materializeAgoraReview).toHaveBeenCalledWith({
+      sessionId: 'ses_goal',
+      runId: 'run-1',
+      transitionId: 't-3',
+      capability: inserted.handle,
+      proposal,
+      confirmation: confirmationProof,
+    });
+
+    await expect(session.insertAgoraReview({ runId: ' ', transitionId: 't' }))
+      .rejects.toMatchObject({ code: 'request.invalid' });
+    await expect(session.cancelAgoraReview({ runId: 'run-1', transitionId: ' ', capability: inserted.handle }))
+      .rejects.toMatchObject({ code: 'request.invalid' });
+    await expect(session.cancelAgoraReview({ runId: 'run-2', transitionId: 't-2', capability: inserted.handle }))
+      .rejects.toMatchObject({ code: 'request.invalid' });
   });
 
   it('does not expose a public clearGoal or updateGoal method', () => {

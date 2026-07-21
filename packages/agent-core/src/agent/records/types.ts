@@ -12,6 +12,19 @@ import type { McpToolCollision, UserToolRegistration } from '../tool';
 import type { UsageRecordScope } from '../usage';
 import type { SwarmModeTrigger } from '../swarm';
 import type { DispatchMode } from '../dispatch/mode';
+import type { AgoraNecessityDecision } from '../../agora/types';
+import type { AgoraLifecyclePhase } from '../../agora/lifecycle';
+import type {
+  ReferenceAuditIntensity,
+  ReferenceAuditResult,
+  ReferenceAuditWorkflowRole,
+} from '../../reference-audit/types';
+import type {
+  AssetBomItem,
+  AssetCandidate,
+  VerifiedAssetExecutionResult,
+} from '../../asset-pipeline/types';
+import type { AssetRawWorkerAudit } from '../../asset-pipeline/execution';
 
 /** One entry of a tools table as sent in a request's top-level `tools[]`. */
 export interface LlmRequestToolSchema {
@@ -201,6 +214,170 @@ export interface AgentRecordEvents {
     tools: readonly MCPToolDefinition[];
     enabledNames: readonly string[];
     collisions?: readonly McpToolCollision[];
+  };
+
+  /**
+   * Typed Agora lifecycle transition. Each record is keyed by runId; the latest
+   * transition for a run is the durable authorization source for peer dispatch
+   * and materialization. Capability plaintext is never stored here — only a
+   * one-way digest and an opaque epoch.
+   */
+  'agora.lifecycle': {
+    runId: string;
+    transitionId: string;
+    phase: AgoraLifecyclePhase;
+    originTask?: string;
+    insertedTask?: string;
+    targetTask?: string;
+    terminalState?: string;
+    sourceSessionId: string;
+    capabilityEpoch: string;
+    capabilityHash: string;
+    envelopeRevision?: number;
+    materializationTransitionId?: string;
+    materializationHandoffPath?: string;
+    materializationDigest?: string;
+  };
+
+  /**
+   * Trusted-host confirmation bound to one canonical materialization proposal.
+   * It remains confirmed through durable adapter execution and is only consumed
+   * after the applied lifecycle record has been appended.
+   */
+  'agora.materialization_confirmation': {
+    runId: string;
+    sourceSessionId: string;
+    lifecycleEpoch: string;
+    proposalRevision: number;
+    proposalHash: string;
+    runPacketRevision: number;
+    state: 'confirmed' | 'consumed';
+    confirmedBy: 'host' | 'user';
+    consumedBy?: string;
+  };
+
+  /** Durable Agora packet, peer responses, and terminal run state. */
+  'agora.run': {
+    runId: string;
+    phase: string;
+    packetRevision: number;
+    packet: Record<string, unknown>;
+    /**
+     * The Trellis inserted-task path bound to this run, and the origin task
+     * it decoupled. Populated when the TUI confirms the Trellis
+     * `agora-insert` lifecycle step. The `AgoraTool` reads this durable
+     * field (never a caller-supplied task path) to gate peer dispatch.
+     */
+    insertedTask?: string;
+    originTask?: string;
+    necessity: AgoraNecessityDecision;
+    referenceAuditGate?: {
+      state: 'not-required' | 'complete' | 'blocked' | 'audit-risk-accepted';
+      currentReferenceHash?: string;
+      auditRunId?: string;
+      auditReferenceHash?: string;
+      riskOverrideConfirmed: boolean;
+      reason: string;
+    };
+    routes: Readonly<Record<string, {
+      backend: string;
+      modelOverride?: string;
+      profileName?: string;
+      displayName?: string;
+      role?: string;
+    }>>;
+    peers: readonly {
+      peer: string;
+      backend?: string;
+      model?: string;
+      status: 'pending' | 'completed' | 'repair_required' | 'unavailable';
+      initialRawResponse?: string;
+      repairRawResponse?: string;
+      normalizedResponse?: Record<string, unknown>;
+      error?: string;
+      repairCount: number;
+    }[];
+    temporaryOverrides: Readonly<Record<string, 'active' | 'disposed'>>;
+    hostRoute: 'coder' | 'coder-ex';
+    routeUpgrade: 'none' | 'coder_to_coder-ex';
+    hostRecoveryResult?: string;
+    terminalState?: string;
+  };
+
+  'reference_audit.state': {
+    material: boolean;
+    references: readonly import('../../reference-audit/types').ReferenceDescriptor[];
+    referenceHash?: string;
+  };
+
+  'reference_audit.override': {
+    referenceHash: string;
+    auditRunId?: string;
+    purpose: 'agora' | 'editing-dispatch';
+    operationId: string;
+    reason: string;
+    overrideHash: string;
+    state: 'approved' | 'consumed';
+    consumedBy?: string;
+  };
+
+  'agora.override': {
+    operationId: string;
+    kind: 'necessity_force_after_decline' | 'reference_risk_override';
+    envelopeHash: string;
+    state: 'consumed';
+  };
+
+  /** Durable reference audit observability record; replay is intentionally a no-op. */
+  'reference_audit.run': {
+    runId: string;
+    triggered: boolean;
+    reason?: string;
+    intensity?: ReferenceAuditIntensity;
+    referenceHash?: string;
+    planHash?: string;
+    resultHash?: string;
+    tracks: readonly {
+      trackId: string;
+      workflowRole: ReferenceAuditWorkflowRole;
+      status: 'completed' | 'unavailable';
+      repairCount: 0 | 1;
+      reason?: string;
+    }[];
+    claimCount?: number;
+    contradictionCount?: number;
+    unknownCount?: number;
+    licenseNoteCount?: number;
+    rawResponses?: readonly {
+      trackId: string;
+      initial: string;
+      repair?: string;
+      summary: string;
+      redactionCount: number;
+      originalSha256: string;
+      redactedSha256: string;
+    }[];
+    result?: ReferenceAuditResult;
+    terminalState: 'skipped' | 'completed' | 'fallback_required' | 'aborted' | 'failed';
+    error?: string;
+  };
+
+  /** Durable AssetPipeline planning/discovery artifact record; replay is intentionally a no-op. */
+  'asset_pipeline.run': {
+    runId: string;
+    action: 'validate_bom' | 'discover_candidates' | 'validate_candidates' | 'prepare_execution';
+    bom: readonly AssetBomItem[];
+    candidates: readonly AssetCandidate[];
+    rawDiscoveryResponses?: readonly {
+      bomItemId: string;
+      response: string;
+      status: 'completed' | 'unavailable';
+      reason?: string;
+    }[];
+    rawExecutionResponse?: AssetRawWorkerAudit;
+    execution?: VerifiedAssetExecutionResult;
+    terminalState: 'completed' | 'fallback_required' | 'failed' | 'aborted';
+    error?: string;
   };
 }
 

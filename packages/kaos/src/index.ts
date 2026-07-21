@@ -1,6 +1,8 @@
 export type { StatResult } from './types';
 export type { KaosProcess } from './process';
 export type { Kaos } from './kaos';
+export type { KaosBinaryReader, KaosBinaryWriter, KaosFileIdentity, KaosFileKind, KaosTransactionalFileCapability, KaosTransactionalFileStat, KaosValidatedPath } from './transactional-file';
+export { fileIdentity, statKind } from './transactional-file';
 export type {
   Environment,
   EnvironmentDeps,

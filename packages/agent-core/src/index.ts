@@ -48,6 +48,9 @@ export type {
 } from './agent/background';
 export type { CronTaskSnapshot } from './agent/cron';
 export type { ToolServices } from './tools/support/services';
+export * from './reference-audit';
+export * from './asset-pipeline';
+export * from './agora';
 
 // Image compression — prompt-ingestion sites (CLI paste, server upload
 // resolution, ACP) call compressBase64ForModel / compressImageForModel per

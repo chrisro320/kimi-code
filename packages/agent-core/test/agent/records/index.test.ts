@@ -29,6 +29,69 @@ describe('AgentRecords persistence metadata', () => {
     expect(persistence.records[0]).not.toHaveProperty('app_version');
     expect(persistence.records[0]).not.toHaveProperty('resumed');
     expect(persistence.records[1]?.type).toBe('turn.prompt');
+    expect(records.latest('turn.prompt')).toMatchObject({
+      input: [{ type: 'text', text: 'hello' }],
+    });
+  });
+
+  it('keeps Agora lifecycle projections keyed by run across interleaved replay', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const records = testAgent({ persistence }).agent.records;
+    const lifecycle = (runId: string, transitionId: string, phase: 'packet_confirmation' | 'peer_review') => ({
+      type: 'agora.lifecycle' as const,
+      runId,
+      transitionId,
+      phase,
+      insertedTask: `.trellis/tasks/${runId}`,
+      sourceSessionId: 'session-1',
+      capabilityEpoch: `${runId}-${transitionId}`,
+      capabilityHash: 'a'.repeat(64),
+    });
+    const run = (runId: string, phase: string) => ({
+      type: 'agora.run' as const,
+      runId,
+      phase,
+      packetRevision: 1,
+      packet: {},
+      necessity: {
+        outcome: 'allowed_on_request' as const,
+        signals: {
+          impactIfWrong: 'medium' as const,
+          uncertaintyOrDisagreement: 'medium' as const,
+          expectedInformationGain: 'medium' as const,
+          incrementalCostLatency: 'medium' as const,
+        },
+        explanation: 'test',
+        normalWorkflowRecommendation: 'test',
+        forcedByUser: false,
+      },
+      routes: {},
+      peers: [],
+      temporaryOverrides: {},
+      hostRoute: 'coder' as const,
+      routeUpgrade: 'none' as const,
+    });
+
+    records.logRecord(lifecycle('run-a', 'a-1', 'packet_confirmation'));
+    records.logRecord(run('run-a', 'peer_review'));
+    records.logRecord(lifecycle('run-b', 'b-1', 'packet_confirmation'));
+    records.logRecord(run('run-b', 'synthesis'));
+    records.logRecord(lifecycle('run-a', 'a-2', 'peer_review'));
+    await records.flush();
+
+    expect(records.latestAgoraLifecycle('run-a')).toMatchObject({ transitionId: 'a-2' });
+    expect(records.latestAgoraLifecycle('run-b')).toMatchObject({ transitionId: 'b-1' });
+    expect(records.latestAgoraRun('run-a')).toMatchObject({ phase: 'peer_review' });
+    expect(records.latestAgoraRun('run-b')).toMatchObject({ phase: 'synthesis' });
+
+    const replayed = testAgent({
+      persistence: new InMemoryAgentRecordPersistence(persistence.records),
+    }).agent;
+    await replayed.records.replay();
+    expect(replayed.records.latestAgoraLifecycle('run-a')).toMatchObject({ transitionId: 'a-2' });
+    expect(replayed.records.latestAgoraLifecycle('run-b')).toMatchObject({ transitionId: 'b-1' });
+    expect(replayed.records.latestAgoraRun('run-a')).toMatchObject({ phase: 'peer_review' });
+    expect(replayed.records.latestAgoraRun('run-b')).toMatchObject({ phase: 'synthesis' });
   });
 
   it('does not write metadata when replaying an empty stream', async () => {
@@ -93,6 +156,71 @@ describe('AgentRecords persistence metadata', () => {
       'turn.prompt',
     ]);
     expect(persistence.records.filter((record) => record.type === 'metadata')).toHaveLength(1);
+  });
+
+  it('replays a reference_audit.run record as a no-op observability entry', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const records = testAgent({ persistence }).agent.records;
+
+    records.logRecord({
+      type: 'reference_audit.run',
+      runId: 'audit-1',
+      triggered: true,
+      intensity: 'standard',
+      referenceHash: 'a'.repeat(64),
+      planHash: 'plan-hash',
+      resultHash: 'result-hash',
+      tracks: [
+        { trackId: 'reference-a', workflowRole: 'source-explore', status: 'completed', repairCount: 0 },
+      ],
+      claimCount: 1,
+      contradictionCount: 0,
+      unknownCount: 0,
+      licenseNoteCount: 0,
+      terminalState: 'completed',
+    });
+    await records.flush();
+
+    const replayed = testAgent({ persistence: new InMemoryAgentRecordPersistence(persistence.records) }).agent;
+    const warning = await replayed.records.replay();
+
+    expect(warning).toEqual({});
+    expect(replayed.records.latest('reference_audit.run')).toMatchObject({
+      runId: 'audit-1',
+      referenceHash: 'a'.repeat(64),
+      terminalState: 'completed',
+    });
+    expect(persistence.records.map((record) => record.type)).toEqual([
+      'metadata',
+      'reference_audit.run',
+    ]);
+  });
+
+  it('replays an asset_pipeline.run record as a no-op durable artifact entry', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const records = testAgent({ persistence }).agent.records;
+
+    records.logRecord({
+      type: 'asset_pipeline.run',
+      runId: 'assets-1',
+      action: 'discover_candidates',
+      bom: [],
+      candidates: [],
+      rawDiscoveryResponses: [{
+        bomItemId: 'icon-1',
+        response: '{"candidates":[]}',
+        status: 'completed',
+      }],
+      terminalState: 'completed',
+    });
+    await records.flush();
+
+    const replayed = testAgent({ persistence: new InMemoryAgentRecordPersistence(persistence.records) }).agent;
+    await expect(replayed.records.replay()).resolves.toEqual({});
+    expect(persistence.records.map((record) => record.type)).toEqual([
+      'metadata',
+      'asset_pipeline.run',
+    ]);
   });
 
   it('does not rewrite records that already use the current wire version', async () => {

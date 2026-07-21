@@ -148,14 +148,33 @@ export const BackgroundConfigSchema = z.object({
 
 export type BackgroundConfig = z.infer<typeof BackgroundConfigSchema>;
 
-export const SubagentBackendSchema = z.object({
+export const SubagentLauncherSandboxSchema = z.object({
+  /** Filesystem isolation level enforced by the external launcher. */
+  filesystem: z.literal('read_only'),
+  /** Optional network policy enforced by the external launcher. */
+  network: z.enum(['none', 'restricted', 'unrestricted']).optional(),
+});
+
+export const SubagentLauncherSchema = z.object({
   /** Executable to launch directly, never through a shell. */
   command: z.string().min(1),
-  /** Arguments for a fresh session. */
+  /** Arguments for starting a fresh external session. */
   args: z.array(z.string()).optional(),
   /** Optional arguments for continuing a persisted external session. */
   resumeArgs: z.array(z.string()).optional(),
+  /** Runtime-checked sandbox contract required for read-only launchers. */
+  sandbox: SubagentLauncherSandboxSchema.optional(),
 });
+
+export const SubagentBackendSchema = SubagentLauncherSchema.extend({
+  /**
+   * Explicit launcher that the backend guarantees enforces read-only access.
+   * Read-only external dispatches fail closed when this contract is absent.
+   */
+  readOnlyLauncher: SubagentLauncherSchema.optional(),
+});
+
+export type SubagentLauncher = z.infer<typeof SubagentLauncherSchema>;
 
 export type SubagentBackend = z.infer<typeof SubagentBackendSchema>;
 

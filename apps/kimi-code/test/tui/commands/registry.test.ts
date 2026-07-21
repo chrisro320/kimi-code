@@ -35,6 +35,8 @@ describe('built-in slash command registry', () => {
     expect(findBuiltInSlashCommand('q')?.name).toBe('exit');
     expect(findBuiltInSlashCommand('clear')?.name).toBe('new');
     expect(findBuiltInSlashCommand('btw')?.name).toBe('btw');
+    expect(findBuiltInSlashCommand('agora')?.name).toBe('agora');
+    expect(findBuiltInSlashCommand('research')?.name).toBe('research');
     expect(findBuiltInSlashCommand('mcp')?.name).toBe('mcp');
     expect(findBuiltInSlashCommand('status')?.name).toBe('status');
     expect(findBuiltInSlashCommand('usage')?.aliases).not.toContain('status');
@@ -149,6 +151,8 @@ describe('built-in slash command registry', () => {
     expect(names).toEqual(
       expect.arrayContaining([
         'add-dir',
+        'agora',
+        'research',
         'compact',
         'btw',
         'editor',

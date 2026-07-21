@@ -3,11 +3,14 @@ import { spawn } from 'node:child_process';
 import {
   appendFile,
   lstat,
+  link,
   mkdir,
   open,
   readdir,
   readFile,
+  realpath,
   stat,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -21,6 +24,7 @@ import type { Kaos } from './kaos';
 import { applyLoginShellPathFromNode } from './login-shell-path';
 import type { KaosProcess } from './process';
 import type { StatResult } from './types';
+import { fileIdentity, statKind, type KaosBinaryReader, type KaosFileIdentity, type KaosTransactionalFileCapability, type KaosTransactionalFileStat, type KaosValidatedPath } from './transactional-file';
 
 const isWindows: boolean = process.platform === 'win32';
 const READ_CHUNK_SIZE = 64 * 1024;
@@ -187,6 +191,7 @@ class LocalProcess implements KaosProcess {
  */
 export class LocalKaos implements Kaos {
   readonly name: string = 'local';
+  readonly transactionalFiles: KaosTransactionalFileCapability = this.createTransactionalFiles();
   readonly osEnv: Environment;
   private _cwd: string;
   private readonly _envLayers: readonly Record<string, string>[];
@@ -232,6 +237,64 @@ export class LocalKaos implements Kaos {
   private _resolvePath(path: string): string {
     if (isAbsolute(path)) return normalize(path);
     return join(this._cwd, path);
+  }
+
+  private createTransactionalFiles(): KaosTransactionalFileCapability {
+    const resolve = (path: string) => this._resolvePath(path);
+    const toStat = (value: StatResult): KaosTransactionalFileStat => ({
+      kind: statKind(value), identity: fileIdentity(value), sizeBytes: value.stSize, mode: value.stMode,
+    });
+    const toStatResult = (value: { mode: number; ino: number; dev: number; nlink: number; uid: number; gid: number; size: number; atimeMs: number; mtimeMs: number; ctimeMs: number }): StatResult => ({
+      stMode: value.mode, stIno: value.ino, stDev: value.dev, stNlink: value.nlink, stUid: value.uid, stGid: value.gid,
+      stSize: value.size, stAtime: value.atimeMs / 1000, stMtime: value.mtimeMs / 1000, stCtime: value.ctimeMs / 1000,
+    });
+    const validate = async (root: string, path: string, allowMissingLeaf = false): Promise<KaosValidatedPath> => {
+      const rootPath = resolve(root);
+      const targetPath = resolve(path);
+      const relative = targetPath.startsWith(rootPath) ? targetPath.slice(rootPath.length).replace(/^[/\\]+/, '') : '';
+      if (relative === '' || relative.startsWith('../') || relative.includes('/../')) throw new Error('Transactional path escapes root.');
+      let cursor = rootPath;
+      const parts = relative.split(/[\\/]+/).filter(Boolean);
+      const rootStat = await this.stat(root, { followSymlinks: false });
+      if (statKind(rootStat) !== 'directory') throw new Error('Transactional root is not a directory.');
+      let parentStat = rootStat;
+      for (let index = 0; index < parts.length; index += 1) {
+        cursor = join(cursor, parts[index]!);
+        try {
+          const current = await this.stat(cursor, { followSymlinks: false });
+          if (index < parts.length - 1 && statKind(current) !== 'directory') throw new Error('Transactional path component is not a directory.');
+          if (statKind(current) === 'symlink') throw new Error('Transactional path contains a symlink.');
+          parentStat = current;
+        } catch (error) {
+          if (index === parts.length - 1 && allowMissingLeaf && (error as NodeJS.ErrnoException).code === 'ENOENT') return { path: targetPath, parent: join(cursor, '..'), parentIdentity: fileIdentity(parentStat), leaf: null };
+          throw error;
+        }
+      }
+      const leaf = await this.stat(targetPath, { followSymlinks: false });
+      return { path: targetPath, parent: join(targetPath, '..'), parentIdentity: fileIdentity(parentStat), leaf: toStat(leaf) };
+    };
+    const readHandle = async (path: string): Promise<KaosBinaryReader> => {
+      const resolved = resolve(path); const handle = await open(resolved, 'r');
+      return { stat: async () => toStat(toStatResult(await handle.stat())), chunks: async function* (signal?: AbortSignal) { const buffer = Buffer.alloc(64 * 1024); while (true) { if (signal?.aborted) throw signal.reason; const { bytesRead } = await handle.read(buffer, 0, buffer.length, null); if (bytesRead === 0) return; yield Buffer.from(buffer.subarray(0, bytesRead)); } }, close: () => handle.close() };
+    };
+    return {
+      chunkSize: 64 * 1024,
+      realpath: (path) => realpath(resolve(path)),
+      validateComponents: (root, path, options) => validate(root, path, options?.allowMissingLeaf ?? false),
+      openReadNoFollow: readHandle,
+      createExclusiveNoFollow: async (path, options = {}) => {
+        const resolved = resolve(path); const handle = await open(resolved, 'wx', options.mode ?? 0o600);
+        let closed = false;
+        return { path: resolved, stat: async () => toStat(toStatResult(await handle.stat())), write: async (chunk) => { await handle.write(chunk); }, sync: () => handle.sync(), close: async () => { if (!closed) { closed = true; await handle.close(); } } };
+      },
+      publishNoReplace: async (temporary, target) => {
+        const resolved = resolve(target);
+        await link(temporary.path, resolved);
+        await unlink(temporary.path);
+      },
+      unlink: async (path, expectedIdentity?: KaosFileIdentity) => { const value = await this.stat(path, { followSymlinks: false }); if (expectedIdentity && fileIdentity(value).token !== expectedIdentity.token) throw new Error('Refusing to unlink a changed entry.'); await unlink(resolve(path)); },
+      syncDirectory: async (path) => { const handle = await open(resolve(path), 'r'); try { await handle.sync(); } finally { await handle.close(); } },
+    };
   }
 
   pathClass(): 'posix' | 'win32' {

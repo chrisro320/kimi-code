@@ -19,6 +19,13 @@ import {
   type ToolCallResponse,
   type SwarmModeTrigger,
   type DispatchMode,
+  type AgoraLifecycleCapability,
+  type AgoraLifecycleMaterializedHandoff,
+  type AgoraLifecycleSnapshot,
+  type AgoraLifecycleTransitionResult,
+  type AgoraMaterializationConfirmation,
+  type AgoraMaterializationConfirmationProof,
+  type AgoraMaterializationProposal,
 } from '@moonshot-ai/agent-core';
 import type { Kaos } from '@moonshot-ai/kaos';
 
@@ -436,6 +443,67 @@ export abstract class SDKRpcClientBase {
       agentId: this.interactiveAgentId,
       mode: input.mode,
     });
+  }
+
+  async insertAgoraReview(
+    input: SessionIdRpcInput & {
+      readonly runId: string;
+      readonly transitionId: string;
+      readonly title?: string;
+      readonly slug?: string;
+      readonly capability?: AgoraLifecycleCapability;
+    },
+  ): Promise<{ readonly handle: AgoraLifecycleCapability; readonly snapshot: AgoraLifecycleSnapshot }> {
+    const rpc = await this.getRpc();
+    return rpc.insertAgoraReview({
+      sessionId: input.sessionId,
+      runId: input.runId,
+      transitionId: input.transitionId,
+      title: input.title,
+      slug: input.slug,
+      capability: input.capability,
+    });
+  }
+
+  async getAgoraReview(input: SessionIdRpcInput & { readonly runId: string }): Promise<AgoraLifecycleSnapshot | undefined> {
+    const rpc = await this.getRpc();
+    return rpc.getAgoraReview({ sessionId: input.sessionId, runId: input.runId });
+  }
+
+  async cancelAgoraReview(
+    input: SessionIdRpcInput & { readonly runId: string; readonly transitionId: string; readonly capability: AgoraLifecycleCapability },
+  ): Promise<AgoraLifecycleTransitionResult> {
+    const rpc = await this.getRpc();
+    return rpc.cancelAgoraReview({
+      sessionId: input.sessionId,
+      runId: input.runId,
+      transitionId: input.transitionId,
+      capability: input.capability,
+    });
+  }
+
+  async confirmAgoraMaterialization(
+    input: SessionIdRpcInput & {
+      readonly runId: string;
+      readonly capability: AgoraLifecycleCapability;
+      readonly proposal: AgoraMaterializationProposal;
+    },
+  ): Promise<AgoraMaterializationConfirmation> {
+    const rpc = await this.getRpc();
+    return rpc.confirmAgoraMaterialization(input);
+  }
+
+  async materializeAgoraReview(
+    input: SessionIdRpcInput & {
+      readonly runId: string;
+      readonly transitionId: string;
+      readonly capability: AgoraLifecycleCapability;
+      readonly proposal: AgoraMaterializationProposal;
+      readonly confirmation: AgoraMaterializationConfirmationProof;
+    },
+  ): Promise<{ readonly runId: string; readonly success: boolean; readonly error?: string; readonly handoff?: AgoraLifecycleMaterializedHandoff }> {
+    const rpc = await this.getRpc();
+    return rpc.materializeAgoraReview(input);
   }
 
   async updateSessionMetadata(input: UpdateSessionMetadataRpcInput): Promise<void> {

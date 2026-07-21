@@ -37,7 +37,29 @@ import type {
   UndoHistoryPayload,
   UnregisterToolPayload,
   UpdateSessionMetadataPayload,
+  InsertAgoraReviewPayload,
+  InsertAgoraReviewResult,
+  GetAgoraReviewPayload,
+  CancelAgoraReviewPayload,
+  ConfirmAgoraMaterializationPayload,
+  MaterializeAgoraReviewPayload,
+  MaterializeAgoraReviewResult,
 } from '#/rpc';
+import type { Event } from '#/rpc/events';
+import {
+  confirmAgoraMaterializationProposal,
+  createAgoraLifecycleCapability,
+  recordAgoraLifecycleTransition,
+  cancelAgoraLifecycleTransition,
+  materializeAgoraLifecycleTransition,
+  toAgoraLifecycleHandle,
+  verifyAgoraLifecycleHandle,
+  type AgoraLifecycleCapability,
+  type AgoraLifecycleCapabilityToken,
+  type AgoraLifecycleSnapshot,
+  type AgoraLifecycleTransitionResult,
+  type AgoraMaterializationConfirmation,
+} from '#/agora/lifecycle';
 import type { PromisableMethods } from '#/utils/types';
 
 import type { Session, SessionMeta } from '.';
@@ -51,6 +73,9 @@ import {
 type AgentScopedPayload<T> = T & { agentId: string };
 
 export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
+  /** Public callers only receive operationId; bearer plaintext stays here. */
+  private readonly agoraCapabilityVault = new Map<string, AgoraLifecycleCapabilityToken>();
+
   constructor(protected readonly session: Session) {}
 
   async renameSession(payload: RenameSessionPayload): Promise<void> {
@@ -312,6 +337,238 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
     return (await this.getAgent(agentId)).getBackground(payload);
   }
 
+  async insertAgoraReview(payload: InsertAgoraReviewPayload): Promise<InsertAgoraReviewResult> {
+    const runId = payload.runId.trim();
+    const transitionId = payload.transitionId.trim();
+    if (runId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id cannot be empty');
+    }
+    if (transitionId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora transition id cannot be empty');
+    }
+    const title = normalizeUntrustedTitle(payload.title);
+    const slug = normalizeUntrustedSlug(payload.slug);
+    const agent = await this.session.ensureAgentResumed('main');
+    const sessionId = this.session.options.id ?? '';
+    const adapter = this.session.agoraLifecycleAdapter;
+    if (adapter === undefined) {
+      throw new KimiError(ErrorCodes.NOT_IMPLEMENTED, 'Agora lifecycle adapter is not configured');
+    }
+    const existing = agent.records.latestAgoraLifecycle(runId);
+    if (payload.capability !== undefined) {
+      if (existing === undefined || existing.transitionId !== transitionId) {
+        throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora retry handle requires the same durable transition id');
+      }
+      if (payload.capability.runId !== runId || payload.capability.sessionId !== sessionId) {
+        throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora retry handle is bound to a different run or session');
+      }
+    } else if (existing?.transitionId === transitionId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora transition already exists; retry requires its opaque handle');
+    }
+    const capability = payload.capability === undefined
+      ? createAgoraLifecycleCapability(sessionId, runId)
+      : this.resolveAgoraCapabilityHandle(payload.capability);
+    if (capability === undefined) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora retry handle is not available in this trusted host');
+    }
+    if (payload.capability !== undefined) {
+      verifyAgoraLifecycleHandle(agent.records, capability);
+    }
+    this.agoraCapabilityVault.set(capability.operationId, capability);
+    const handle = toAgoraLifecycleHandle(capability);
+    const transition = existing?.transitionId === transitionId
+      ? {
+          success: true,
+          originTask: existing.originTask,
+          insertedTask: existing.insertedTask,
+          targetTask: existing.targetTask,
+          envelopeRevision: existing.envelopeRevision,
+        }
+      : await adapter.insert({
+          operation: 'insert',
+          runId,
+          sourceSessionId: sessionId,
+          transitionId,
+          reconcile: true,
+          insert: title === undefined && slug === undefined ? undefined : { title, slug },
+        });
+    if (!transition.success) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        transition.error ?? 'Agora insert transition failed',
+      );
+    }
+    const snapshot = recordAgoraLifecycleTransition(agent.records, {
+      sessionId,
+      runId,
+      transitionId,
+      phase: 'packet_confirmation',
+      originTask: transition.originTask,
+      insertedTask: transition.insertedTask,
+      targetTask: transition.targetTask,
+      capability,
+      envelopeRevision: transition.envelopeRevision,
+    });
+    try {
+      await agent.records.flush();
+    } catch (error) {
+      throw new KimiError(
+        ErrorCodes.RECORDS_WRITE_FAILED,
+        `Agora transition ${transitionId} succeeded but its durable record failed to flush; retry with the same transitionId and opaque handle to reconcile.`,
+        { cause: error, details: { runId, transitionId, reconcile: true, retryHandle: handle } },
+      );
+    }
+    this.emitAgoraLifecycleUpdated(snapshot);
+    return { handle, snapshot };
+  }
+
+  async getAgoraReview(payload: GetAgoraReviewPayload): Promise<AgoraLifecycleSnapshot | undefined> {
+    const agent = await this.session.ensureAgentResumed('main');
+    const latest = agent.records.latestAgoraLifecycle(payload.runId.trim());
+    if (latest === undefined) return undefined;
+    const { capabilityHash: _hash, capabilityEpoch: _epoch, ...snapshot } = latest;
+    return snapshot;
+  }
+
+  async cancelAgoraReview(payload: CancelAgoraReviewPayload): Promise<AgoraLifecycleTransitionResult> {
+    const runId = payload.runId.trim();
+    const transitionId = payload.transitionId.trim();
+    if (runId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id cannot be empty');
+    }
+    if (runId !== payload.capability.runId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id does not match the lifecycle capability');
+    }
+    if (payload.capability.sessionId !== this.session.options.id) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is bound to a different session');
+    }
+    if (transitionId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora transition id cannot be empty');
+    }
+    const capability = this.resolveAgoraCapabilityHandle(payload.capability);
+    if (capability === undefined) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is not available in this trusted host');
+    }
+    const agent = await this.session.ensureAgentResumed('main');
+    const result = await cancelAgoraLifecycleTransition(
+      agent.records,
+      this.session.agoraLifecycleAdapter,
+      capability,
+      transitionId,
+    );
+    await agent.records.flush();
+    const latest = agent.records.latestAgoraLifecycle(runId);
+    if (latest !== undefined) {
+      this.emitAgoraLifecycleUpdated(latest);
+    }
+    return result;
+  }
+
+  async confirmAgoraMaterialization(
+    payload: ConfirmAgoraMaterializationPayload,
+  ): Promise<AgoraMaterializationConfirmation> {
+    const runId = payload.runId.trim();
+    if (runId.length === 0 || runId !== payload.capability.runId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora confirmation run id is invalid');
+    }
+    if (payload.capability.sessionId !== this.session.options.id) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is bound to a different session');
+    }
+    const capability = this.resolveAgoraCapabilityHandle(payload.capability);
+    if (capability === undefined) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is not available in this trusted host');
+    }
+    const agent = await this.session.ensureAgentResumed('main');
+    const confirmation = confirmAgoraMaterializationProposal(
+      agent.records,
+      capability,
+      payload.proposal,
+      'host',
+    );
+    await agent.records.flush();
+    const latest = agent.records.latestAgoraLifecycle(runId);
+    if (latest !== undefined) this.emitAgoraLifecycleUpdated(latest);
+    return confirmation;
+  }
+
+  async materializeAgoraReview(
+    payload: MaterializeAgoraReviewPayload,
+  ): Promise<MaterializeAgoraReviewResult> {
+    const runId = payload.runId.trim();
+    const transitionId = payload.transitionId.trim();
+    if (runId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id cannot be empty');
+    }
+    if (runId !== payload.capability.runId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id does not match the lifecycle capability');
+    }
+    if (payload.capability.sessionId !== this.session.options.id) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is bound to a different session');
+    }
+    if (transitionId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora transition id cannot be empty');
+    }
+    const capability = this.resolveAgoraCapabilityHandle(payload.capability);
+    if (capability === undefined) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is not available in this trusted host');
+    }
+    const agent = await this.session.ensureAgentResumed('main');
+    const result = await materializeAgoraLifecycleTransition(
+      agent.records,
+      this.session.agoraLifecycleAdapter,
+      capability,
+      transitionId,
+      this.buildSessionLineage(),
+      payload.proposal,
+      payload.confirmation,
+    );
+    await agent.records.flush();
+    if (result.success) {
+      const latest = agent.records.latestAgoraLifecycle(runId);
+      if (latest !== undefined) {
+        this.emitAgoraLifecycleUpdated(latest);
+      }
+    }
+    return { ...result, runId };
+  }
+
+  private resolveAgoraCapabilityHandle(
+    handle: AgoraLifecycleCapability,
+  ): AgoraLifecycleCapabilityToken | undefined {
+    const token = this.agoraCapabilityVault.get(handle.operationId);
+    if (token === undefined) return undefined;
+    return token.sessionId === handle.sessionId
+      && token.runId === handle.runId
+      && token.epoch === handle.epoch
+      ? token
+      : undefined;
+  }
+
+  private buildSessionLineage(): readonly string[] {
+    const lineage: string[] = [];
+    const sessionId = this.session.options.id;
+    if (sessionId !== undefined) {
+      lineage.push(sessionId);
+    }
+    if (this.session.metadata.forkedFrom !== undefined) {
+      lineage.unshift(this.session.metadata.forkedFrom);
+    }
+    return lineage;
+  }
+
+  private emitAgoraLifecycleUpdated(snapshot: AgoraLifecycleSnapshot): void {
+    const sessionId = this.session.options.id;
+    if (sessionId === undefined) return;
+    const { transitionId: _transitionId, ...eventPayload } = snapshot;
+    const event: Event = {
+      type: 'agora.lifecycle.updated',
+      agentId: 'main',
+      sessionId,
+      ...eventPayload,
+    };
+    void this.session.rpc.emitEvent(event);
+  }
+
   private async getAgent(agentId: string): Promise<PromisableMethods<AgentAPI>> {
     const agent = await this.session.ensureAgentResumed(agentId);
     return agent.rpcMethods;
@@ -353,6 +610,24 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
       },
     });
   }
+}
+
+function normalizeUntrustedTitle(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const title = value.trim();
+  if (title.length === 0 || title.length > 200 || /[\r\n\0]/.test(title)) {
+    throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora title must be 1-200 single-line characters');
+  }
+  return title;
+}
+
+function normalizeUntrustedSlug(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const slug = value.trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80) {
+    throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora slug must be a canonical lowercase slug');
+  }
+  return slug;
 }
 
 function isUntitled(title: unknown): boolean {

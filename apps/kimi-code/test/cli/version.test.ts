@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { KIMI_BUILD_INFO } from '#/cli/build-info';
 import {
   buildKimiDefaultHeaders,
   createKimiCodeUserAgent,
@@ -19,6 +20,14 @@ describe('cli version helpers', () => {
     expect(pkgPath.endsWith(join('apps', 'kimi-code', 'package.json'))).toBe(true);
     expect(getHostPackageRoot()).toBe(dirname(pkgPath));
     expect(getVersion()).toBe(pkg.version);
+  });
+
+  it('advertises the fork feature provenance used to detect stale wrappers', () => {
+    expect(KIMI_BUILD_INFO.features).toEqual([
+      'agora',
+      'reference-audit',
+      'asset-pipeline',
+    ]);
   });
 
   it('builds default headers with the kimi-code-cli user-agent', () => {

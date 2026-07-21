@@ -2,6 +2,7 @@ export { MCP_OAUTH_AUTHORIZATION_URL_TOOL_UPDATE } from '@moonshot-ai/protocol';
 
 export type {
   AgentEvent,
+  AgoraLifecycleUpdatedEvent,
   AgentStatusUpdatedEvent,
   AssistantDeltaEvent,
   BackgroundTaskStartedEvent,

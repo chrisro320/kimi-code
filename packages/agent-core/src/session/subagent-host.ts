@@ -22,6 +22,7 @@ import type {
 } from '../agent/dispatch/controller';
 import { InMemoryAgentRecordPersistence } from '../agent/records';
 import { isAbortError } from '../loop/errors';
+import { redactUntrustedRaw } from '../security/redaction';
 import {
   DEFAULT_AGENT_PROFILES,
   prepareSystemPromptContext,
@@ -36,6 +37,7 @@ import { collectGitContext } from './git-context';
 import {
   acquireSubagentWorktree,
   type SubagentWorktreeHandle,
+  type SubagentWorktreeOutcome,
 } from './subagent-worktree';
 import type { Session } from './index';
 import {
@@ -45,11 +47,12 @@ import {
   type SubagentSuspendedEvent,
   type QueuedSubagentTask,
 } from './subagent-batch';
-import type { SubagentPoolRoute } from '../config/schema';
+import type { SubagentLauncher, SubagentPoolRoute } from '../config/schema';
 import {
   EXTERNAL_SUBAGENT_ID_PREFIX,
   isExternalSubagentId,
   materializeBackendArgs,
+  resolveExternalSubagentLauncher,
   resolveRouteByNames,
   resolveSubagentRoute,
   parseExternalSubagentOutput,
@@ -158,6 +161,14 @@ export interface DispatchSpawnMetadata {
   readonly qualityDeficiencies?: readonly string[];
   readonly reviewReason?: string;
   readonly workCard?: DispatchWorkCard;
+  /** Runtime-enforced capability boundary for Agora read-only peers. */
+  readonly readOnly?: boolean;
+  /** Run in an isolated worktree and discard every resulting delta. */
+  readonly discardChanges?: boolean;
+  /** Force the in-process route even when the named profile has external routing. */
+  readonly internalOnly?: boolean;
+  /** Tool allowlist applied after profile resolution for a read-only in-process run. */
+  readonly allowedTools?: readonly string[];
 }
 
 export interface SpawnSubagentOptions extends RunSubagentOptions {
@@ -235,14 +246,19 @@ export class SessionSubagentHost {
             profile,
             childRunOptions.dispatch?.scope,
             enforceIsolation,
+            childRunOptions.dispatch?.discardChanges === true,
           );
           try {
-            await this.configureChild(parent, agent, profile, route.modelAlias, worktree?.cwd);
+            await this.configureChild(parent, agent, profile, route.modelAlias, worktree?.cwd, childRunOptions);
             const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
-            if (worktree) await worktree.finish({ kind: 'success' });
+            if (worktree) {
+              await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'));
+            }
             return result;
           } catch (error) {
-            if (worktree) await worktree.finish({ kind: 'incomplete' }).catch(() => {});
+            if (worktree) {
+              await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'failure')).catch(() => {});
+            }
             this.emitSubagentFailed(parent, id, childRunOptions, error);
             throw error;
           }
@@ -297,6 +313,9 @@ export class SessionSubagentHost {
     options: SpawnSubagentOptions,
   ): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void } {
     const config = this.session.options.config ?? { providers: {} };
+    if (options.dispatch?.internalOnly === true) {
+      return { route: resolveRouteByNames(config, 'kimi', options.modelAlias) };
+    }
 
     const routeOverride = options.dispatch?.workCard?.routeOverride;
     if (routeOverride !== undefined) {
@@ -344,6 +363,15 @@ export class SessionSubagentHost {
     profile: ResolvedAgentProfile,
     options: SpawnSubagentOptions,
   ): Promise<{ reservationId: string; displayName?: string } | undefined> {
+    if (
+      options.dispatch?.readOnly === true &&
+      options.dispatch.allowedTools === undefined &&
+      profile.tools.some((tool) =>
+        ['Write', 'Edit', 'Bash', 'TaskStop', 'Agent', 'AgentSwarm'].includes(tool) || tool.startsWith('mcp__'),
+      )
+    ) {
+      throw new Error(`Dispatch rejected: read-only peer profile "${profile.name}" exposes side-effect capability.`);
+    }
     // `SessionSubagentHost.spawn` is also a public/internal compatibility API
     // used for session bootstrap and explicit callers. Only a tool-issued
     // dispatch opts into proactive-dispatch quotas and scope enforcement.
@@ -431,6 +459,8 @@ export class SessionSubagentHost {
     existingAgentId?: string,
     enforceIsolation = false,
   ): SubagentHandle {
+    const readOnly = options.dispatch?.readOnly === true;
+    const launcher = resolveExternalSubagentLauncher(route, readOnly);
     const id = existingAgentId ?? `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
     if (existingAgentId === undefined) {
       this.session.metadata.agents[id] = {
@@ -441,6 +471,7 @@ export class SessionSubagentHost {
         externalProfile: profileName,
         externalModelAlias: route.modelAlias,
         externalSessionId: sessionId,
+        externalReadOnly: readOnly || undefined,
       };
       void this.session.writeMetadata();
     }
@@ -466,7 +497,7 @@ export class SessionSubagentHost {
             this.session.log.warn('external subagent stderr', {
               subagentId: id,
               backend: route.backendName,
-              stderr,
+              stderr: redactUntrustedRaw(stderr).redacted,
             });
           },
           (usage) => {
@@ -476,10 +507,13 @@ export class SessionSubagentHost {
               usage,
             });
           },
-          resumed ? route.backend.resumeArgs ?? route.backend.args ?? [] : route.backend.args ?? [],
+          resumed ? launcher.resumeArgs ?? [] : launcher.args ?? [],
           sessionId,
+          launcher,
         );
-        if (worktree) await worktree.finish({ kind: 'success' });
+        if (worktree) {
+          await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'));
+        }
         parent.emitEvent({
           type: 'subagent.completed',
           subagentId: id,
@@ -489,7 +523,9 @@ export class SessionSubagentHost {
         this.triggerSubagentStop(parent, profileName, completion.result);
         return completion;
       } catch (error) {
-        if (worktree) await worktree.finish({ kind: 'incomplete' }).catch(() => {});
+        if (worktree) {
+          await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'failure')).catch(() => {});
+        }
         this.emitSubagentFailed(parent, id, runOptions, error);
         throw error;
       }
@@ -498,7 +534,7 @@ export class SessionSubagentHost {
       agentId: id,
       profileName,
       resumed,
-      resumable: route.backend.resumeArgs !== undefined,
+      resumable: launcher.resumeArgs !== undefined,
       completion,
     };
   }
@@ -548,16 +584,21 @@ export class SessionSubagentHost {
     if (route.kind !== 'external') {
       throw new Error(`External subagent "${agentId}" backend configuration is no longer available.`);
     }
-    if (route.backend.resumeArgs === undefined) {
+    const readOnly = metadata.externalReadOnly === true;
+    const launcher = resolveExternalSubagentLauncher(route, readOnly);
+    if (launcher.resumeArgs === undefined) {
+      const launcherPath = readOnly ? 'read_only_launcher.resume_args' : 'resume_args';
       throw new Error(
-        `External subagent backend "${route.backendName}" has no resume_args; launch a fresh replacement instead.`,
+        `External subagent backend "${route.backendName}" has no ${launcherPath}; this handle is non-resumable. Launch a fresh replacement instead.`,
       );
     }
     return this.spawnExternal(
       parent,
       metadata.externalProfile,
       route,
-      options,
+      metadata.externalReadOnly === true
+        ? { ...options, dispatch: { ...options.dispatch, readOnly: true, discardChanges: true } }
+        : options,
       metadata.externalSessionId,
       true,
       agentId,
@@ -778,6 +819,7 @@ export class SessionSubagentHost {
     profile: ResolvedAgentProfile,
     modelAlias?: string,
     isolatedCwd?: string,
+    options?: RunSubagentOptions,
   ): Promise<void> {
     child.config.update({
       cwd: isolatedCwd ?? parent.config.cwd,
@@ -791,7 +833,10 @@ export class SessionSubagentHost {
       { additionalDirs: child.getAdditionalDirs() },
     );
     child.useProfile(profile, context, this.session.options.kimiHomeDir);
-    child.tools.inheritUserTools(parent.tools);
+    if (options?.dispatch?.allowedTools !== undefined) {
+      child.tools.setActiveTools(options.dispatch.allowedTools);
+    }
+    if (options?.dispatch?.readOnly !== true) child.tools.inheritUserTools(parent.tools);
   }
 
   /** Acquire an isolated worktree for every editing-capable dispatch. */
@@ -800,9 +845,10 @@ export class SessionSubagentHost {
     profile: ResolvedAgentProfile,
     scope: readonly string[] | undefined,
     enforceIsolation: boolean,
+    discardChanges = false,
   ): Promise<SubagentWorktreeHandle | null> {
     const explicitlyEnabled = parent.experimentalFlags.enabled('subagent-worktree-isolation');
-    if ((!enforceIsolation && !explicitlyEnabled) || !isEditingCapableProfile(profile)) return null;
+    if ((!enforceIsolation && !explicitlyEnabled && !discardChanges) || (!isEditingCapableProfile(profile) && !discardChanges)) return null;
     const worktree = await acquireSubagentWorktree(parent.kaos, parent.config.cwd, { scope });
     if (worktree === null && (enforceIsolation || explicitlyEnabled)) {
       throw new Error('Editing subagent isolation could not be created; dispatch was refused.');
@@ -818,6 +864,13 @@ export class SessionSubagentHost {
     enforceIsolation: boolean,
   ): Promise<SubagentWorktreeHandle | null> {
     const profile = this.resolveProfile(parent, profileName);
+    if (options.dispatch?.readOnly === true || options.dispatch?.discardChanges === true) {
+      const worktree = await acquireSubagentWorktree(parent.kaos, parent.config.cwd, {
+        scope: options.dispatch.scope,
+      });
+      if (worktree === null) throw new Error('Read-only Agora peer isolation could not be created.');
+      return worktree;
+    }
     return this.acquireWorktreeIfNeeded(parent, profile, options.dispatch?.scope, enforceIsolation);
   }
 
@@ -973,6 +1026,7 @@ export async function runExternalSubagent(
   onUsage?: (usage: ExternalSubagentUsage) => void,
   args: readonly string[] = route.backend.args ?? [],
   sessionId = '',
+  launcher: SubagentLauncher = route.backend,
 ): Promise<SubagentCompletion> {
   signal.throwIfAborted();
   let promptDirectory: string | undefined;
@@ -985,7 +1039,7 @@ export async function runExternalSubagent(
 
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(route.backend.command, materializeBackendArgs(route, cwd, promptFile, args, sessionId), {
+    child = spawn(launcher.command, materializeBackendArgs(route, cwd, promptFile, args, sessionId), {
       cwd,
       shell: false,
       stdio: 'pipe',
@@ -1080,7 +1134,8 @@ export async function runExternalSubagent(
       if (stdinError !== undefined) return settle(stdinError);
       if (code === 0) return settle();
       const detail = stderr.trim();
-      const suffix = detail.length > 0 ? `: ${detail}` : '';
+      const redactedDetail = detail.length > 0 ? redactUntrustedRaw(detail).redacted : '';
+      const suffix = redactedDetail.length > 0 ? `: ${redactedDetail}` : '';
       settle(new Error(
         `External subagent backend "${route.backendName}" exited with ${code === null ? `signal ${closeSignal ?? 'unknown'}` : `code ${String(code)}`}${suffix}`,
       ));
@@ -1187,4 +1242,20 @@ function shouldSuppressQueuedAttemptFailureEvent(
   if (options.suppressRateLimitFailureEvent !== true) return false;
   if (isProviderRateLimitError(error)) return true;
   return isAbortError(error) || options.signal.aborted;
+}
+
+/** Analysis-only runs discard deltas; editing failures preserve recovery evidence. */
+function analysisOnlyFinishOutcome(
+  options: Pick<RunSubagentOptions, 'dispatch'>,
+  phase: 'success' | 'failure',
+): SubagentWorktreeOutcome {
+  if (options.dispatch?.readOnly === true || options.dispatch?.discardChanges === true) {
+    return {
+      kind: 'discard',
+      reason: phase === 'success'
+        ? 'analysis-only subagent delta discarded'
+        : 'analysis-only subagent delta discarded after failure',
+    };
+  }
+  return phase === 'success' ? { kind: 'success' } : { kind: 'incomplete' };
 }

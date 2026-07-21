@@ -2,6 +2,7 @@ import type { Component, Focusable } from '@moonshot-ai/pi-tui';
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
 import type { KimiHarness, Session } from '@moonshot-ai/kimi-code-sdk';
 
+import { KIMI_BUILD_INFO } from '#/cli/build-info';
 import type { ColorToken, ThemeName } from '#/tui/theme';
 
 import { LLM_NOT_SET_MESSAGE } from '../constant/kimi-tui';
@@ -19,6 +20,7 @@ import type {
   TranscriptEntry,
 } from '../types';
 import { formatErrorMessage } from '../utils/event-payload';
+import { handleAgoraCommand } from './agora';
 import { handleLoginCommand, handleLogoutCommand } from './auth';
 import { handleBtwCommand } from './btw';
 import { handleCopyCommand } from './copy';
@@ -42,6 +44,7 @@ import { handleAddDirCommand } from './add-dir';
 import { parseSlashInput } from './parse';
 import { handlePluginsCommand } from './plugins';
 import { handleProviderCommand } from './provider';
+import { handleResearchCommand } from './research';
 import { handleSubagentCommand } from './subagent';
 import type { BuiltinSlashCommandName } from './registry';
 import { handleReloadCommand, handleReloadTuiCommand } from './reload';
@@ -62,6 +65,8 @@ import { handleWebCommand } from './web';
 // Re-exports — keep existing consumers working
 // ---------------------------------------------------------------------------
 
+export { handleAgoraCommand } from './agora';
+export { handleResearchCommand } from './research';
 export { handleLoginCommand, handleLogoutCommand } from './auth';
 export { handleBtwCommand } from './btw';
 export { handleCopyCommand } from './copy';
@@ -198,6 +203,9 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
       host.showError(slashBusyMessage(intent.commandName, intent.reason));
       return;
     case 'invalid':
+      if (parsedCommand !== null && tryHandleDanceCommand(host, parsedCommand)) {
+        return;
+      }
       host.track('input_command_invalid', {
         reason: intent.reason,
         command: intent.commandName,
@@ -267,11 +275,22 @@ async function handleBuiltInSlashCommand(
       host.showHelpPanel();
       return;
     case 'version':
-      host.showStatus(`Kimi Code v${host.state.appState.version}`);
+      host.showStatus([
+        `Kimi Code v${host.state.appState.version}`,
+        `commit=${KIMI_BUILD_INFO.commit ?? 'unknown'}`,
+        `target=${KIMI_BUILD_INFO.buildTarget ?? 'unknown'}`,
+        `features=${KIMI_BUILD_INFO.features.join(',')}`,
+      ].join(' '));
       return;
     case 'new':
       await host.createNewSession();
       host.state.ui.requestRender();
+      return;
+    case 'agora':
+      await handleAgoraCommand(host, args);
+      return;
+    case 'research':
+      await handleResearchCommand(host, args);
       return;
     case 'sessions':
       void host.showSessionPicker();

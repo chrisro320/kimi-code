@@ -1,4 +1,5 @@
 import agentYaml from './default/agent.yaml?raw';
+import agoraPeerYaml from './default/agora-peer.yaml?raw';
 import coderExYaml from './default/coder-ex.yaml?raw';
 import coderYaml from './default/coder.yaml?raw';
 import debuggerYaml from './default/debugger.yaml?raw';
@@ -13,6 +14,7 @@ import { loadAgentProfilesFromSources } from './load';
 // plus any file referenced through `systemPromptPath`.
 const PROFILE_SOURCES: Record<string, string> = {
   'profile/default/agent.yaml': agentYaml,
+  'profile/default/agora-peer.yaml': agoraPeerYaml,
   'profile/default/coder-ex.yaml': coderExYaml,
   'profile/default/coder.yaml': coderYaml,
   'profile/default/debugger.yaml': debuggerYaml,
@@ -25,7 +27,7 @@ const PROFILE_SOURCES: Record<string, string> = {
 export const DEFAULT_INIT_PROMPT = initMd;
 
 export const DEFAULT_AGENT_PROFILES = loadAgentProfilesFromSources(
-  ['agent.yaml', 'coder-ex.yaml', 'coder.yaml', 'debugger.yaml', 'explore.yaml', 'frontend-artist.yaml', 'reviewer.yaml'].map(
+  ['agent.yaml', 'agora-peer.yaml', 'coder-ex.yaml', 'coder.yaml', 'debugger.yaml', 'explore.yaml', 'frontend-artist.yaml', 'reviewer.yaml'].map(
     (file) => `profile/default/${file}`,
   ),
   PROFILE_SOURCES,

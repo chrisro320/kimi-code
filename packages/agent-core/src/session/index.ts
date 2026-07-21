@@ -56,6 +56,7 @@ import type { ToolServices } from '../tools/support/services';
 import { FlagResolver, type ExperimentalFlagResolver } from '../flags';
 import { ImageLimits } from '../tools/support/image-limits';
 import { abortError } from '../utils/abort';
+import type { AgoraLifecycleAdapter } from '../agora/lifecycle';
 
 export interface SessionOptions {
   readonly kaos: Kaos;
@@ -87,6 +88,8 @@ export interface SessionOptions {
    * finish before the run exits. Set via the SDK `createSession` option.
    */
   readonly drainAgentTasksOnStop?: boolean;
+  /** Optional adapter for materializing an Agora lifecycle into a typed handoff. */
+  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export interface SessionSkillConfig {
@@ -110,6 +113,8 @@ export interface AgentMeta {
   readonly externalProfile?: string;
   readonly externalModelAlias?: string;
   readonly externalSessionId?: string;
+  /** Preserve the enforced launcher contract if an external read-only run is resumed. */
+  readonly externalReadOnly?: boolean;
 }
 
 interface ResumedAgent {
@@ -203,6 +208,7 @@ export class Session {
   private agentsMdWarning: string | undefined;
   private printSteerDeadline: number | undefined;
   private printSteerTurns = 0;
+  readonly agoraLifecycleAdapter: AgoraLifecycleAdapter | undefined;
 
   constructor(public readonly options: SessionOptions) {
     // Attach the per-session log sink up front so the constructor's
@@ -251,6 +257,7 @@ export class Session {
     void this.loadMcpServers().catch((error: unknown) => {
       this.emitInitialMcpLoadError(error);
     });
+    this.agoraLifecycleAdapter = options.agoraLifecycleAdapter;
   }
 
 

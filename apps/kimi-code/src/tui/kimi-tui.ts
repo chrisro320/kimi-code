@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
 import type {
@@ -34,6 +34,12 @@ import { detectFdPath, ensureFdPath } from '#/utils/process/fd-detect';
 import { quoteShellArg } from '#/utils/shell-quote';
 import { restoreTerminalModes } from '#/utils/terminal-restore';
 
+import {
+  bindAgoraHandoff,
+  markAgoraHandoffFailed,
+  prepareAgoraHandoff,
+  type PreparedAgoraHandoff,
+} from './agora-handoff';
 import { BannerProvider } from './banner/banner-provider';
 import { readBannerDisplayState, writeBannerDisplayState } from './banner/state';
 import {
@@ -241,6 +247,8 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     goal: null,
     mcpServersSummary: null,
     banner: undefined,
+    agora: null,
+    research: null,
   };
 }
 
@@ -1638,7 +1646,9 @@ export class KimiTUI {
     return this.session;
   }
 
-  private async createSessionFromCurrentState(): Promise<Session> {
+  private async createSessionFromCurrentState(
+    metadata?: CreateSessionOptions['metadata'],
+  ): Promise<Session> {
     const model = this.state.appState.model.trim();
     if (model.length === 0) {
       throw new Error(LLM_NOT_SET_MESSAGE);
@@ -1649,7 +1659,9 @@ export class KimiTUI {
       thinking: this.session === undefined ? undefined : this.state.appState.thinkingEffort,
       permission: this.state.appState.permissionMode,
       planMode: this.state.appState.planMode ? true : undefined,
+      metadata,
     };
+    if (metadata === undefined) delete options.metadata;
     if (this.state.appState.additionalDirs.length > 0) {
       options.additionalDirs = [...this.state.appState.additionalDirs];
     }
@@ -1905,18 +1917,74 @@ export class KimiTUI {
   }
 
   async createNewSession(): Promise<void> {
+    await this.createFreshSession();
+  }
+
+  async createAgoraHandoffSession(
+    handoffPath: string,
+    expected: { readonly runId: string; readonly sourceSessionId: string; readonly targetTask: string; readonly digest: string },
+  ): Promise<void> {
+    let prepared: PreparedAgoraHandoff;
+    try {
+      prepared = await prepareAgoraHandoff(handoffPath, this.state.appState.workDir, expected);
+    } catch (error) {
+      this.showError(`Agora handoff validation failed: ${formatErrorMessage(error)}`);
+      return;
+    }
+
+    let session: Session | undefined;
+    try {
+      session = await this.createFreshSession({
+        agoraHandoff: {
+          path: relative(this.state.appState.workDir, prepared.path),
+          runId: prepared.handoff.runId,
+          sourceSessionId: prepared.handoff.sourceSessionId,
+          targetTask: prepared.handoff.targetTask,
+          resumeAnchor: prepared.handoff.implementationResumeAnchor,
+        },
+      }, false);
+      if (session === undefined) throw new Error('Fresh session creation did not complete.');
+      const bound = await bindAgoraHandoff(prepared, session.id, this.state.appState.workDir);
+      await session.updateMetadata({
+        agoraHandoff: {
+          path: relative(this.state.appState.workDir, prepared.path),
+          runId: bound.runId,
+          sourceSessionId: bound.sourceSessionId,
+          targetTask: bound.targetTask,
+          resumeAnchor: bound.implementationResumeAnchor,
+          transition: bound.transition ?? 'fresh_session_ready',
+        },
+      });
+      this.streamingUI.setTodoList(prepared.todos);
+      this.setAppState({ agora: null });
+      this.showStatus(`Agora handoff ready in fresh session (${session.id}).`);
+    } catch (error) {
+      try {
+        await markAgoraHandoffFailed(prepared, error);
+      } catch {
+        /* Keep the original error visible when the retry marker cannot be written. */
+      }
+      this.setAppState({ agora: null });
+      this.showError(`Agora handoff failed: ${formatErrorMessage(error)}`);
+    }
+  }
+
+  private async createFreshSession(
+    metadata?: CreateSessionOptions['metadata'],
+    announce = true,
+  ): Promise<Session | undefined> {
     if (this.state.appState.isReplaying) {
       this.showError('Cannot start a new session while history is replaying.');
-      return;
+      return undefined;
     }
 
     let session: Session;
     try {
-      session = await this.createSessionFromCurrentState();
+      session = await this.createSessionFromCurrentState(metadata);
     } catch (error) {
       const msg = formatErrorMessage(error);
       this.showError(`Failed to start a new session: ${msg}`);
-      return;
+      return undefined;
     }
 
     this.resetSessionRuntime();
@@ -1929,7 +1997,7 @@ export class KimiTUI {
       this.sessionEventHandler.startSubscription();
       const msg = formatErrorMessage(error);
       this.showError(`Post-create setup failed: ${msg}`);
-      return;
+      return undefined;
     }
     try {
       await this.refreshSkillCommands(this.session);
@@ -1939,9 +2007,10 @@ export class KimiTUI {
     }
     this.sessionEventHandler.startSubscription();
     this.clearTranscriptAndRedraw();
-    this.showStatus(`Started a new session (${session.id}).`);
+    if (announce) this.showStatus(`Started a new session (${session.id}).`);
     void this.showSessionWarnings(session);
     void this.showConfigWarningsIfAny();
+    return session;
   }
 
   /** Surface config.toml load warnings (degraded or kept-previous config) in the status bar. */

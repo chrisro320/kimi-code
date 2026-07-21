@@ -27,6 +27,15 @@ import type { SessionWarning } from '@moonshot-ai/protocol';
 import type { PluginCommandDef, PluginInfo, PluginSummary, ReloadSummary } from '#/plugin';
 import type { UsageStatus } from './events';
 import type { WithAgentId, WithSessionId } from './types';
+import type {
+  AgoraLifecycleCapability,
+  AgoraLifecycleMaterializedHandoff,
+  AgoraLifecycleSnapshot,
+  AgoraLifecycleTransitionResult,
+  AgoraMaterializationConfirmation,
+  AgoraMaterializationConfirmationProof,
+  AgoraMaterializationProposal,
+} from '#/agora/lifecycle';
 
 export type { PluginCommandDef } from '#/plugin';
 
@@ -107,6 +116,53 @@ export interface ForkSessionPayload {
    * the complete session is copied (the existing fork behavior).
    */
   readonly turnIndex?: number;
+}
+
+export interface InsertAgoraReviewPayload {
+  readonly runId: string;
+  readonly transitionId: string;
+  /** Untrusted display data; the trusted adapter validates before use. */
+  readonly title?: string;
+  /** Untrusted identifier data; the trusted adapter validates before use. */
+  readonly slug?: string;
+  /** Host-minted handle returned by a prior failed-flush attempt of this transition. */
+  readonly capability?: AgoraLifecycleCapability;
+}
+
+export interface InsertAgoraReviewResult {
+  readonly handle: AgoraLifecycleCapability;
+  readonly snapshot: AgoraLifecycleSnapshot;
+}
+
+export interface GetAgoraReviewPayload {
+  readonly runId: string;
+}
+
+export interface CancelAgoraReviewPayload {
+  readonly runId: string;
+  readonly transitionId: string;
+  readonly capability: AgoraLifecycleCapability;
+}
+
+export interface ConfirmAgoraMaterializationPayload {
+  readonly runId: string;
+  readonly capability: AgoraLifecycleCapability;
+  readonly proposal: AgoraMaterializationProposal;
+}
+
+export interface MaterializeAgoraReviewPayload {
+  readonly runId: string;
+  readonly transitionId: string;
+  readonly capability: AgoraLifecycleCapability;
+  readonly proposal: AgoraMaterializationProposal;
+  readonly confirmation: AgoraMaterializationConfirmationProof;
+}
+
+export interface MaterializeAgoraReviewResult {
+  readonly runId: string;
+  readonly success: boolean;
+  readonly error?: string;
+  readonly handoff?: AgoraLifecycleMaterializedHandoff;
 }
 
 export interface ShellEnvironment {
@@ -507,6 +563,11 @@ export interface SessionAPI extends AgentAPIWithId {
   waitForBackgroundTasksOnPrint: (payload: EmptyPayload) => void;
   handlePrintMainTurnCompleted: (payload: EmptyPayload) => 'finish' | 'continue';
   addAdditionalDir: (payload: AddAdditionalDirPayload) => AddAdditionalDirResult;
+  insertAgoraReview: (payload: InsertAgoraReviewPayload) => InsertAgoraReviewResult;
+  getAgoraReview: (payload: GetAgoraReviewPayload) => AgoraLifecycleSnapshot | undefined;
+  cancelAgoraReview: (payload: CancelAgoraReviewPayload) => AgoraLifecycleTransitionResult;
+  confirmAgoraMaterialization: (payload: ConfirmAgoraMaterializationPayload) => AgoraMaterializationConfirmation;
+  materializeAgoraReview: (payload: MaterializeAgoraReviewPayload) => MaterializeAgoraReviewResult;
 }
 
 type SessionAPIWithId = WithSessionId<SessionAPI>;

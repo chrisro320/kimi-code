@@ -1,6 +1,7 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
 import type {
   AgentStatusUpdatedEvent,
+  AgoraLifecycleUpdatedEvent,
   AssistantDeltaEvent,
   BackgroundTaskInfo,
   BackgroundTaskStartedEvent,
@@ -87,7 +88,6 @@ import type {
 } from '../types';
 import type { TUIState } from '../tui-state';
 import { createGoal as startGoalCommand } from '../commands/goal';
-
 export interface SessionEventHost {
   state: TUIState;
   session: Session | undefined;
@@ -111,6 +111,10 @@ export interface SessionEventHost {
   handleShellOutput(event: { commandId: string; update: { kind: string; text?: string } }): void;
   handleShellStarted(event: { commandId: string; taskId: string }): void;
   sendNormalUserInput(text: string): void;
+  createAgoraHandoffSession(
+    handoffPath: string,
+    expected: { readonly runId: string; readonly sourceSessionId: string; readonly targetTask: string; readonly digest: string },
+  ): Promise<void>;
   updateTerminalTitle(): void;
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
   shiftQueuedMessage(): QueuedMessage | undefined;
@@ -258,6 +262,7 @@ export class SessionEventHandler {
       case 'tool.call.started': this.handleToolCall(event); break;
       case 'tool.call.delta': this.handleToolCallDelta(event); break;
       case 'tool.result': this.handleToolResult(event); break;
+      case 'agora.lifecycle.updated': this.handleAgoraLifecycleUpdated(event); break;
       case 'agent.status.updated': this.handleStatusUpdate(event); break;
       case 'session.meta.updated': this.handleSessionMetaChanged(event); break;
       case 'goal.updated': this.handleGoalUpdated(event); break;
@@ -335,6 +340,9 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
+    }
+    if (this.host.state.appState.research !== null && this.host.state.appState.research !== undefined) {
+      this.host.setAppState({ research: null });
     }
     if (event.reason === 'failed' && event.error?.code === 'provider.filtered') {
       this.host.showStatus('Turn stopped: provider safety policy blocked the response.', 'error');
@@ -529,6 +537,38 @@ export class SessionEventHandler {
     if (event.name === 'AgentSwarm') {
       this.subAgentEventHandler.handleAgentSwarmToolCallStarted(event.toolCallId, toolCall.args);
     }
+    if (event.name === 'ReferenceAudit') {
+      const active = this.host.state.appState.research;
+      if (active !== null && active !== undefined) {
+        this.host.setAppState({ research: { ...active, phase: 'auditing' } });
+      }
+    }
+    if (event.name === 'Agora') {
+      const configuredPeers = toolCall.args['peers'];
+      const currentAgora = this.host.state.appState.agora;
+      const peers = configuredPeers !== null && typeof configuredPeers === 'object'
+        ? Object.entries(configuredPeers as Record<string, { model_override?: unknown; display_name?: unknown; role?: unknown; backend?: unknown }>).map(([name, peer]) => ({
+            id: name,
+            name: typeof peer.display_name === 'string' && peer.display_name.trim().length > 0 ? peer.display_name : name,
+            backend: typeof peer.backend === 'string' ? peer.backend : undefined,
+            model: typeof peer.model_override === 'string' ? peer.model_override : undefined,
+            status: typeof peer.role === 'string' && peer.role.trim().length > 0 ? `reviewing:${peer.role}` : 'reviewing',
+          }))
+        : [
+            { id: 'claude', name: 'Claude', backend: 'claude-code', model: 'Opus 4.8', status: 'reviewing' },
+            { id: 'grok', name: 'Grok', backend: 'kimi', model: 'kimicode-grok-4.5', status: 'reviewing' },
+          ];
+      this.host.setAppState({
+        agora: {
+          ...currentAgora,
+          runId: typeof toolCall.args['run_id'] === 'string' ? toolCall.args['run_id'] : currentAgora?.runId,
+          phase: 'peer_review',
+          hostRoute: toolCall.args['recovery'] ? 'coder-ex' : 'coder',
+          hostModel: toolCall.args['recovery'] ? 'GPT 5.6sol' : undefined,
+          peers,
+        },
+      });
+    }
     this.host.patchLivePane({
       mode: 'tool',
       pendingApproval: null,
@@ -602,6 +642,47 @@ export class SessionEventHandler {
       }
     }
     this.host.patchLivePane({ mode: 'waiting' });
+  }
+
+  private handleAgoraLifecycleUpdated(event: AgoraLifecycleUpdatedEvent): void {
+    if (event.sourceSessionId !== this.host.state.appState.sessionId) return;
+    const active = this.host.state.appState.agora;
+    if (active?.runId !== undefined && active.runId !== event.runId) return;
+    const terminal = event.phase === 'cancelled'
+      || event.phase === 'resolved_to_origin'
+      || event.phase === 'resolved_to_successor';
+    if (terminal) {
+      this.host.setAppState({ agora: null });
+      return;
+    }
+    if (
+      event.phase === 'fresh_session_pending'
+      && event.targetTask !== undefined
+      && event.materializationHandoffPath !== undefined
+      && event.materializationDigest !== undefined
+    ) {
+      void this.host.createAgoraHandoffSession(event.materializationHandoffPath, {
+        runId: event.runId,
+        sourceSessionId: event.sourceSessionId,
+        targetTask: event.targetTask,
+        digest: event.materializationDigest,
+      });
+      return;
+    }
+    this.host.setAppState({
+      agora: {
+        runId: event.runId,
+        focus: active?.focus,
+        phase: event.phase,
+        hostRoute: active?.hostRoute ?? 'coder',
+        hostModel: active?.hostModel,
+        originTask: event.originTask,
+        insertedTask: event.insertedTask,
+        startedAtMs: active?.startedAtMs,
+        peers: active?.peers ?? [],
+        terminalState: event.terminalState,
+      },
+    });
   }
 
   private handleStatusUpdate(event: AgentStatusUpdatedEvent): void {

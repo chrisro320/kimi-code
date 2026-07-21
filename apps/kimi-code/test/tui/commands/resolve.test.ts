@@ -238,10 +238,11 @@ describe('resolveSlashCommandInput', () => {
     });
   });
 
-  it('returns message for unknown slash input', () => {
+  it('rejects unknown slash input instead of silently sending it to the model', () => {
     expect(resolve('/does-not-exist arg')).toEqual({
-      kind: 'message',
-      input: '/does-not-exist arg',
+      kind: 'invalid',
+      commandName: 'does-not-exist',
+      reason: 'unknown',
     });
   });
 

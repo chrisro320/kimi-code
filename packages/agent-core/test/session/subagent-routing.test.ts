@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { KimiConfig } from '../../src/config';
+import type { KimiConfig, SubagentLauncher } from '../../src/config';
 import type { Session } from '../../src/session';
 import { runExternalSubagent, SessionSubagentHost } from '../../src/session/subagent-host';
 import {
   materializeBackendArgs,
+  resolveExternalSubagentLauncher,
   resolveRouteByNames,
   resolveSubagentRoute,
   parseExternalSubagentOutput,
@@ -116,12 +117,83 @@ describe('resolveRouteByNames', () => {
     });
   });
 
-  it('resolves an external route by explicit backend and model name', () => {
-    const route = resolveRouteByNames(config, 'custom-cli', 'precise');
-    expect(route).toMatchObject({ kind: 'external', backendName: 'custom-cli', modelAlias: 'precise' });
+  it('resolves an external route with a backend-native model name', () => {
+    const route = resolveRouteByNames(config, 'custom-cli', 'Opus 4.8');
+    expect(route).toMatchObject({ kind: 'external', backendName: 'custom-cli', modelAlias: 'Opus 4.8' });
   });
 
-  it('validates the model alias and backend name independently of subagent.routing', () => {
+  it('requires an explicit enforced launcher for read-only external dispatch', () => {
+    const route = resolveRouteByNames(config, 'custom-cli', 'Opus 4.8');
+    if (route.kind !== 'external') throw new Error('expected external route');
+    expect(resolveExternalSubagentLauncher(route, false)).toBe(route.backend);
+    expect(() => resolveExternalSubagentLauncher(route, true)).toThrow(
+      'does not define subagent.backends.<name>.read_only_launcher',
+    );
+
+    const readOnlyRoute = resolveRouteByNames({
+      ...config,
+      subagent: {
+        ...config.subagent,
+        backends: {
+          'custom-cli': {
+            ...config.subagent!.backends!['custom-cli']!,
+            readOnlyLauncher: {
+              command: 'custom-agent-ro',
+              args: ['--tools=', '--model', '{model}'],
+              resumeArgs: ['--tools=', '--resume', '{session_id}'],
+              sandbox: { filesystem: 'read_only', network: 'none' },
+            },
+          },
+        },
+      },
+    }, 'custom-cli', 'Opus 4.8');
+    if (readOnlyRoute.kind !== 'external') throw new Error('expected external route');
+    expect(resolveExternalSubagentLauncher(readOnlyRoute, true)).toEqual({
+      command: 'custom-agent-ro',
+      args: ['--tools=', '--model', '{model}'],
+      resumeArgs: ['--tools=', '--resume', '{session_id}'],
+      sandbox: { filesystem: 'read_only', network: 'none' },
+    });
+  });
+
+  it('fails closed when a read-only launcher lacks sandbox proof or enforcement markers', () => {
+    const routeWith = (readOnlyLauncher: SubagentLauncher) => {
+      const route = resolveRouteByNames({
+        ...config,
+        subagent: {
+          ...config.subagent,
+          backends: {
+            'custom-cli': {
+              ...config.subagent!.backends!['custom-cli']!,
+              readOnlyLauncher,
+            },
+          },
+        },
+      }, 'custom-cli', 'Opus 4.8');
+      if (route.kind !== 'external') throw new Error('expected external route');
+      return route;
+    };
+
+    expect(() => resolveExternalSubagentLauncher(routeWith({
+      command: 'custom-agent-ro',
+      args: ['--read-only'],
+    }), true)).toThrow('sandbox.filesystem = "read_only"');
+
+    expect(() => resolveExternalSubagentLauncher(routeWith({
+      command: 'custom-agent-ro',
+      args: ['--model', '{model}'],
+      sandbox: { filesystem: 'read_only' },
+    }), true)).toThrow('verifiable read-only enforcement marker');
+
+    expect(() => resolveExternalSubagentLauncher(routeWith({
+      command: 'custom-agent-ro',
+      args: ['--read-only'],
+      resumeArgs: ['--resume', '{session_id}'],
+      sandbox: { filesystem: 'read_only' },
+    }), true)).toThrow('read_only_launcher.resume_args');
+  });
+
+  it('validates only internal model aliases and validates every backend name', () => {
     expect(() => resolveRouteByNames(config, undefined, 'missing')).toThrow(
       'not defined in config.models',
     );
@@ -325,6 +397,24 @@ describe('runExternalSubagent', () => {
     await expect(
       runExternalSubagent(failing, process.cwd(), '', new AbortController().signal, () => {}),
     ).rejects.toThrow('exited with code 7: bad exit');
+
+    const secret = 'SUPERSECRET_BACKEND_STDERR_999999';
+    const secretFailing = {
+      ...nodeRoute,
+      backend: {
+        command: process.execPath,
+        args: ['-e', `process.stderr.write('api_key=${secret}');process.exit(9)`],
+      },
+    };
+    await expect(
+      runExternalSubagent(secretFailing, process.cwd(), '', new AbortController().signal, () => {}),
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('exited with code 9');
+      expect((error as Error).message).toContain('[REDACTED_SECRET]');
+      expect((error as Error).message).not.toContain(secret);
+      return true;
+    });
 
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     try {

@@ -7,7 +7,12 @@ import {
   type WireMigration,
   type WireMigrationRecord,
 } from './migration';
-import type { AgentRecord, AgentRecordPersistence } from './types';
+import type {
+  AgentRecord,
+  AgentRecordEvents,
+  AgentRecordOf,
+  AgentRecordPersistence,
+} from './types';
 
 export * from './types';
 export { AGENT_WIRE_PROTOCOL_VERSION } from './migration';
@@ -146,6 +151,15 @@ function restoreAgentRecord(agent: Agent, input: AgentRecord): void {
     case 'mcp.tools_discovered':
       agent.tools.restoreMcpDiscovery(input.serverName, input.hash);
       return;
+    case 'agora.lifecycle':
+    case 'agora.materialization_confirmation':
+    case 'agora.run':
+    case 'agora.override':
+    case 'reference_audit.state':
+    case 'reference_audit.override':
+    case 'reference_audit.run':
+    case 'asset_pipeline.run':
+      return;
   }
 }
 
@@ -171,6 +185,8 @@ export class AgentRecords {
    */
   private _opened = false;
   private readonly onOpenedCallbacks: Array<() => void> = [];
+  private readonly latestRecords = new Map<keyof AgentRecordEvents, AgentRecord>();
+  private readonly recordHistory = new Map<keyof AgentRecordEvents, AgentRecord[]>();
 
   constructor(
     private readonly agent: Agent,
@@ -179,6 +195,112 @@ export class AgentRecords {
 
   get restoring() {
     return this._restoring;
+  }
+
+  latest<K extends keyof AgentRecordEvents>(type: K): AgentRecordOf<K> | undefined {
+    return this.latestRecords.get(type) as AgentRecordOf<K> | undefined;
+  }
+
+  history<K extends keyof AgentRecordEvents>(type: K): readonly AgentRecordOf<K>[] {
+    return (this.recordHistory.get(type) ?? []) as unknown as readonly AgentRecordOf<K>[];
+  }
+
+  /**
+   * Keyed projection for the latest `agora.lifecycle` record of a specific run.
+   * Unlike `latest('agora.lifecycle')`, this returns the most recent transition
+   * for the requested runId so that interleaved runs do not shadow each other.
+   */
+  latestAgoraLifecycle(runId: string): AgentRecordOf<'agora.lifecycle'> | undefined {
+    const history = this.history('agora.lifecycle');
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const record = history[i]!;
+      if (record.runId === runId) return record;
+    }
+    return undefined;
+  }
+
+  /** Latest durable `agora.run` state for one run across interleaved runs. */
+  latestAgoraRun(runId: string): AgentRecordOf<'agora.run'> | undefined {
+    const history = this.history('agora.run');
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const record = history[i]!;
+      if (record.runId === runId) return record;
+    }
+    return undefined;
+  }
+
+  /** Latest materialization confirmation for one run across interleaved runs. */
+  latestAgoraMaterializationConfirmation(
+    runId: string,
+  ): AgentRecordOf<'agora.materialization_confirmation'> | undefined {
+    const history = this.history('agora.materialization_confirmation');
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const record = history[i]!;
+      if (record.runId === runId) return record;
+    }
+    return undefined;
+  }
+
+  /** Atomically consume the exact confirmed proposal before adapter execution. */
+  claimAgoraMaterializationConfirmation(input: {
+    readonly runId: string;
+    readonly sourceSessionId: string;
+    readonly lifecycleEpoch: string;
+    readonly proposalRevision: number;
+    readonly proposalHash: string;
+    readonly runPacketRevision: number;
+    readonly consumedBy: string;
+  }): boolean {
+    const latest = this.latestAgoraMaterializationConfirmation(input.runId);
+    if (
+      latest === undefined
+      || latest.state !== 'confirmed'
+      || latest.sourceSessionId !== input.sourceSessionId
+      || latest.lifecycleEpoch !== input.lifecycleEpoch
+      || latest.proposalRevision !== input.proposalRevision
+      || latest.proposalHash !== input.proposalHash
+      || latest.runPacketRevision !== input.runPacketRevision
+    ) return false;
+    this.logRecord({
+      ...latest,
+      type: 'agora.materialization_confirmation',
+      state: 'consumed',
+      consumedBy: input.consumedBy,
+    });
+    return true;
+  }
+
+  /** Single-writer synchronous claim: validate and consume before yielding control. */
+  claimReferenceAuditOverride(input: {
+    readonly operationId: string;
+    readonly purpose: 'agora' | 'editing-dispatch';
+    readonly referenceHash: string;
+    readonly overrideHash?: string;
+    readonly consumedBy: string;
+  }): boolean {
+    const history = this.history('reference_audit.override');
+    if (history.some((record) => record.operationId === input.operationId && record.state === 'consumed')) return false;
+    const approved = history.findLast((record) =>
+      record.operationId === input.operationId
+      && record.purpose === input.purpose
+      && record.referenceHash === input.referenceHash
+      && record.state === 'approved'
+      && (input.overrideHash === undefined || record.overrideHash === input.overrideHash));
+    if (approved === undefined) return false;
+    this.logRecord({ ...approved, type: 'reference_audit.override', state: 'consumed', consumedBy: input.consumedBy });
+    return true;
+  }
+
+  /** Consume a packet-bound Agora override exactly once per run and kind. */
+  claimAgoraOverride(input: {
+    readonly operationId: string;
+    readonly kind: 'necessity_force_after_decline' | 'reference_risk_override';
+    readonly envelopeHash: string;
+  }): boolean {
+    if (this.history('agora.override').some((record) =>
+      record.operationId === input.operationId && record.kind === input.kind)) return false;
+    this.logRecord({ type: 'agora.override', ...input, state: 'consumed' });
+    return true;
   }
 
   /**
@@ -232,6 +354,10 @@ export class AgentRecords {
     if (stamped.type === 'metadata') {
       this.metadataInitialized = true;
     }
+    this.latestRecords.set(stamped.type, stamped);
+    const history = this.recordHistory.get(stamped.type) ?? [];
+    history.push(stamped);
+    this.recordHistory.set(stamped.type, history);
     this.persistence?.append(stamped);
     // A live record was durably logged, so this agent is not waiting on a
     // replay: open the log for observability producers. Guarded against the
@@ -245,6 +371,10 @@ export class AgentRecords {
   restore(record: AgentRecord): boolean {
     this._restoring = { time: record.time ?? Date.now() };
     try {
+      this.latestRecords.set(record.type, record);
+      const history = this.recordHistory.get(record.type) ?? [];
+      history.push(record);
+      this.recordHistory.set(record.type, history);
       restoreAgentRecord(this.agent, record);
       return this.agent.replayBuilder.finishRestoringRecord(record.type);
     } finally {

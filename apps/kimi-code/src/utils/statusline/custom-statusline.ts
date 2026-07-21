@@ -12,6 +12,7 @@
 import { execFile } from 'node:child_process';
 
 import type { ManagedUsageRow } from '#/tui/components/messages/usage-panel';
+import type { AgoraStatus, ResearchStatus } from '#/tui/types';
 
 const REFRESH_TTL_MS = 2_000;
 const SPAWN_TIMEOUT_MS = 1_000;
@@ -32,6 +33,10 @@ export interface CustomStatuslinePayload {
   readonly totalTokens: number;
   readonly lastReplyAt: number | null;
   readonly streamingPhase: string;
+  /** Active Agora state; absent outside Agora and kept verbatim for custom consumers. */
+  readonly agora?: AgoraStatus | null;
+  /** Active /research state; absent outside an audit and kept verbatim for custom consumers. */
+  readonly research?: ResearchStatus | null;
   /** Optional local-only dispatch observability; absent in older callers. */
   readonly dispatch?: {
     readonly active: number;

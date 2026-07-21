@@ -101,6 +101,19 @@ describe('buildStatuslineRow', () => {
     expect(expired).not.toContain('ttl ');
   });
 
+  it('preserves Agora data for custom statusline consumers', () => {
+    const state = makeState({
+      agora: {
+        phase: 'peer_review',
+        hostRoute: 'coder-ex',
+        hostModel: 'GPT 5.6sol',
+        peers: [{ name: 'claude', model: 'Opus 4.8', status: 'reviewing' }],
+      },
+    });
+    const payload = buildCustomStatuslinePayload(state);
+    expect(payload.agora).toEqual(state.agora);
+  });
+
   it('returns null when the statusline is disabled', () => {
     expect(buildStatuslineRow(makeState({ statusline: { enabled: false } }), currentTheme.palette)).toBeNull();
   });

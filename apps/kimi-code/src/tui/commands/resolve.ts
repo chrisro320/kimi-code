@@ -120,8 +120,9 @@ export function resolveSlashCommandInput(options: ResolveSlashCommandInput): Sla
   }
 
   return {
-    kind: 'message',
-    input: options.input,
+    kind: 'invalid',
+    commandName: parsed.name,
+    reason: 'unknown',
   };
 }
 

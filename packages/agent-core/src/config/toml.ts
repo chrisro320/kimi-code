@@ -375,10 +375,21 @@ function transformModelData(data: Record<string, unknown>): Record<string, unkno
 
 function transformSubagentData(data: Record<string, unknown>): Record<string, unknown> {
   const out = transformPlainObject(data);
-  for (const key of ['routing', 'backends']) {
-    if (isPlainObject(out[key])) {
-      out[key] = transformRecord(out[key], transformPlainObject);
-    }
+  if (isPlainObject(out['routing'])) {
+    out['routing'] = transformRecord(out['routing'], transformPlainObject);
+  }
+  if (isPlainObject(out['backends'])) {
+    out['backends'] = transformRecord(out['backends'], (backend) => {
+      const transformed = transformPlainObject(backend);
+      if (isPlainObject(transformed['readOnlyLauncher'])) {
+        const launcher = transformPlainObject(transformed['readOnlyLauncher']);
+        if (isPlainObject(launcher['sandbox'])) {
+          launcher['sandbox'] = transformPlainObject(launcher['sandbox']);
+        }
+        transformed['readOnlyLauncher'] = launcher;
+      }
+      return transformed;
+    });
   }
   if (isPlainObject(out['pools'])) {
     out['pools'] = transformPoolsData(out['pools']);
@@ -712,7 +723,25 @@ function subagentToToml(subagent: SubagentConfig, rawSubagent: unknown): Record<
         const rawEntry = isPlainObject(rawSection) ? rawSection[name] : undefined;
         const entryOut = cloneRecord(rawEntry);
         for (const [entryKey, entryValue] of Object.entries(entry)) {
-          setDefined(entryOut, camelToSnake(entryKey), entryValue);
+          if (entryKey === 'readOnlyLauncher' && isPlainObject(entryValue)) {
+            const rawLauncher = isPlainObject(rawEntry) ? rawEntry['read_only_launcher'] : undefined;
+            const launcherOut = cloneRecord(rawLauncher);
+            for (const [launcherKey, launcherValue] of Object.entries(entryValue)) {
+              if (launcherKey === 'sandbox' && isPlainObject(launcherValue)) {
+                const rawSandbox = isPlainObject(rawLauncher) ? rawLauncher['sandbox'] : undefined;
+                const sandboxOut = cloneRecord(rawSandbox);
+                for (const [sandboxKey, sandboxValue] of Object.entries(launcherValue)) {
+                  setDefined(sandboxOut, camelToSnake(sandboxKey), sandboxValue);
+                }
+                launcherOut['sandbox'] = sandboxOut;
+              } else {
+                setDefined(launcherOut, camelToSnake(launcherKey), launcherValue);
+              }
+            }
+            entryOut['read_only_launcher'] = launcherOut;
+          } else {
+            setDefined(entryOut, camelToSnake(entryKey), entryValue);
+          }
         }
         converted[name] = entryOut;
       }

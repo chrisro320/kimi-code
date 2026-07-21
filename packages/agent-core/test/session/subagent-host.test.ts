@@ -1319,6 +1319,294 @@ describe('SessionSubagentHost worktree isolation', () => {
     expect(finish).toHaveBeenCalledTimes(1);
     expect(finish).toHaveBeenCalledWith({ kind: 'incomplete' });
   });
+
+  it('discards an analysis-only internal worktree when the child turn is aborted', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+    const controller = new AbortController();
+    const child = testAgent();
+    child.mockNextResponse({ type: 'text', text: 'I will inspect a file.' }, bashCall());
+
+    const finish = vi.fn(async () => ({ applied: false, reason: 'discarded' }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({
+      cwd: '/tmp/kimi-subagent-worktree/analysis-only',
+      finish,
+    });
+    const host = new SessionSubagentHost(fakeSession(parent.agent, child.agent), 'main');
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_analysis',
+      prompt: 'Analyze only',
+      description: 'Analysis',
+      runInBackground: false,
+      signal: controller.signal,
+      dispatch: { discardChanges: true },
+    });
+
+    await child.untilApprovalRequest();
+    controller.abort(userCancellationReason());
+    await expect(handle.completion).rejects.toThrow();
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({
+      kind: 'discard',
+      reason: 'analysis-only subagent delta discarded after failure',
+    });
+  });
+
+  it('fails closed before spawning a read-only external backend without an enforced launcher', async () => {
+    const parent = testAgent();
+    parent.configure();
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: { command: process.execPath, args: ['-e', "process.stdout.write('UNSAFE')"] },
+        },
+      },
+    });
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.spawn({
+      profileName: 'agora-peer',
+      parentToolCallId: 'call_agora',
+      prompt: 'Review only',
+      description: 'Agora peer review',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        readOnly: true,
+        discardChanges: true,
+        workCard: {
+          id: 'agora-external',
+          title: 'External peer',
+          goal: 'Review without side effects',
+          acceptance: 'Return review',
+          routeOverride: { backend: 'external', model: 'Opus 4.8' },
+        },
+      },
+      enforceDispatch: true,
+    })).rejects.toThrow('read_only_launcher');
+    expect(acquireSubagentWorktree).not.toHaveBeenCalled();
+  });
+
+  it('redacts external backend stderr before writing the session log', async () => {
+    const secret = 'SUPERSECRET_LOG_STDERR_666666';
+    const parent = testAgent();
+    parent.configure();
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            args: ['-e', `process.stderr.write('api_key=${secret}');process.stdout.write('done')`],
+          },
+        },
+      },
+    });
+    const warn = vi.fn();
+    Object.assign(session, { log: { warn } });
+    const host = new SessionSubagentHost(session, 'main');
+    const handle = await host.spawn({
+      profileName: 'explore',
+      modelAlias: 'external-model',
+      parentToolCallId: 'call_external_log',
+      prompt: 'Inspect',
+      description: 'External inspect',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        workCard: {
+          id: 'external-log',
+          title: 'External log',
+          goal: 'Inspect',
+          acceptance: 'Return output',
+          routeOverride: { backend: 'external', model: 'external-model' },
+        },
+      },
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({ result: 'done' });
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain('[REDACTED_SECRET]');
+    expect(logged).not.toContain(secret);
+  });
+
+  it('uses dedicated read-only args for spawn, resume, and restart with one external session', async () => {
+    const echoArgsScript =
+      "process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(process.argv.slice(1).join('|')))";
+    const parent = testAgent();
+    parent.configure();
+    const finish = vi.fn(async () => ({
+      applied: false,
+      reason: 'analysis-only subagent delta discarded',
+    }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: process.cwd(), finish });
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            args: ['-e', echoArgsScript, 'GENERAL'],
+            resumeArgs: ['-e', echoArgsScript, 'GENERAL_RESUMED', '{session_id}'],
+            readOnlyLauncher: {
+              command: process.execPath,
+              args: [
+                '-e',
+                echoArgsScript,
+                'READ_ONLY_SPAWN',
+                'CLAUDE_TOOLS_DISABLED',
+                'GROK_SANDBOX_READ_ONLY',
+                '{session_id}',
+              ],
+              resumeArgs: [
+                '-e',
+                echoArgsScript,
+                'READ_ONLY_RESUME',
+                'CLAUDE_TOOLS_DISABLED',
+                'GROK_SANDBOX_READ_ONLY',
+                '{session_id}',
+              ],
+              sandbox: { filesystem: 'read_only', network: 'none' },
+            },
+          },
+        },
+      },
+    });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'agora-peer',
+      parentToolCallId: 'call_agora',
+      prompt: 'Review only',
+      description: 'Agora peer review',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        readOnly: true,
+        discardChanges: true,
+        scope: ['**/*'],
+        workCard: {
+          id: 'agora-external',
+          title: 'External peer',
+          goal: 'Review without side effects',
+          acceptance: 'Return review',
+          routeOverride: { backend: 'external', model: 'Opus 4.8' },
+        },
+      },
+      enforceDispatch: true,
+    });
+
+    const externalSessionId = session.metadata.agents[handle.agentId]?.externalSessionId;
+    expect(externalSessionId).toEqual(expect.any(String));
+    expect(handle.resumable).toBe(true);
+    await expect(handle.completion).resolves.toEqual({
+      result: `READ_ONLY_SPAWN|CLAUDE_TOOLS_DISABLED|GROK_SANDBOX_READ_ONLY|${externalSessionId}`,
+    });
+
+    const resumed = await host.resume(handle.agentId, {
+      parentToolCallId: 'call_agora_resume',
+      prompt: 'Repair the response contract',
+      description: 'Agora peer repair',
+      runInBackground: false,
+      signal,
+    });
+    await expect(resumed.completion).resolves.toEqual({
+      result: `READ_ONLY_RESUME|CLAUDE_TOOLS_DISABLED|GROK_SANDBOX_READ_ONLY|${externalSessionId}`,
+    });
+
+    const restarted = await host.retry(handle.agentId, {
+      parentToolCallId: 'call_agora_restart',
+      prompt: 'Restart after a transient failure',
+      description: 'Agora peer restart',
+      runInBackground: false,
+      signal,
+    });
+    await expect(restarted.completion).resolves.toEqual({
+      result: `READ_ONLY_RESUME|CLAUDE_TOOLS_DISABLED|GROK_SANDBOX_READ_ONLY|${externalSessionId}`,
+    });
+    expect(session.metadata.agents[handle.agentId]).toMatchObject({
+      externalReadOnly: true,
+      externalSessionId,
+    });
+    expect(acquireSubagentWorktree).toHaveBeenCalledWith(
+      parent.agent.kaos,
+      parent.agent.config.cwd,
+      { scope: ['**/*'] },
+    );
+    expect(finish).toHaveBeenCalledTimes(3);
+    expect(finish).toHaveBeenLastCalledWith({
+      kind: 'discard',
+      reason: 'analysis-only subagent delta discarded',
+    });
+  });
+
+  it('marks read-only handles without dedicated resume args non-resumable and fails closed', async () => {
+    const readStdinScript =
+      "process.stdin.resume();process.stdin.on('end',()=>process.stdout.write('READ_ONLY'))";
+    const parent = testAgent();
+    parent.configure();
+    const finish = vi.fn(async () => ({
+      applied: false,
+      reason: 'analysis-only subagent delta discarded',
+    }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: process.cwd(), finish });
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            resumeArgs: ['-e', readStdinScript],
+            readOnlyLauncher: {
+              command: process.execPath,
+              args: ['-e', readStdinScript, 'CLAUDE_TOOLS_DISABLED'],
+              sandbox: { filesystem: 'read_only' },
+            },
+          },
+        },
+      },
+    });
+    const host = new SessionSubagentHost(session, 'main');
+    const handle = await host.spawn({
+      profileName: 'agora-peer',
+      parentToolCallId: 'call_agora',
+      prompt: 'Review only',
+      description: 'Agora peer review',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        readOnly: true,
+        discardChanges: true,
+        workCard: {
+          id: 'agora-external',
+          title: 'External peer',
+          goal: 'Review without side effects',
+          acceptance: 'Return review',
+          routeOverride: { backend: 'external' },
+        },
+      },
+      enforceDispatch: true,
+    });
+    await expect(handle.completion).resolves.toEqual({ result: 'READ_ONLY' });
+    expect(handle.resumable).toBe(false);
+
+    const resumeOptions = {
+      parentToolCallId: 'call_agora_resume',
+      prompt: 'Continue the review',
+      description: 'Agora peer resume',
+      runInBackground: false,
+      signal,
+    };
+    await expect(host.resume(handle.agentId, resumeOptions)).rejects.toThrow(
+      'read_only_launcher.resume_args; this handle is non-resumable',
+    );
+    await expect(host.retry(handle.agentId, resumeOptions)).rejects.toThrow(
+      'read_only_launcher.resume_args; this handle is non-resumable',
+    );
+  });
 });
 
 describe('SessionSubagentHost route pools', () => {

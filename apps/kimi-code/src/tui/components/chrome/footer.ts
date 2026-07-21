@@ -15,7 +15,7 @@ import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
 import { currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
-import type { ActiveBackgroundAgentStatus, AppState } from '#/tui/types';
+import type { ActiveBackgroundAgentStatus, AgoraStatus, AppState, ResearchStatus } from '#/tui/types';
 import {
   createGitStatusCache,
   formatGitBadgeBase,
@@ -248,6 +248,29 @@ function formatActiveAgentStatus(agent: ActiveBackgroundAgentStatus, colors: Col
   return chalk.hex(colors.primary)(`${agent.agentName} ${metrics}`);
 }
 
+function formatAgoraStatusline(agora: AgoraStatus, statusRow: string): string {
+  const peerSummary = agora.peers
+    .map((peer) => {
+      const route = [peer.backend, peer.model].filter((part): part is string => part !== undefined).join('/');
+      return `${peer.name}${route.length === 0 ? '' : `/${route}`}${peer.status ? `:${peer.status}` : ''}`;
+    })
+    .join(', ');
+  const roles = [
+    `${agora.hostRoute}${agora.hostModel === undefined ? '' : `/${agora.hostModel}`}`,
+    peerSummary.length === 0 ? undefined : peerSummary,
+    agora.terminalState,
+  ].filter((part): part is string => part !== undefined && part.length > 0);
+  const prefix = `[Agora ${agora.phase}${roles.length === 0 ? '' : ` · ${roles.join(' · ')}`}]`;
+  return `${prefix} │ ${statusRow}`;
+}
+
+function formatResearchStatusline(research: ResearchStatus, statusRow: string): string {
+  const fallback = research.fallbackReason === undefined
+    ? ''
+    : ` · main-model fallback:${research.fallbackReason}`;
+  return `[Research ${research.phase} · ${research.focus}${fallback}] │ ${statusRow}`;
+}
+
 function ttlCell(
   lastReplyAt: number | undefined,
   active: boolean,
@@ -282,6 +305,8 @@ export function buildCustomStatuslinePayload(
     totalTokens: state.totalTokens ?? 0,
     lastReplyAt: state.lastReplyAt ?? null,
     streamingPhase: state.streamingPhase,
+    agora: state.agora ?? null,
+    research: state.research ?? null,
     dispatch: {
       active: activeAgents.length,
       queued: Math.max(0, queuedAgents),
@@ -553,6 +578,11 @@ export class FooterComponent implements Component {
     if (statusRow === null) return null;
     if (visibleWidth(statusRow) > width) {
       statusRow = appendAgents(buildStatuslineRow(state, colors, true, customLine)) ?? statusRow;
+    }
+    if (state.agora !== null && state.agora !== undefined) {
+      statusRow = chalk.hex(colors.warning)(formatAgoraStatusline(state.agora, statusRow));
+    } else if (state.research !== null && state.research !== undefined) {
+      statusRow = chalk.hex(colors.primary)(formatResearchStatusline(state.research, statusRow));
     }
     return truncateToWidth(statusRow, width);
   }
