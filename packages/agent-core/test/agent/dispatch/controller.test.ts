@@ -227,3 +227,49 @@ describe('DispatchController', () => {
     ).toMatchObject({ kind: 'rejected', reason: 'cycle-exhausted' });
   });
 });
+
+describe('DispatchController circuit breaker (R-A2)', () => {
+  it('reports no open circuit for a key that never failed', () => {
+    const controller = new DispatchController();
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(false);
+    expect(controller.circuitFailure('scope-a')).toBeUndefined();
+  });
+
+  it('opens the circuit for the exact route that failed under a key', () => {
+    const controller = new DispatchController();
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
+
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(true);
+    expect(controller.circuitFailure('scope-a')).toEqual({
+      failedRoute: 'kimi::fast',
+      errorCode: 'provider.auth_error',
+    });
+  });
+
+  it('does not report a different route under the same key as circuit-open', () => {
+    const controller = new DispatchController();
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
+
+    expect(controller.isCircuitOpen('scope-a', 'kimi::precise')).toBe(false);
+  });
+
+  it('does not leak circuit state across different keys', () => {
+    const controller = new DispatchController();
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
+
+    expect(controller.isCircuitOpen('scope-b', 'kimi::fast')).toBe(false);
+  });
+
+  it('overwrites the recorded failure when the same key opens again for a different route', () => {
+    const controller = new DispatchController();
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
+    controller.openCircuit('scope-a', 'kimi::fallback-1', 'model.not_configured');
+
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(false);
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fallback-1')).toBe(true);
+    expect(controller.circuitFailure('scope-a')).toEqual({
+      failedRoute: 'kimi::fallback-1',
+      errorCode: 'model.not_configured',
+    });
+  });
+});

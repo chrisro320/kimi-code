@@ -204,6 +204,14 @@ export const SubagentPoolRouteSchema = z.object({
 
 export type SubagentPoolRoute = z.infer<typeof SubagentPoolRouteSchema>;
 
+/** R-A2: one entry in the user-approved fallback chain tried, in order, when a route's circuit is open. */
+export const SubagentFallbackRouteSchema = z.object({
+  backend: z.string().min(1),
+  model: z.string().min(1).optional(),
+});
+
+export type SubagentFallbackRoute = z.infer<typeof SubagentFallbackRouteSchema>;
+
 export const SubagentConfigSchema = z.object({
   /**
    * Per-subagent (`Agent` / `AgentSwarm`, foreground and background) timeout
@@ -218,6 +226,15 @@ export const SubagentConfigSchema = z.object({
    * round-robin over these routes instead of the single `routing` entry.
    */
   pools: z.record(z.string().min(1), z.array(SubagentPoolRouteSchema).min(1)).optional(),
+  /**
+   * Ordered list of pre-approved fallback routes tried, in sequence, when
+   * `resolveSpawnRoute` finds the normally-resolved route's circuit open
+   * (R-A2/Case 8). Model replacement after a non-retryable provider/model/
+   * route failure must never be an autonomous choice made at request time —
+   * this is the user's advance approval for exactly which routes may be
+   * substituted, and in what order.
+   */
+  fallbackChain: z.array(SubagentFallbackRouteSchema).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;

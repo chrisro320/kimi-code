@@ -54,6 +54,7 @@ import { SwarmMode } from './swarm';
 import { DispatchModeState } from './dispatch/mode';
 import { DispatchController } from './dispatch/controller';
 import { ToolManager } from './tool/index';
+import { DeterministicFailureFingerprint } from './turn/deterministic-fingerprint';
 import { TurnFlow } from './turn';
 import { KosongLLM } from './turn/kosong-llm';
 import { UsageRecorder } from './usage';
@@ -141,6 +142,7 @@ export class Agent {
   readonly context: ContextMemory;
   readonly config: ConfigState;
   readonly turn: TurnFlow;
+  readonly deterministicFailures: DeterministicFailureFingerprint;
   readonly injection: InjectionManager;
   readonly permission: PermissionManager;
   readonly planMode: PlanMode;
@@ -222,6 +224,7 @@ export class Agent {
     this.context = new ContextMemory(this);
     this.config = new ConfigState(this);
     this.turn = new TurnFlow(this);
+    this.deterministicFailures = new DeterministicFailureFingerprint();
     this.injection = new InjectionManager(this);
     this.permission = new PermissionManager(this, options.permission);
     this.planMode = new PlanMode(this);

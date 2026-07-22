@@ -250,6 +250,7 @@ export type KimiErrorCode =
   | 'session.init_failed'
   | 'agent.not_found'
   | 'agent.not_resumable'
+  | 'agent.deterministic_failure_blocked'
   | 'turn.agent_busy'
   | 'goal.already_exists'
   | 'goal.not_found'
@@ -275,6 +276,7 @@ export type KimiErrorCode =
   | 'provider.rate_limit'
   | 'provider.auth_error'
   | 'provider.connection_error'
+  | 'provider.circuit_open'
   | 'provider.overloaded'
   | 'provider.not_found'
   | 'skill.not_found'
@@ -1237,6 +1239,7 @@ export const kimiErrorCodeSchema = z.enum([
   'session.init_failed',
   'agent.not_found',
   'agent.not_resumable',
+  'agent.deterministic_failure_blocked',
   'turn.agent_busy',
   'goal.already_exists',
   'goal.not_found',
@@ -1262,6 +1265,7 @@ export const kimiErrorCodeSchema = z.enum([
   'provider.rate_limit',
   'provider.auth_error',
   'provider.connection_error',
+  'provider.circuit_open',
   'provider.overloaded',
   'provider.not_found',
   'skill.not_found',

@@ -917,6 +917,11 @@ export class TurnFlow {
               return { continue: false };
             },
             prepareToolExecution: async (ctx) => {
+              const blocked = this.agent.deterministicFailures.checkFingerprint(
+                ctx.toolCall.name,
+                ctx.args,
+              );
+              if (blocked !== null) return { syntheticResult: blocked };
               const cached = deduper.checkSameStep(
                 ctx.toolCall.id,
                 ctx.toolCall.name,
@@ -937,6 +942,11 @@ export class TurnFlow {
                 ctx.toolCall.name,
                 ctx.args,
                 ctx.result,
+              );
+              this.agent.deterministicFailures.recordIfDeterministic(
+                ctx.toolCall.name,
+                ctx.args,
+                finalResult,
               );
               const { isError, output } = finalResult;
               const event = isError === true ? 'PostToolUseFailure' : 'PostToolUse';

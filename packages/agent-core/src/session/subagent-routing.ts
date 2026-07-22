@@ -4,6 +4,7 @@ import type {
   SubagentLauncher,
   SubagentPoolRoute,
 } from '#/config/schema';
+import { dispatchCircuitFallbackKey } from '../agent/dispatch/controller';
 
 export const INTERNAL_SUBAGENT_BACKEND = 'kimi';
 export const EXTERNAL_SUBAGENT_ID_PREFIX = 'external-';
@@ -30,6 +31,18 @@ export type ResolvedSubagentRoute =
       readonly backend: SubagentBackend;
       readonly modelAlias: string | undefined;
     };
+
+/**
+ * Opaque per-route identity string used as the R-A2 circuit-breaker key
+ * component (see `DispatchController.isCircuitOpen`/`openCircuit`) — two
+ * `ResolvedSubagentRoute`s that would launch the same backend+model
+ * combination must produce the same identity regardless of `kind`.
+ */
+export function subagentRouteIdentity(route: ResolvedSubagentRoute): string {
+  return route.kind === 'internal'
+    ? dispatchCircuitFallbackKey(INTERNAL_SUBAGENT_BACKEND, route.modelAlias)
+    : dispatchCircuitFallbackKey(route.backendName, route.modelAlias);
+}
 
 export function resolveSubagentRoute(
   config: KimiConfig,

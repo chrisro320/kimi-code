@@ -12,7 +12,7 @@ import {
 
 import type { Agent } from '../agent';
 import type { PromptOrigin } from '../agent/context';
-import { ErrorCodes, KimiError } from '../errors';
+import { ErrorCodes, isKimiError, KimiError, type KimiErrorCode } from '../errors';
 import { DenyAllPermissionPolicy } from '../agent/permission/policies/deny-all';
 import { isEditingCapableProfile } from '../agent/dispatch/profile';
 import type {
@@ -60,6 +60,7 @@ import {
   resolveSubagentRoute,
   parseExternalSubagentOutput,
   parseExternalSubagentStreamLine,
+  subagentRouteIdentity,
   SubagentRoutePool,
   wrapExternalSubagentPrompt,
   type ExternalSubagentUsage,
@@ -102,6 +103,51 @@ function markExternalRetryEmitted<T>(error: T): T {
 
 function hasExternalRetryEmitted(error: unknown): boolean {
   return typeof error === 'object' && error !== null && EXTERNAL_RETRY_EMITTED in error;
+}
+
+/** Same scope-key derivation used for the escalation one-cycle cap and the R-A2 circuit key. */
+function logicalScopeKeyOf(scope: readonly string[] | undefined): string | undefined {
+  return scope !== undefined && scope.length > 0
+    ? [...scope].map((entry) => entry.trim()).sort().join('|')
+    : undefined;
+}
+
+function describeCircuitAttempt(identity: string, parent: Agent, key: string): string {
+  const errorCode = parent.dispatchController.circuitFailure(key)?.errorCode;
+  return errorCode === undefined ? identity : `${identity} (${errorCode})`;
+}
+
+/**
+ * R-A2 (Case 8): whether a spawn failure is the kind that will not change on
+ * retry — a provider/model/route problem, not a transient network hiccup or
+ * rate limit (those stay `chatWithRetry`'s job) and not a user-initiated
+ * cancellation. Only these open the circuit for the resolved route.
+ */
+const CIRCUIT_OPENING_CODES: ReadonlySet<KimiErrorCode> = new Set([
+  ErrorCodes.PROVIDER_AUTH_ERROR,
+  ErrorCodes.PROVIDER_API_ERROR,
+  ErrorCodes.PROVIDER_FILTERED,
+  ErrorCodes.MODEL_NOT_CONFIGURED,
+  ErrorCodes.MODEL_CONFIG_INVALID,
+  ErrorCodes.AUTH_LOGIN_REQUIRED,
+  ErrorCodes.AGENT_NOT_RESUMABLE,
+]);
+
+function circuitOpeningErrorCode(error: unknown): KimiErrorCode | undefined {
+  if (isKimiError(error)) {
+    return CIRCUIT_OPENING_CODES.has(error.code) ? error.code : undefined;
+  }
+  // A subagent turn failure reaches `spawn()`'s completion rejection as a
+  // plain Error, not a live KimiError instance: `runChildTurnToCompletion`
+  // serializes the turn-ended event's error payload into a
+  // `[code] message`-formatted Error (see its own throw sites). Recover the
+  // code from that convention so a real dispatch failure still opens the
+  // circuit, not just one thrown directly as a KimiError before the turn starts.
+  if (error instanceof Error) {
+    const code = /^\[([a-z][a-z0-9_.]*)\]/.exec(error.message)?.[1] as KimiErrorCode | undefined;
+    if (code !== undefined && CIRCUIT_OPENING_CODES.has(code)) return code;
+  }
+  return undefined;
 }
 
 /**
@@ -275,8 +321,9 @@ export class SessionSubagentHost {
 
     let handle: SubagentHandle;
     let releasePoolSlot: (() => void) | undefined;
+    let resolved: { route: ResolvedSubagentRoute; releasePoolSlot?: () => void; circuitKey?: string };
     try {
-      const resolved = this.resolveSpawnRoute(profile, options);
+      resolved = this.resolveSpawnRoute(parent, profile, options);
       const route = resolved.route;
       releasePoolSlot = resolved.releasePoolSlot;
       if (route.kind === 'external') {
@@ -338,7 +385,10 @@ export class SessionSubagentHost {
       if (reservationId !== undefined) parent.dispatchController.release(reservationId);
       throw error;
     }
-    if (reservationId === undefined && releasePoolSlot === undefined) return handle;
+    const circuitKey = resolved.circuitKey;
+    if (reservationId === undefined && releasePoolSlot === undefined && circuitKey === undefined) {
+      return handle;
+    }
     return {
       ...handle,
       completion: handle.completion.then(
@@ -355,6 +405,19 @@ export class SessionSubagentHost {
             );
           }
           releasePoolSlot?.();
+          // R-A2 (Case 8): only a non-retryable provider/model/route failure
+          // opens the circuit — transient errors stay chatWithRetry's job,
+          // and a user cancellation is not a route problem at all.
+          if (circuitKey !== undefined) {
+            const errorCode = circuitOpeningErrorCode(error);
+            if (errorCode !== undefined) {
+              parent.dispatchController.openCircuit(
+                circuitKey,
+                subagentRouteIdentity(resolved.route),
+                errorCode,
+              );
+            }
+          }
           throw error;
         },
       ),
@@ -372,9 +435,10 @@ export class SessionSubagentHost {
    * existed.
    */
   private resolveSpawnRoute(
+    parent: Agent,
     profile: ResolvedAgentProfile,
     options: SpawnSubagentOptions,
-  ): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void } {
+  ): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void; circuitKey?: string } {
     const config = this.session.options.config ?? { providers: {} };
     if (options.dispatch?.internalOnly === true) {
       return { route: resolveRouteByNames(config, 'kimi', options.modelAlias) };
@@ -386,26 +450,57 @@ export class SessionSubagentHost {
     }
 
     const poolRoutes = profile.name === 'coder' ? config.subagent?.pools?.[profile.name] : undefined;
-    if (poolRoutes === undefined || poolRoutes.length === 0) {
-      return { route: resolveSubagentRoute(config, profile.name, options.modelAlias) };
-    }
+    const resolveDefault = (): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void } => {
+      if (poolRoutes === undefined || poolRoutes.length === 0) {
+        return { route: resolveSubagentRoute(config, profile.name, options.modelAlias) };
+      }
+      const pool = this.getRoutePool(profile.name, poolRoutes);
+      const acquired = pool.acquire();
+      try {
+        return {
+          route: resolveRouteByNames(
+            config,
+            acquired.route.backend,
+            acquired.route.model,
+            acquired.route.thinkingEffort,
+          ),
+          releasePoolSlot: acquired.release,
+        };
+      } catch (error) {
+        acquired.release();
+        throw error;
+      }
+    };
 
-    const pool = this.getRoutePool(profile.name, poolRoutes);
-    const acquired = pool.acquire();
-    try {
-      return {
-        route: resolveRouteByNames(
-          config,
-          acquired.route.backend,
-          acquired.route.model,
-          acquired.route.thinkingEffort,
-        ),
-        releasePoolSlot: acquired.release,
-      };
-    } catch (error) {
-      acquired.release();
-      throw error;
+    // R-A2 (Case 8): before committing to the normally-resolved route, check
+    // whether it already failed non-retryably under this logical task. A
+    // scope-less dispatch has no logical grouping, so its own route identity
+    // doubles as the key (see dispatchCircuitFallbackKey usage below): a
+    // specific backend+model that already failed is skipped next time it
+    // comes up, regardless of which unscoped call resolves it.
+    const scopeKey = logicalScopeKeyOf(options.dispatch?.scope);
+    const resolved = resolveDefault();
+    const resolvedIdentity = subagentRouteIdentity(resolved.route);
+    const key = scopeKey ?? resolvedIdentity;
+    if (!parent.dispatchController.isCircuitOpen(key, resolvedIdentity)) {
+      return { ...resolved, circuitKey: key };
     }
+    resolved.releasePoolSlot?.();
+
+    const chain = config.subagent?.fallbackChain ?? [];
+    const attempts: string[] = [describeCircuitAttempt(resolvedIdentity, parent, key)];
+    for (const candidate of chain) {
+      const candidateRoute = resolveRouteByNames(config, candidate.backend, candidate.model);
+      const candidateIdentity = subagentRouteIdentity(candidateRoute);
+      const candidateKey = scopeKey ?? candidateIdentity;
+      if (!parent.dispatchController.isCircuitOpen(candidateKey, candidateIdentity)) {
+        return { route: candidateRoute, circuitKey: candidateKey };
+      }
+      attempts.push(describeCircuitAttempt(candidateIdentity, parent, candidateKey));
+    }
+    throw new Error(
+      `Dispatch rejected (circuit-open): every route in the fallback chain is circuit-open: ${attempts.join(' -> ')}`,
+    );
   }
 
   private getRoutePool(profileName: string, routes: readonly SubagentPoolRoute[]): SubagentRoutePool {
@@ -466,15 +561,21 @@ export class SessionSubagentHost {
     // the dispatch design notes.
     const escalationKind: DispatchEscalationKind | undefined =
       profile.name === 'coder-ex' ? 'coder-ex' : profile.name === 'reviewer' ? 'reviewer' : undefined;
-    const logicalScopeKey =
-      escalationKind !== undefined && scope !== undefined && scope.length > 0
-        ? [...scope].map((entry) => entry.trim()).sort().join('|')
-        : undefined;
+    // R-A2 widened this from "only when escalating" to "whenever scope is
+    // declared" so non-escalation dispatches (ordinary coder/reviewer runs)
+    // also get a stable key for circuit-breaker bookkeeping (see
+    // dispatchCircuitFallbackKey for the scope-less case). The escalation
+    // one-cycle-per-scope cap below is unaffected: it still only fires when
+    // escalationKind is set.
+    const logicalScopeKey = logicalScopeKeyOf(scope);
 
     const decision = parent.dispatchController.reserve({
       requestId: randomUUID(),
       isEditingCapable,
       scope,
+      // Escalation cycle-tracking is unaffected by the widened key above: a
+      // scope-less escalation/review still has no stable dedupe key and stays
+      // exempt from the one-cycle-per-scope cap (see comment above).
       escalation: logicalScopeKey !== undefined ? escalationKind : undefined,
       logicalScopeKey,
       workCard: dispatch?.workCard,

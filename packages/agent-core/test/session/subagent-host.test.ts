@@ -12,7 +12,7 @@ import type { KimiConfig } from '../../src/config';
 import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
-import { ErrorCodes } from '../../src/errors';
+import { ErrorCodes, KimiError } from '../../src/errors';
 import { Session } from '../../src/session';
 import { collectGitContext } from '../../src/session/git-context';
 import {
@@ -2360,6 +2360,220 @@ describe('SessionSubagentHost route pools', () => {
       externalModelAlias: 'override-model',
       externalSessionId,
     });
+  });
+});
+
+describe('SessionSubagentHost circuit breaker (R-A2)', () => {
+  const SAFE_SUMMARY_SUFFIX =
+    ' The summary stays long enough to skip the automatic continuation retry that pads overly short subagent handoffs before returning them to the parent, since anything under two hundred characters triggers one extra follow-up turn asking for more detail.';
+
+  const CHILD_MODELS = {
+    primary: { provider: 'local', model: 'primary-model', maxContextSize: 128000 },
+    fallback1: { provider: 'local', model: 'fallback1-model', maxContextSize: 128000 },
+    fallback2: { provider: 'local', model: 'fallback2-model', maxContextSize: 128000 },
+  } as const;
+
+  function childInitialConfig(): AgentOptions['config'] {
+    return {
+      providers: { local: { type: 'openai', apiKey: 'test-key' } },
+      models: CHILD_MODELS,
+    };
+  }
+
+  function fallbackConfig(): KimiConfig {
+    return {
+      providers: {},
+      models: CHILD_MODELS,
+      subagent: {
+        routing: { explore: { backend: 'kimi', model: 'primary' } },
+        fallbackChain: [
+          { backend: 'kimi', model: 'fallback1' },
+          { backend: 'kimi', model: 'fallback2' },
+        ],
+      },
+    };
+  }
+
+  it('resolves the configured route unchanged when its circuit is not open', async () => {
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent({ initialConfig: childInitialConfig() });
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Explored normally.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, {}, fallbackConfig());
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(child.agent.config.modelAlias).toBe('primary');
+  });
+
+  it('switches to the first fallback route when the default route is circuit-open', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.dispatchController.openCircuit('kimi::primary', 'kimi::primary', 'provider.auth_error');
+    const child = testAgent({ initialConfig: childInitialConfig() });
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Explored via fallback.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, {}, fallbackConfig());
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(child.agent.config.modelAlias).toBe('fallback1');
+  });
+
+  it('walks past an already-circuit-open fallback to the next one in the chain', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.dispatchController.openCircuit('kimi::primary', 'kimi::primary', 'provider.auth_error');
+    parent.agent.dispatchController.openCircuit(
+      'kimi::fallback1',
+      'kimi::fallback1',
+      'model.not_configured',
+    );
+    const child = testAgent({ initialConfig: childInitialConfig() });
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Explored via second fallback.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, {}, fallbackConfig());
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await handle.completion;
+
+    expect(child.agent.config.modelAlias).toBe('fallback2');
+  });
+
+  it('terminates and reports the full failure chain once every fallback is also circuit-open', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.dispatchController.openCircuit('kimi::primary', 'kimi::primary', 'provider.auth_error');
+    parent.agent.dispatchController.openCircuit(
+      'kimi::fallback1',
+      'kimi::fallback1',
+      'model.not_configured',
+    );
+    parent.agent.dispatchController.openCircuit(
+      'kimi::fallback2',
+      'kimi::fallback2',
+      'auth.login_required',
+    );
+    const child = testAgent();
+    child.configure();
+
+    const session = fakeSession(parent.agent, child.agent, {}, fallbackConfig());
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(
+      host.spawn({
+        profileName: 'explore',
+        parentToolCallId: 'call_explore',
+        prompt: 'look around',
+        description: 'look around',
+        runInBackground: false,
+        signal,
+      }),
+    ).rejects.toThrow(/circuit-open.*kimi::primary.*provider\.auth_error.*kimi::fallback1.*model\.not_configured.*kimi::fallback2.*auth\.login_required/s);
+  });
+
+  it('terminates immediately on an open circuit when no fallbackChain is configured', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.dispatchController.openCircuit('kimi::primary', 'kimi::primary', 'provider.auth_error');
+    const child = testAgent();
+    child.configure();
+
+    const config: KimiConfig = {
+      providers: {},
+      models: { primary: { provider: 'local', model: 'primary-model', maxContextSize: 128000 } },
+      subagent: { routing: { explore: { backend: 'kimi', model: 'primary' } } },
+    };
+    const session = fakeSession(parent.agent, child.agent, {}, config);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(
+      host.spawn({
+        profileName: 'explore',
+        parentToolCallId: 'call_explore',
+        prompt: 'look around',
+        description: 'look around',
+        runInBackground: false,
+        signal,
+      }),
+    ).rejects.toThrow(/circuit-open/);
+  });
+
+  it('opens the circuit on a real non-retryable provider failure, then a later spawn picks the fallback', async () => {
+    const parent = testAgent();
+    parent.configure();
+
+    const failingGenerate: GenerateFn = async () => {
+      throw new KimiError('provider.auth_error', 'Provider authentication failed');
+    };
+    const failingChild = testAgent({ generate: failingGenerate, initialConfig: childInitialConfig() });
+    failingChild.configure();
+
+    const config = fallbackConfig();
+    const failingSession = fakeSession(parent.agent, failingChild.agent, {}, config);
+    const failingHost = new SessionSubagentHost(failingSession, 'main');
+
+    const firstHandle = await failingHost.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore_1',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await expect(firstHandle.completion).rejects.toThrow('Provider authentication failed');
+    expect(parent.agent.dispatchController.isCircuitOpen('kimi::primary', 'kimi::primary')).toBe(true);
+
+    const recoveredChild = testAgent({ initialConfig: childInitialConfig() });
+    recoveredChild.configure();
+    recoveredChild.mockNextResponse({
+      type: 'text',
+      text: `Recovered via fallback after the primary route failed.${SAFE_SUMMARY_SUFFIX}`,
+    });
+    const recoveredSession = fakeSession(parent.agent, recoveredChild.agent, {}, config);
+    const recoveredHost = new SessionSubagentHost(recoveredSession, 'main');
+
+    const secondHandle = await recoveredHost.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_explore_2',
+      prompt: 'look around',
+      description: 'look around',
+      runInBackground: false,
+      signal,
+    });
+    await secondHandle.completion;
+
+    expect(recoveredChild.agent.config.modelAlias).toBe('fallback1');
   });
 });
 

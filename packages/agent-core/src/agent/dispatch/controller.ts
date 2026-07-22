@@ -14,6 +14,8 @@
  * review cycles) are rejected outright and never queued.
  */
 
+import type { KimiErrorCode } from '../../errors/codes';
+
 import { normalizeScopeList, scopesOverlap } from './scope';
 
 export const DISPATCH_MAX_NEW_SPAWNS_PER_TURN = 8;
@@ -111,6 +113,19 @@ export class DispatchController {
   private readonly scopeCycles = new Map<
     string,
     { escalations: number; reviewerRepairs: number }
+  >();
+  /**
+   * R-A2 (Case 8): per-key record of the last non-retryable provider/model/
+   * route failure. Independent of `reservations`/`scopeCycles` — a circuit
+   * can be open with no in-flight reservation, and outlives any single
+   * dispatch. `route` is an opaque caller-defined identity string (e.g.
+   * `backend::model`); the entry only tracks the *last* failed route per
+   * key, so `isCircuitOpen` answers "did this exact route already fail under
+   * this key", not "is any route under this key currently broken".
+   */
+  private readonly circuitState = new Map<
+    string,
+    { readonly openSince: number; readonly failedRoute: string; readonly errorCode: KimiErrorCode }
   >();
 
   /** Reset the per-turn spawn budget at a parent turn boundary; active reservations persist. */
@@ -404,8 +419,31 @@ export class DispatchController {
     }
     if (previousQueuedCount !== this.queuedCount) this.notifyQueuedCountChange();
   }
+
+  /** Record a non-retryable provider/model/route failure so future callers can skip straight to a fallback. */
+  openCircuit(key: string, route: string, errorCode: KimiErrorCode): void {
+    this.circuitState.set(key, { openSince: Date.now(), failedRoute: route, errorCode });
+  }
+
+  /** Whether `route` already failed deterministically under `key` and should not be retried as-is. */
+  isCircuitOpen(key: string, route: string): boolean {
+    return this.circuitState.get(key)?.failedRoute === route;
+  }
+
+  /** The recorded failure for `key`, if its circuit is open — used to report a full fallback-chain failure history. */
+  circuitFailure(
+    key: string,
+  ): { readonly failedRoute: string; readonly errorCode: KimiErrorCode } | undefined {
+    const entry = this.circuitState.get(key);
+    return entry === undefined ? undefined : { failedRoute: entry.failedRoute, errorCode: entry.errorCode };
+  }
 }
 
 function defaultLogicalScopeKey(scope: readonly string[]): string {
   return [...scope].sort().join('|');
+}
+
+/** R-A2 fallback dispatch-circuit key when a spawn has no scope (and thus no `logicalScopeKey`). */
+export function dispatchCircuitFallbackKey(backend: string, model: string | undefined): string {
+  return `${backend}::${model ?? ''}`;
 }

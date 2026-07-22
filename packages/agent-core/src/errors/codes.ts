@@ -33,6 +33,7 @@ export const ErrorCodes = {
 
   AGENT_NOT_FOUND: 'agent.not_found',
   AGENT_NOT_RESUMABLE: 'agent.not_resumable',
+  DETERMINISTIC_FAILURE_BLOCKED: 'agent.deterministic_failure_blocked',
   TURN_AGENT_BUSY: 'turn.agent_busy',
 
   GOAL_ALREADY_EXISTS: 'goal.already_exists',
@@ -54,6 +55,7 @@ export const ErrorCodes = {
   PROVIDER_RATE_LIMIT: 'provider.rate_limit',
   PROVIDER_AUTH_ERROR: 'provider.auth_error',
   PROVIDER_CONNECTION_ERROR: 'provider.connection_error',
+  PROVIDER_CIRCUIT_OPEN: 'provider.circuit_open',
 
   SKILL_NOT_FOUND: 'skill.not_found',
   SKILL_TYPE_UNSUPPORTED: 'skill.type_unsupported',
@@ -231,6 +233,12 @@ export const KIMI_ERROR_INFO = {
     action:
       'Dispatch a fresh subagent instead of resuming; prior partial output/candidate is preserved separately.',
   },
+  'agent.deterministic_failure_blocked': {
+    title: 'Blocked repeat of a deterministic failure',
+    retryable: false,
+    public: true,
+    action: 'Change the tool call inputs; the prior identical call failed for a reason that will not change on retry.',
+  },
   'turn.agent_busy': {
     title: 'Agent is busy',
     retryable: true,
@@ -341,6 +349,12 @@ export const KIMI_ERROR_INFO = {
     retryable: true,
     public: true,
     action: 'Check network connectivity and retry.',
+  },
+  'provider.circuit_open': {
+    title: 'Provider circuit open',
+    retryable: false,
+    public: true,
+    action: 'This route failed enough times to open its circuit; configure a fallbackChain or fix the route before retrying.',
   },
 
   'skill.not_found': {
