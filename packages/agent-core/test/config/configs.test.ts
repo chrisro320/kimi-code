@@ -230,6 +230,11 @@ max_context_size = 128000
 backend = "custom-cli"
 model = "fast"
 
+[subagent.routing.reviewer]
+backend = "kimi"
+model = "fast"
+thinking_effort = "high"
+
 [subagent.backends.custom-cli]
 command = "custom-agent"
 args = ["--model", "{model}", "--cwd", "{cwd}"]
@@ -246,7 +251,10 @@ network = "none"
 `;
     const config = parseConfigString(toml, configPath);
     expect(config.subagent).toEqual({
-      routing: { coder: { backend: 'custom-cli', model: 'fast' } },
+      routing: {
+        coder: { backend: 'custom-cli', model: 'fast' },
+        reviewer: { backend: 'kimi', model: 'fast', thinkingEffort: 'high' },
+      },
       backends: {
         'custom-cli': {
           command: 'custom-agent',
@@ -265,6 +273,7 @@ network = "none"
     await writeConfigFile(configPath, config);
     const text = await readFile(configPath, 'utf-8');
     expect(text).toContain('[subagent.routing.coder]');
+    expect(text).toContain('thinking_effort = "high"');
     expect(text).toContain('[subagent.backends.custom-cli]');
     expect(text).toContain('[subagent.backends.custom-cli.read_only_launcher]');
     expect(text).toContain('[subagent.backends.custom-cli.read_only_launcher.sandbox]');
@@ -291,6 +300,7 @@ max_context_size = 128000
 [[subagent.pools.coder]]
 backend = "kimi"
 model = "fast"
+thinking_effort = "low"
 weight = 3
 
 [[subagent.pools.coder]]
@@ -306,7 +316,7 @@ args = ["--model", "{model}", "--cwd", "{cwd}"]
     const config = parseConfigString(toml, configPath);
     expect(config.subagent?.pools).toEqual({
       coder: [
-        { backend: 'kimi', model: 'fast', weight: 3 },
+        { backend: 'kimi', model: 'fast', thinkingEffort: 'low', weight: 3 },
         { backend: 'custom-cli', model: 'precise', maxConcurrency: 2, weight: 1 },
       ],
     });

@@ -22,8 +22,8 @@ const config: KimiConfig = {
   },
   subagent: {
     routing: {
-      coder: { model: 'fast' },
-      explore: { backend: 'custom-cli', model: 'precise' },
+      coder: { model: 'fast', thinkingEffort: 'high' },
+      explore: { backend: 'custom-cli', model: 'precise', thinkingEffort: 'low' },
     },
     backends: {
       'custom-cli': {
@@ -40,6 +40,7 @@ describe('resolveSubagentRoute', () => {
     expect(resolveSubagentRoute(config, 'plan')).toEqual({
       kind: 'internal',
       modelAlias: undefined,
+      thinkingEffort: undefined,
     });
   });
 
@@ -47,10 +48,12 @@ describe('resolveSubagentRoute', () => {
     expect(resolveSubagentRoute(config, 'coder')).toEqual({
       kind: 'internal',
       modelAlias: 'fast',
+      thinkingEffort: 'high',
     });
     expect(resolveSubagentRoute(config, 'coder', 'precise')).toEqual({
       kind: 'internal',
       modelAlias: 'precise',
+      thinkingEffort: 'high',
     });
   });
 
@@ -58,6 +61,7 @@ describe('resolveSubagentRoute', () => {
     const route = resolveSubagentRoute(config, 'explore');
     expect(route.kind).toBe('external');
     if (route.kind !== 'external') throw new Error('expected external route');
+    expect(route).not.toHaveProperty('thinkingEffort');
     expect(materializeBackendArgs(route, '/workspace/project')).toEqual([
       '--model',
       'precise',
@@ -110,10 +114,17 @@ describe('resolveRouteByNames', () => {
     expect(resolveRouteByNames(config, undefined, undefined)).toEqual({
       kind: 'internal',
       modelAlias: undefined,
+      thinkingEffort: undefined,
     });
     expect(resolveRouteByNames(config, 'kimi', 'fast')).toEqual({
       kind: 'internal',
       modelAlias: 'fast',
+      thinkingEffort: undefined,
+    });
+    expect(resolveRouteByNames(config, 'kimi', 'fast', 'low')).toEqual({
+      kind: 'internal',
+      modelAlias: 'fast',
+      thinkingEffort: 'low',
     });
   });
 

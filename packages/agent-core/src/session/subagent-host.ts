@@ -296,7 +296,15 @@ export class SessionSubagentHost {
             childRunOptions.dispatch?.discardChanges === true,
           );
           try {
-            await this.configureChild(parent, agent, profile, route.modelAlias, worktree?.cwd, childRunOptions);
+            await this.configureChild(
+              parent,
+              agent,
+              profile,
+              route.modelAlias,
+              route.kind === 'internal' ? route.thinkingEffort : undefined,
+              worktree?.cwd,
+              childRunOptions,
+            );
             const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
             const finishResult = worktree
               ? await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'))
@@ -386,7 +394,12 @@ export class SessionSubagentHost {
     const acquired = pool.acquire();
     try {
       return {
-        route: resolveRouteByNames(config, acquired.route.backend, acquired.route.model),
+        route: resolveRouteByNames(
+          config,
+          acquired.route.backend,
+          acquired.route.model,
+          acquired.route.thinkingEffort,
+        ),
         releasePoolSlot: acquired.release,
       };
     } catch (error) {
@@ -962,13 +975,14 @@ export class SessionSubagentHost {
     child: Agent,
     profile: ResolvedAgentProfile,
     modelAlias?: string,
+    thinkingEffort?: string,
     isolatedCwd?: string,
     options?: RunSubagentOptions,
   ): Promise<void> {
     child.config.update({
       cwd: isolatedCwd ?? parent.config.cwd,
       modelAlias: modelAlias ?? parent.config.modelAlias,
-      thinkingEffort: parent.config.thinkingEffort,
+      thinkingEffort: thinkingEffort ?? parent.config.thinkingEffort,
     });
 
     const context = await prepareSystemPromptContext(

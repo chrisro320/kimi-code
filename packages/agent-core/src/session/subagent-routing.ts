@@ -22,6 +22,7 @@ export type ResolvedSubagentRoute =
   | {
       readonly kind: 'internal';
       readonly modelAlias: string | undefined;
+      readonly thinkingEffort: string | undefined;
     }
   | {
       readonly kind: 'external';
@@ -37,7 +38,7 @@ export function resolveSubagentRoute(
 ): ResolvedSubagentRoute {
   const routing = config.subagent?.routing?.[profileName];
   const modelAlias = modelOverride ?? routing?.model;
-  return resolveRouteByNames(config, routing?.backend, modelAlias);
+  return resolveRouteByNames(config, routing?.backend, modelAlias, routing?.thinkingEffort);
 }
 
 /**
@@ -51,12 +52,13 @@ export function resolveRouteByNames(
   config: KimiConfig,
   backendName: string | undefined,
   modelAlias: string | undefined,
+  thinkingEffort?: string,
 ): ResolvedSubagentRoute {
   if (backendName === undefined || backendName === INTERNAL_SUBAGENT_BACKEND) {
     if (modelAlias !== undefined && config.models?.[modelAlias] === undefined) {
       throw new Error(`Subagent model alias "${modelAlias}" is not defined in config.models.`);
     }
-    return { kind: 'internal', modelAlias };
+    return { kind: 'internal', modelAlias, thinkingEffort };
   }
   const backend = config.subagent?.backends?.[backendName];
   if (backend === undefined) {

@@ -7,6 +7,7 @@ import { currentTheme } from '#/tui/theme';
 const ENTER = '\r';
 const DOWN = '\u001B[B';
 const UP = '\u001B[A';
+const RIGHT = '\u001B[C';
 const CLEAR_LINE = '\u0015';
 const DELETE = 'd';
 const CONFIRM = 'y';
@@ -22,10 +23,12 @@ function makeConfig() {
     models: {
       fast: {
         provider: 'kimi', model: 'kimi-fast', maxContextSize: 128_000,
+        capabilities: ['thinking'], supportEfforts: ['low', 'high'], defaultEffort: 'low',
       },
       strong: {
         provider: 'kimi', model: 'kimi-strong', maxContextSize: 256_000,
-      },
+        capabilities: ['thinking'], supportEfforts: ['low', 'medium', 'high'], defaultEffort: 'medium',
+      }
     },
     providers: {},
     subagent: {
@@ -91,10 +94,13 @@ describe('handleSubagentCommand', () => {
     profilePicker.handleInput(ENTER);
     expect(picker(host, 1).render(100).join('\n')).toContain('Configure subagent: coder');
     picker(host, 1).handleInput(ENTER);
+    expect(picker(host, 2).render(100).join('\n')).toContain('Thinking');
+    picker(host, 2).handleInput(RIGHT);
+    picker(host, 2).handleInput(ENTER);
 
     await vi.waitFor(() => {
       expect(harness.setConfig).toHaveBeenCalledWith({
-        subagent: { routing: { coder: { backend: 'kimi', model: 'fast' } } },
+        subagent: { routing: { coder: { backend: 'kimi', model: 'fast', thinkingEffort: 'low' } } },
       });
     });
     await vi.waitFor(() => {
@@ -155,12 +161,15 @@ describe('handleSubagentCommand', () => {
     const addPicker = picker(host, 2);
     addPicker.handleInput(DOWN);
     addPicker.handleInput(ENTER);
-    expect(picker(host, 3).render(100).join('\n')).toContain('Coder pool weight');
-    picker(host, 3).handleInput(CLEAR_LINE);
-    picker(host, 3).handleInput('2');
+    expect(picker(host, 3).render(100).join('\n')).toContain('Thinking');
+    picker(host, 3).handleInput(RIGHT);
     picker(host, 3).handleInput(ENTER);
-    expect(picker(host, 4).render(100).join('\n')).toContain('Coder pool max concurrency');
+    expect(picker(host, 4).render(100).join('\n')).toContain('Coder pool weight');
+    picker(host, 4).handleInput(CLEAR_LINE);
+    picker(host, 4).handleInput('2');
     picker(host, 4).handleInput(ENTER);
+    expect(picker(host, 5).render(100).join('\n')).toContain('Coder pool max concurrency');
+    picker(host, 5).handleInput(ENTER);
 
     await vi.waitFor(() => {
       expect(harness.setConfig).toHaveBeenCalledWith({
@@ -168,7 +177,7 @@ describe('handleSubagentCommand', () => {
           pools: {
             coder: [
               { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
-              { backend: 'kimi', model: 'strong', weight: 2, maxConcurrency: 1 },
+              { backend: 'kimi', model: 'strong', thinkingEffort: 'low', weight: 2, maxConcurrency: 1 },
             ],
           },
         },
@@ -217,6 +226,7 @@ describe('handleSubagentCommand', () => {
     picker(host, 2).handleInput(ENTER);
     picker(host, 3).handleInput(ENTER);
     picker(host, 4).handleInput(ENTER);
+    picker(host, 5).handleInput(ENTER);
 
     await vi.waitFor(() => {
       expect(host.showError).toHaveBeenCalledWith('Coder pool already contains route kimi/fast.');
@@ -256,16 +266,19 @@ describe('handleSubagentCommand', () => {
     picker(edit.host).handleInput(ENTER);
     picker(edit.host, 1).handleInput(ENTER);
     picker(edit.host, 2).handleInput(ENTER);
-    picker(edit.host, 3).handleInput(CLEAR_LINE);
-    picker(edit.host, 3).handleInput('3');
+    expect(picker(edit.host, 3).render(100).join('\n')).toContain('Thinking');
+    picker(edit.host, 3).handleInput(RIGHT);
     picker(edit.host, 3).handleInput(ENTER);
+    picker(edit.host, 4).handleInput(CLEAR_LINE);
+    picker(edit.host, 4).handleInput('3');
     picker(edit.host, 4).handleInput(ENTER);
+    picker(edit.host, 5).handleInput(ENTER);
     await vi.waitFor(() => {
       expect(edit.harness.setConfig).toHaveBeenCalledWith({
         subagent: {
           pools: {
             coder: [
-              { backend: 'kimi', model: 'fast', weight: 3, maxConcurrency: 1 },
+              { backend: 'kimi', model: 'fast', thinkingEffort: 'low', weight: 3, maxConcurrency: 1 },
               { backend: 'grok', weight: 1, maxConcurrency: 1 },
             ],
           },

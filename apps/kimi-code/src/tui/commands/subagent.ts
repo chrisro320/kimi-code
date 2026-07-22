@@ -1,4 +1,4 @@
-import type { KimiConfig } from '@moonshot-ai/kimi-code-sdk';
+import type { KimiConfig, ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
 
 import { ChoicePickerComponent, type ChoiceOption } from '../components/dialogs/choice-picker';
 import {
@@ -6,6 +6,7 @@ import {
   type CoderPoolRoute,
 } from '../components/dialogs/coder-pool-manager';
 import { NumericInputDialogComponent } from '../components/dialogs/numeric-input-dialog';
+import { ModelSelectorComponent, type ModelSelection } from '../components/dialogs/model-selector';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { SlashCommandHost } from './dispatch';
 
@@ -18,6 +19,7 @@ type RouteChoice =
   | { readonly kind: 'backend'; readonly name: string };
 
 type ProfileName = string;
+type InternalCoderPoolRoute = CoderPoolRoute & { readonly thinkingEffort?: ThinkingEffort };
 
 export async function handleSubagentCommand(host: SlashCommandHost, args: string): Promise<void> {
   const requestedProfile = args.trim();
@@ -153,7 +155,7 @@ function showRoutePicker(host: SlashCommandHost, config: KimiConfig, profile: Pr
         }
         const choice = parseRouteChoice(value);
         if (choice.kind === 'model') {
-          void saveRoute(host, config, profile, { backend: INTERNAL_BACKEND, model: choice.alias });
+          showInternalRouteModelPicker(host, config, profile, choice.alias);
           return;
         }
         const backend = config.subagent?.backends?.[choice.name];
@@ -172,6 +174,44 @@ function showRoutePicker(host: SlashCommandHost, config: KimiConfig, profile: Pr
       },
     }),
   );
+}
+
+function showInternalRouteModelPicker(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  profile: ProfileName,
+  selectedAlias: string,
+): void {
+  const current = config.subagent?.routing?.[profile];
+  const currentIsInternal = current?.backend === undefined || current.backend === INTERNAL_BACKEND;
+  const currentValue = currentIsInternal ? current?.model ?? selectedAlias : selectedAlias;
+  const currentThinkingEffort = currentIsInternal ? current?.thinkingEffort ?? 'off' : 'off';
+  host.mountEditorReplacement(
+    new ModelSelectorComponent({
+      models: config.models ?? {},
+      currentValue,
+      selectedValue: selectedAlias,
+      currentThinkingEffort,
+      searchable: true,
+      onSelect: (selection) => {
+        host.restoreEditor();
+        void saveRoute(host, config, profile, internalRoute(selection));
+      },
+      onCancel: () => host.restoreEditor(),
+    }),
+  );
+}
+
+function internalRoute(selection: ModelSelection): {
+  readonly backend: string;
+  readonly model: string;
+  readonly thinkingEffort: ThinkingEffort;
+} {
+  return {
+    backend: INTERNAL_BACKEND,
+    model: selection.alias,
+    thinkingEffort: selection.thinking,
+  };
 }
 
 function showExternalModelPicker(
@@ -249,7 +289,7 @@ function showPoolRoutePicker(host: SlashCommandHost, config: KimiConfig): void {
         host.restoreEditor();
         const choice = parseRouteChoice(value);
         if (choice.kind === 'model') {
-          showPoolRouteSettings(host, config, { backend: INTERNAL_BACKEND, model: choice.alias });
+          showInternalPoolModelPicker(host, config, choice.alias);
           return;
         }
         const backend = config.subagent?.backends?.[choice.name];
@@ -262,6 +302,33 @@ function showPoolRoutePicker(host: SlashCommandHost, config: KimiConfig): void {
         } else {
           showPoolRouteSettings(host, config, { backend: choice.name });
         }
+      },
+      onCancel: () => host.restoreEditor(),
+    }),
+  );
+}
+
+function showInternalPoolModelPicker(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  selectedAlias: string,
+  route?: InternalCoderPoolRoute,
+  replaceIndex?: number,
+): void {
+  const currentValue = route?.model ?? selectedAlias;
+  host.mountEditorReplacement(
+    new ModelSelectorComponent({
+      models: config.models ?? {},
+      currentValue,
+      selectedValue: selectedAlias,
+      currentThinkingEffort: route?.thinkingEffort ?? 'off',
+      searchable: true,
+      onSelect: (selection) => {
+        host.restoreEditor();
+        showPoolRouteSettings(host, config, {
+          ...route,
+          ...internalRoute(selection),
+        }, replaceIndex);
       },
       onCancel: () => host.restoreEditor(),
     }),
@@ -338,20 +405,27 @@ function showPoolNumericSetting(
 }
 
 function showPoolMemberActions(host: SlashCommandHost, config: KimiConfig, index: number): void {
-  const route = (config.subagent?.pools?.['coder'] ?? [])[index] as CoderPoolRoute | undefined;
+  const route = (config.subagent?.pools?.['coder'] ?? [])[index] as InternalCoderPoolRoute | undefined;
   if (route === undefined) return;
   host.mountEditorReplacement(
     new ChoicePickerComponent({
       title: `Manage coder route: ${route.backend}${route.model === undefined ? '' : `/${route.model}`}`,
       hint: '↑↓ navigate · Enter select · Esc cancel',
       options: [
-        { value: 'edit', label: 'Edit weight and concurrency' },
+        { value: 'edit', label: 'Edit route, weight, and concurrency' },
         { value: 'remove', label: 'Remove route', tone: 'danger' },
       ],
       onSelect: (action) => {
         host.restoreEditor();
-        if (action === 'edit') showPoolNumericSetting(host, config, route, 'weight', route.weight ?? 1, false, index);
-        else void removePoolRoute(host, config, index);
+        if (action === 'edit') {
+          if (route.backend === INTERNAL_BACKEND) {
+            showInternalPoolModelPicker(host, config, route.model ?? '', route, index);
+          } else {
+            showPoolNumericSetting(host, config, route, 'weight', route.weight ?? 1, false, index);
+          }
+        } else {
+          void removePoolRoute(host, config, index);
+        }
       },
       onCancel: () => host.restoreEditor(),
     }),
@@ -408,7 +482,7 @@ async function saveRoute(
   host: SlashCommandHost,
   _config: KimiConfig,
   profile: ProfileName,
-  route: { readonly backend: string; readonly model?: string },
+  route: { readonly backend: string; readonly model?: string; readonly thinkingEffort?: ThinkingEffort },
 ): Promise<void> {
   try {
     await host.harness.setConfig({

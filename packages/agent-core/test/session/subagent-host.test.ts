@@ -2016,8 +2016,8 @@ describe('SessionSubagentHost route pools', () => {
       subagent: {
         pools: {
           coder: [
-            { backend: 'kimi', model: 'fast', weight: 3 },
-            { backend: 'kimi', model: 'precise', weight: 1 },
+            { backend: 'kimi', model: 'fast', thinkingEffort: 'low', weight: 3 },
+            { backend: 'kimi', model: 'precise', thinkingEffort: 'high', weight: 1 },
           ],
         },
       },
@@ -2040,6 +2040,7 @@ describe('SessionSubagentHost route pools', () => {
     const host = new SessionSubagentHost(session, 'main');
 
     const pickedModels: (string | undefined)[] = [];
+    const pickedEfforts: (string | undefined)[] = [];
     for (let i = 0; i < 4; i += 1) {
       child.mockNextResponse({
         type: 'text',
@@ -2055,11 +2056,13 @@ describe('SessionSubagentHost route pools', () => {
       });
       await handle.completion;
       pickedModels.push(child.agent.config.modelAlias);
+      pickedEfforts.push(child.agent.config.thinkingEffort);
     }
 
     // Deterministic smooth weighted round-robin (nginx-style) over a 3:1
     // weight split resolves to A,A,B,A.
     expect(pickedModels).toEqual(['fast', 'fast', 'precise', 'fast']);
+    expect(pickedEfforts).toEqual(['low', 'low', 'high', 'low']);
   });
 
   it('ignores the pool for non-coder profiles and profiles without a configured pool', async () => {
@@ -2186,12 +2189,23 @@ describe('SessionSubagentHost route pools', () => {
         precise: { provider: 'local', model: 'precise-model', maxContextSize: 128000 },
       },
       subagent: {
-        routing: { coder: { model: 'fast' } },
+        routing: { coder: { model: 'fast', thinkingEffort: 'low' } },
       },
     };
 
     const parent = testAgent();
-    parent.configure();
+    parent.configure({
+      modelCapabilities: {
+        image_in: false,
+        video_in: false,
+        audio_in: false,
+        thinking: true,
+        tool_use: true,
+        max_context_tokens: 128000,
+      },
+    });
+    parent.agent.config.update({ thinkingEffort: 'high' });
+    expect(parent.agent.config.thinkingEffort).toBe('on');
     const child = testAgent({
       initialConfig: {
         providers: { local: { type: 'openai', apiKey: 'test-key' } },
@@ -2229,6 +2243,25 @@ describe('SessionSubagentHost route pools', () => {
     });
     await overridden.completion;
     expect(child.agent.config.modelAlias).toBe('precise');
+    expect(child.agent.config.thinkingEffort).toBe('on');
+
+    child.mockNextResponse({
+      type: 'text',
+      text: `Completed the internal-only spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
+    });
+    const internalOnly = await host.spawn({
+      profileName: 'coder',
+      modelAlias: 'precise',
+      parentToolCallId: 'call_internal_only',
+      prompt: 'use the parent effort',
+      description: 'use the parent effort',
+      runInBackground: false,
+      signal,
+      dispatch: { internalOnly: true },
+    });
+    await internalOnly.completion;
+    expect(child.agent.config.modelAlias).toBe('precise');
+    expect(child.agent.config.thinkingEffort).toBe('on');
 
     child.mockNextResponse({
       type: 'text',
@@ -2245,6 +2278,7 @@ describe('SessionSubagentHost route pools', () => {
     await normal.completion;
     // The override was one-shot: config.subagent.routing.coder wins again.
     expect(child.agent.config.modelAlias).toBe('fast');
+    expect(child.agent.config.thinkingEffort).toBe('low');
   });
 
   it('resumes and retries an external coder through its recorded agent, session, backend, and model', async () => {

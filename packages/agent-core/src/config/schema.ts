@@ -183,6 +183,8 @@ export const SubagentRoutingSchema = z.object({
   backend: z.string().min(1).optional(),
   /** Model alias used by this subagent type. */
   model: z.string().min(1).optional(),
+  /** Thinking effort for an in-process Kimi route; external backends ignore it. */
+  thinkingEffort: z.string().min(1).optional(),
 });
 
 export type SubagentRouting = z.infer<typeof SubagentRoutingSchema>;
@@ -192,6 +194,8 @@ export const SubagentPoolRouteSchema = z.object({
   backend: z.string().min(1),
   /** Model alias used when this route is selected. */
   model: z.string().min(1).optional(),
+  /** Thinking effort for an in-process Kimi route; external backends ignore it. */
+  thinkingEffort: z.string().min(1).optional(),
   /** Max concurrently active spawns through this route. Unset means unlimited. */
   maxConcurrency: z.number().int().min(1).optional(),
   /** Relative weight for round-robin selection. Defaults to 1. */
