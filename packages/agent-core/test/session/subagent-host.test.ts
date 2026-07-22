@@ -26,6 +26,7 @@ import {
   acquireSubagentWorktree,
   type EditingCandidateDraft,
 } from '../../src/session/subagent-worktree';
+import { resolveSwarmMaxConcurrency } from '../../src/session/subagent-batch';
 import { abortError, userCancellationReason } from '../../src/utils/abort';
 import { testAgent, type AgentTestContext } from '../agent/harness/agent';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
@@ -48,6 +49,25 @@ vi.mock('../../src/session/subagent-worktree', async (importOriginal) => {
     ...actual,
     acquireSubagentWorktree: vi.fn(async () => null),
   };
+});
+
+// R-C1 wiring check (`SessionSubagentHost circuit breaker` describe block
+// below): records the `maxConcurrency` every `SubagentBatch` construction
+// received, without changing any behavior (the spy subclass just forwards to
+// the real implementation via `super(...)`). Lets the test assert what
+// `runQueued()` actually computed and passed through, instead of re-testing
+// `SubagentBatch`'s own concurrency enforcement (already covered in
+// subagent-batch.test.ts).
+const capturedBatchMaxConcurrency: Array<number | undefined> = [];
+vi.mock('../../src/session/subagent-batch', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/session/subagent-batch')>();
+  class SpySubagentBatch<T> extends actual.SubagentBatch<T> {
+    constructor(...args: ConstructorParameters<typeof actual.SubagentBatch<T>>) {
+      super(...args);
+      capturedBatchMaxConcurrency.push(args[2]?.maxConcurrency);
+    }
+  }
+  return { ...actual, SubagentBatch: SpySubagentBatch };
 });
 
 const signal = new AbortController().signal;
@@ -2574,6 +2594,117 @@ describe('SessionSubagentHost circuit breaker (R-A2)', () => {
     await secondHandle.completion;
 
     expect(recoveredChild.agent.config.modelAlias).toBe('fallback1');
+  });
+});
+
+describe('SessionSubagentHost concurrency risk gate (R-C1)', () => {
+  const SAFE_SUMMARY_SUFFIX =
+    ' The summary stays long enough to skip the automatic continuation retry that pads overly short subagent handoffs before returning them to the parent, since anything under two hundred characters triggers one extra follow-up turn asking for more detail.';
+
+  async function makeRepo(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-subagent-risk-wiring-'));
+    tempDirs.push(dir);
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    await execFileAsync('git', ['init', '-q'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.test'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    return dir;
+  }
+
+  function editingTask(scope: readonly string[]): QueuedSubagentTask {
+    return {
+      kind: 'spawn',
+      resumeAgentId: undefined,
+      data: undefined,
+      profileName: 'coder',
+      parentToolCallId: 'call_swarm',
+      prompt: 'do editing work',
+      description: 'do editing work',
+      runInBackground: false,
+      dispatch: { scope },
+      signal,
+    };
+  }
+
+  it('forces maxConcurrency to 1 when the batch scope is dirty', async () => {
+    capturedBatchMaxConcurrency.length = 0;
+    const dir = await makeRepo();
+    await mkdir(join(dir, 'src/a'), { recursive: true });
+    await writeFile(join(dir, 'src/a/file.ts'), 'export const a = 1;');
+
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.config.update({ cwd: dir });
+    const child = testAgent();
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Done editing.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, { 'agent-0': {} } as never);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await host.runQueued([editingTask(['src/a'])]);
+
+    expect(capturedBatchMaxConcurrency).toEqual([1]);
+  });
+
+  it('leaves maxConcurrency unchanged when the batch scope is clean', async () => {
+    capturedBatchMaxConcurrency.length = 0;
+    const dir = await makeRepo();
+    await mkdir(join(dir, 'src/a'), { recursive: true });
+    await writeFile(join(dir, 'src/a/file.ts'), 'export const a = 1;');
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    await execFileAsync('git', ['add', '-A'], { cwd: dir });
+    await execFileAsync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });
+
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.config.update({ cwd: dir });
+    const child = testAgent();
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Done editing.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, { 'agent-0': {} } as never);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await host.runQueued([editingTask(['src/a'])]);
+
+    expect(capturedBatchMaxConcurrency).toEqual([resolveSwarmMaxConcurrency()]);
+  });
+
+  it('skips risk detection entirely for a read-only batch', async () => {
+    capturedBatchMaxConcurrency.length = 0;
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-subagent-risk-readonly-'));
+    tempDirs.push(dir);
+
+    const parent = testAgent();
+    parent.configure();
+    parent.agent.config.update({ cwd: dir });
+    const child = testAgent();
+    child.configure();
+    child.mockNextResponse({ type: 'text', text: `Explored.${SAFE_SUMMARY_SUFFIX}` });
+
+    const session = fakeSession(parent.agent, child.agent, { 'agent-0': {} } as never);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await host.runQueued([
+      {
+        kind: 'spawn',
+        resumeAgentId: undefined,
+        data: undefined,
+        profileName: 'explore',
+        parentToolCallId: 'call_swarm',
+        prompt: 'look around',
+        description: 'look around',
+        runInBackground: false,
+        signal,
+      },
+    ]);
+
+    expect(capturedBatchMaxConcurrency).toEqual([resolveSwarmMaxConcurrency()]);
   });
 });
 

@@ -66,6 +66,11 @@ import {
   type ExternalSubagentUsage,
   type ResolvedSubagentRoute,
 } from './subagent-routing';
+import {
+  DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+  resolveEffectiveMaxConcurrency,
+  type RiskCheckItem,
+} from './subagent-risk';
 import SUMMARY_CONTINUATION_PROMPT from './summary-continuation.md?raw';
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -917,8 +922,39 @@ export class SessionSubagentHost {
   }
 
   async runQueued<T>(tasks: readonly QueuedSubagentTask<T>[]): Promise<Array<SubagentResult<T>>> {
-    const maxConcurrency = resolveSwarmMaxConcurrency();
+    const configuredMaxConcurrency = resolveSwarmMaxConcurrency();
+    const maxConcurrency = await this.resolveQueuedMaxConcurrency(tasks, configuredMaxConcurrency);
     return new SubagentBatch(this, tasks, { maxConcurrency }).run();
+  }
+
+  /**
+   * R-C1 (Case 9): before honoring the configured/pool concurrency cap,
+   * check whether this batch itself looks risky (dirty scope, too many
+   * concurrent editors, or file-family overlap — see subagent-risk.ts) and
+   * silently force `maxConcurrency` to 1 if so. No ask, no turn interruption:
+   * the model's AgentSwarm call is unaffected, this batch just runs slower.
+   * A read-only batch (no editing-capable item) skips detection entirely.
+   */
+  private async resolveQueuedMaxConcurrency<T>(
+    tasks: readonly QueuedSubagentTask<T>[],
+    configured: number | undefined,
+  ): Promise<number | undefined> {
+    const parent = await this.session.ensureAgentResumed(this.ownerAgentId);
+    const items: RiskCheckItem[] = tasks.map((task) => {
+      let isEditingCapable = false;
+      try {
+        isEditingCapable = isEditingCapableProfile(this.resolveProfile(parent, task.profileName));
+      } catch {
+        // An unresolvable profile is not this function's problem to report;
+        // treat it as non-editing so risk detection degrades safely instead
+        // of throwing ahead of the batch's own profile-resolution error.
+      }
+      return { isEditingCapable, scope: task.dispatch?.scope };
+    });
+    return resolveEffectiveMaxConcurrency(items, configured, {
+      workspaceDir: parent.config.cwd,
+      concurrencyThreshold: DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+    });
   }
 
   suspended(event: SubagentSuspendedEvent): void {
