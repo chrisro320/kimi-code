@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { ErrorCodes, KimiError } from '#/errors';
 import { getRootLogger, log } from '#/logging/logger';
 import { PluginManager } from '#/plugin';
-import type { AgoraLifecycleAdapter } from '../agora/lifecycle';
+import type { AgoraLifecycleAdapter, AgoraLifecycleCapabilityToken } from '../agora/lifecycle';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
@@ -231,6 +231,11 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   /** Owner-scoped [image] limits; reload pushes the new config via setConfig. */
   readonly imageLimits: ImageLimits;
   private readonly agoraLifecycleAdapter: AgoraLifecycleAdapter | undefined;
+  /**
+   * Agora bearer vault shared by every SessionAPIImpl this core builds, so the
+   * secret survives session reloads (see SessionAPIImpl). Process-scoped only.
+   */
+  readonly agoraCapabilityVault = new Map<string, AgoraLifecycleCapabilityToken>();
 
   constructor(
     protected readonly rpcClient: CoreRPCClient,
@@ -632,7 +637,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   async renameSession({ sessionId, ...payload }: RenameSessionRequest): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session !== undefined) {
-      await new SessionAPIImpl(session).renameSession(payload);
+      await new SessionAPIImpl(session, this.agoraCapabilityVault).renameSession(payload);
       return;
     }
     await this.sessionStore.rename(sessionId, payload.title);
@@ -1311,7 +1316,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   }
 
   private sessionApi(sessionId: string): SessionAPIImpl {
-    return new SessionAPIImpl(this.requireSession(sessionId));
+    return new SessionAPIImpl(this.requireSession(sessionId), this.agoraCapabilityVault);
   }
 
   private reloadProviderManager(): KimiConfig {
@@ -1367,7 +1372,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     session: Session,
     config: KimiConfig,
   ): Promise<void> {
-    const api = new SessionAPIImpl(session);
+    const api = new SessionAPIImpl(session, this.agoraCapabilityVault);
     // A session migrated from an external tool carries no model, and any
     // session may reference a model alias that no longer exists in config.toml.
     // Try the session's own model first, then fall back to the configured

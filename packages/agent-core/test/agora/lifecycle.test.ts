@@ -558,3 +558,47 @@ describe('Agora typed lifecycle capabilities', () => {
     expect(snapshot).not.toHaveProperty('capabilityEpoch');
   });
 });
+
+  it('keeps the bearer across SessionAPIImpl instances that share a vault (reload survival)', async () => {
+    // A session reload builds a fresh SessionAPIImpl; if the bearer vault were
+    // per-instance the cancel after reload could no longer resolve the secret
+    // and `/agora cancel` would fail with "not available in this trusted host".
+    // Sharing the vault at core scope keeps the cancel working.
+    const persistence = new InMemoryAgentRecordPersistence();
+    const agent = testAgent({ persistence }).agent;
+    const trusted = adapter();
+    const session = createSession(agent, trusted);
+    const sharedVault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+
+    const beforeReload = new SessionAPIImpl(session, sharedVault);
+    const inserted = await beforeReload.insertAgoraReview({
+      runId: 'run-reload',
+      transitionId: 'insert-reload',
+    });
+
+    const afterReload = new SessionAPIImpl(session, sharedVault);
+    await expect(afterReload.cancelAgoraReview({
+      runId: 'run-reload',
+      transitionId: 'cancel-reload',
+      capability: inserted.handle,
+    })).resolves.toMatchObject({ phase: 'cancelled', cancelled: true });
+    expect(trusted.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot cancel from an unrelated vault once the bearer is gone (control)', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const agent = testAgent({ persistence }).agent;
+    const trusted = adapter();
+    const session = createSession(agent, trusted);
+
+    const inserted = await new SessionAPIImpl(session, new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>())
+      .insertAgoraReview({ runId: 'run-lost', transitionId: 'insert-lost' });
+
+    const stranger = new SessionAPIImpl(session, new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>());
+    await expect(stranger.cancelAgoraReview({
+      runId: 'run-lost',
+      transitionId: 'cancel-lost',
+      capability: inserted.handle,
+    })).rejects.toMatchObject({ code: ErrorCodes.REQUEST_INVALID });
+    expect(trusted.cancel).not.toHaveBeenCalled();
+  });

@@ -73,10 +73,23 @@ import {
 type AgentScopedPayload<T> = T & { agentId: string };
 
 export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
-  /** Public callers only receive operationId; bearer plaintext stays here. */
-  private readonly agoraCapabilityVault = new Map<string, AgoraLifecycleCapabilityToken>();
+  /**
+   * Bearer-plaintext vault. Injected at the core (process) scope in production
+   * so it survives session reloads within the same host process — otherwise a
+   * `/reload` (or a config-save reload) wipes the bearer while the TUI keeps
+   * the preflight, leaving a review that `/agora cancel` can no longer clear.
+   * Public callers only ever see the operationId; the secret never crosses the
+   * RPC boundary or hits disk. Defaults to a fresh per-instance map so existing
+   * single-impl callers and tests keep their original behavior.
+   */
+  private readonly agoraCapabilityVault: Map<string, AgoraLifecycleCapabilityToken>;
 
-  constructor(protected readonly session: Session) {}
+  constructor(
+    protected readonly session: Session,
+    agoraCapabilityVault: Map<string, AgoraLifecycleCapabilityToken> = new Map<string, AgoraLifecycleCapabilityToken>(),
+  ) {
+    this.agoraCapabilityVault = agoraCapabilityVault;
+  }
 
   async renameSession(payload: RenameSessionPayload): Promise<void> {
     const title = payload.title.trim();
@@ -456,6 +469,9 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
       capability,
       transitionId,
     );
+    // Terminal: drop the bearer so the core-scoped vault cannot grow without
+    // bound across many reviews. A later insert for the same runId mints fresh.
+    this.agoraCapabilityVault.delete(capability.operationId);
     await agent.records.flush();
     const latest = agent.records.latestAgoraLifecycle(runId);
     if (latest !== undefined) {

@@ -78,13 +78,17 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
         try {
           const durable = await host.session.getAgoraReview(agora.runId);
           if (durable !== undefined && durable.phase !== 'cancelled') {
-            host.showError(
-              'Agora review was not cancelled: its host capability is unavailable after resume. The durable review remains active; restart from the owning host or use an explicit recovery workflow.',
-            );
+            // No bearer in this process (e.g. cross-process resume): the durable
+            // cancel cannot be driven from here, but the local preflight must
+            // not stay stuck. Clear the UI; the durable record may need cleanup
+            // from the owning host.
+            host.setAppState({ agora: null });
+            host.showError('Cleared local Agora status, but the durable review could not be cancelled from here (no host capability in this process) — clean it up from the owning host if needed.');
             return;
           }
         } catch (error) {
-          host.showError(`Agora review was not cancelled: durable state could not be verified (${error instanceof Error ? error.message : String(error)}).`);
+          host.setAppState({ agora: null });
+          host.showError(`Cleared local Agora status; durable state could not be verified (${error instanceof Error ? error.message : String(error)}).`);
           return;
         }
       }
@@ -109,8 +113,12 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
       // transition itself, synchronously, before this resolves.
       host.showStatus('Agora review cancelled.');
     } catch (error) {
-      host.setAppState({ agora });
-      host.showError(`Failed to cancel Agora review: ${error instanceof Error ? error.message : String(error)}`);
+      // The bearer gate or lifecycle transition failed. The durable record may
+      // still be active, but the in-memory preflight must never stay stuck —
+      // clear it so the UI recovers, and tell the user what may still need an
+      // out-of-band cleanup.
+      host.setAppState({ agora: null });
+      host.showError(`Agora review could not be cancelled cleanly (cleared local status): ${error instanceof Error ? error.message : String(error)}`);
     }
     return;
   }
