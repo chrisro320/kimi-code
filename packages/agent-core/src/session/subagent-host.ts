@@ -1282,6 +1282,9 @@ export class SessionSubagentHost {
             },
     });
     parent.telemetry.track('subagent_created', {
+      agent_id: childId,
+      parent_agent_id: this.ownerAgentId,
+      parent_tool_call_id: options.parentToolCallId ?? '',
       subagent_name: profileName,
       run_in_background: options.runInBackground,
     });
