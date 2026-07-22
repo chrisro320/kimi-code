@@ -296,6 +296,8 @@ describe('runShell', () => {
         outputFormat: undefined,
         prompt: undefined,
         skillsDirs: [],
+        agent: undefined,
+        agentFiles: [],
       },
       '1.2.3-test',
     );
