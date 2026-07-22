@@ -8,6 +8,7 @@ import {
   KimiConfigSchema,
   formatConfigValidationError,
   getDefaultConfig,
+  type AgoraConfig,
   type BackgroundConfig,
   type ExperimentalConfig,
   type HookDefConfig,
@@ -321,6 +322,8 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = cloneRecord(value);
     } else if (targetKey === 'subagent' && isPlainObject(value)) {
       result[targetKey] = transformSubagentData(value);
+    } else if (targetKey === 'agora' && isPlainObject(value)) {
+      result[targetKey] = transformAgoraData(value);
     } else if (!isPlainObject(value)) {
       result[targetKey] = value;
     }
@@ -403,6 +406,15 @@ function transformPoolsData(data: Record<string, unknown>): Record<string, unkno
     out[profileName] = Array.isArray(entries)
       ? entries.map((entry) => (isPlainObject(entry) ? transformPlainObject(entry) : entry))
       : entries;
+  }
+  return out;
+}
+
+function transformAgoraData(data: Record<string, unknown>): Record<string, unknown> {
+  const out = transformPlainObject(data);
+  if (isPlainObject(out['peers'])) {
+    // Peer ids are user-chosen record keys; only convert each peer's fields.
+    out['peers'] = transformRecord(out['peers'], transformPlainObject);
   }
   return out;
 }
@@ -531,6 +543,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
   setSection(out, 'loop_control', config.loopControl, loopControlToToml);
   setSection(out, 'background', config.background, backgroundToToml);
   setSection(out, 'subagent', config.subagent, subagentToToml);
+  setSection(out, 'agora', config.agora, agoraToToml);
   setSection(out, 'image', config.image, imageToToml);
   setSection(out, 'experimental', config.experimental, experimentalToToml);
   setSection(out, 'permission', config.permission, permissionToToml);
@@ -775,6 +788,28 @@ function poolsToToml(
     });
   }
   return converted;
+}
+
+function agoraToToml(agora: AgoraConfig, rawAgora: unknown): Record<string, unknown> {
+  const out = cloneRecord(rawAgora);
+  for (const [key, value] of Object.entries(agora)) {
+    if (key === 'peers' && isPlainObject(value)) {
+      const rawPeers = isPlainObject(rawAgora) ? rawAgora['peers'] : undefined;
+      const converted: Record<string, unknown> = {};
+      for (const [peerId, peer] of Object.entries(value)) {
+        const rawPeer = isPlainObject(rawPeers) ? rawPeers[peerId] : undefined;
+        const peerOut = cloneRecord(rawPeer);
+        for (const [peerKey, peerValue] of Object.entries(peer)) {
+          setDefined(peerOut, camelToSnake(peerKey), peerValue);
+        }
+        converted[peerId] = peerOut;
+      }
+      out['peers'] = converted;
+    } else {
+      setDefined(out, camelToSnake(key), value);
+    }
+  }
+  return out;
 }
 
 function imageToToml(image: ImageConfig, rawImage: unknown): Record<string, unknown> {

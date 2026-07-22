@@ -111,6 +111,7 @@ export class AgoraTool implements BuiltinTool<AgoraToolInput> {
   constructor(
     private readonly subagentHost: SessionSubagentHost,
     private readonly records?: Agent['records'],
+    private readonly kimiConfig?: Agent['kimiConfig'],
   ) {}
 
   resolveExecution(args: AgoraToolInput): ToolExecution {
@@ -136,9 +137,10 @@ export class AgoraTool implements BuiltinTool<AgoraToolInput> {
       return { output: 'Agora requires explicit host/user packet confirmation.', isError: true };
     }
     // TOCTOU gate: recompute the canonical execution envelope hash from the
-    // current tool args and durable lifecycle state. Approval uses the same
-    // builder, so any mutation of a hashed field invalidates authorization.
-    const envelope = buildAgoraExecutionEnvelope(args, this.records);
+    // current tool args, durable lifecycle state, and the configured default
+    // peer roster. Approval uses the same builder, so any mutation of a hashed
+    // field invalidates authorization.
+    const envelope = buildAgoraExecutionEnvelope(args, this.records, this.kimiConfig?.agora);
     const envelopeHash = hashAgoraExecutionEnvelope(envelope);
     if (confirmation.agoraEnvelopeHash !== envelopeHash) {
       return {

@@ -769,7 +769,7 @@ export class ToolManager {
           ),
         // Agora is explicitly invoked and remains unavailable without a host;
         // its execution is read-only peer analysis, never task materialization.
-        goalToolsEnabled && this.agent.subagentHost && new b.AgoraTool(this.agent.subagentHost, this.agent.records),
+        goalToolsEnabled && this.agent.subagentHost && new b.AgoraTool(this.agent.subagentHost, this.agent.records, this.agent.kimiConfig),
         goalToolsEnabled && this.agent.subagentHost && new b.ReferenceAuditTool(this.agent.subagentHost, this.agent.records),
         goalToolsEnabled && new b.ReferenceAuditOverrideTool(this.agent.records),
         goalToolsEnabled && this.agent.subagentHost && new b.AssetPipelineTool(

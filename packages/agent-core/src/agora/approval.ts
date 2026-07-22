@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 
 import type { AgentRecords } from '../agent/records';
+import type { AgoraConfig } from '../config/schema';
 import { hashReferenceSet } from '../reference-audit/hash';
 import type { ReferenceDescriptor } from '../reference-audit/types';
 
+import { DEFAULT_AGORA_PEER_ROUTES } from './packet';
 import type { AgoraPeerRoutes } from './types';
 
 /**
@@ -169,12 +171,30 @@ interface AgoraToolInputLike {
   readonly ambiguous_sensitive_content_confirmed?: boolean;
 }
 
-function toPeerRoutes(args: AgoraToolInputLike): AgoraPeerRoutes {
+/**
+ * Resolve the default peer roster from config (`agora.peers` in config.toml).
+ * An absent or empty roster falls back to the built-in default so Agora keeps
+ * working before any roster is configured.
+ */
+export function resolveDefaultAgoraPeerRoutes(agoraConfig: AgoraConfig | undefined): AgoraPeerRoutes {
+  const configured = agoraConfig?.peers;
+  if (configured === undefined || Object.keys(configured).length === 0) {
+    return DEFAULT_AGORA_PEER_ROUTES;
+  }
+  return Object.fromEntries(
+    Object.entries(configured).map(([peerId, route]) => [peerId, {
+      backend: route.backend,
+      modelOverride: route.modelOverride,
+      profileName: route.profileName,
+      displayName: route.displayName,
+      role: route.role,
+    }]),
+  );
+}
+
+function toPeerRoutes(args: AgoraToolInputLike, agoraConfig?: AgoraConfig): AgoraPeerRoutes {
   if (args.peers === undefined) {
-    return {
-      claude: { backend: 'claude-code', modelOverride: 'Opus 4.8' },
-      grok: { backend: 'kimi', modelOverride: 'kimicode-grok-4.5' },
-    };
+    return resolveDefaultAgoraPeerRoutes(agoraConfig);
   }
   const routes = Object.fromEntries(
     Object.entries(args.peers).map(([peerId, route]) => [peerId, {
@@ -190,15 +210,17 @@ function toPeerRoutes(args: AgoraToolInputLike): AgoraPeerRoutes {
 }
 
 /**
- * Build the canonical execution envelope from tool args and the durable
- * lifecycle record. Approval and execution must both call this builder so
- * that any mutation of a hashed field invalidates authorization.
+ * Build the canonical execution envelope from tool args, the durable
+ * lifecycle record, and the configured default peer roster. Approval and
+ * execution must both call this builder with the same inputs so that any
+ * mutation of a hashed field invalidates authorization.
  */
 export function buildAgoraExecutionEnvelope(
   args: AgoraToolInputLike,
   records: AgentRecords | undefined,
+  agoraConfig?: AgoraConfig,
 ): AgoraExecutionEnvelope {
-  const routes = toPeerRoutes(args);
+  const routes = toPeerRoutes(args, agoraConfig);
   const auditGate = args.reference_audit_gate ?? { material: false };
   const referenceMaterial = auditGate.material === true;
   const referenceHash = referenceMaterial && auditGate.references !== undefined

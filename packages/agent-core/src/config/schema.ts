@@ -382,6 +382,31 @@ export const McpServerConfigSchema = z.preprocess((raw) => {
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 
+export const AgoraPeerRouteConfigSchema = z.object({
+  /** `kimi` uses the in-process subagent; anything else must exist in `subagent.backends`. */
+  backend: z.string().min(1),
+  /** Model alias (from `models`) the peer runs on. */
+  modelOverride: z.string().min(1).optional(),
+  /** Subagent profile used for the peer task; defaults to `agora-peer`. */
+  profileName: z.string().min(1).optional(),
+  /** Human-facing name shown in the TUI; defaults to the peer id. */
+  displayName: z.string().min(1).optional(),
+  /** Optional reviewer role label recorded with the peer's response. */
+  role: z.string().min(1).optional(),
+});
+
+export type AgoraPeerRouteConfig = z.infer<typeof AgoraPeerRouteConfigSchema>;
+
+export const AgoraConfigSchema = z.object({
+  /**
+   * Default peer roster used when an Agora tool call omits `peers`. Keys are
+   * peer ids; an absent or empty roster falls back to the built-in default.
+   */
+  peers: z.record(z.string().min(1), AgoraPeerRouteConfigSchema).optional(),
+});
+
+export type AgoraConfig = z.infer<typeof AgoraConfigSchema>;
+
 export const KimiConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
   defaultProvider: z.string().optional(),
@@ -400,6 +425,7 @@ export const KimiConfigSchema = z.object({
   loopControl: LoopControlSchema.optional(),
   background: BackgroundConfigSchema.optional(),
   subagent: SubagentConfigSchema.optional(),
+  agora: AgoraConfigSchema.optional(),
   image: ImageConfigSchema.optional(),
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
@@ -416,6 +442,7 @@ const PermissionConfigPatchSchema = PermissionConfigSchema.partial();
 const LoopControlPatchSchema = LoopControlSchema.partial();
 const BackgroundConfigPatchSchema = BackgroundConfigSchema.partial();
 const SubagentConfigPatchSchema = SubagentConfigSchema.partial();
+const AgoraConfigPatchSchema = AgoraConfigSchema.partial();
 const ImageConfigPatchSchema = ImageConfigSchema.partial();
 const ModelCatalogConfigPatchSchema = ModelCatalogConfigSchema.partial();
 const ExperimentalConfigPatchSchema = ExperimentalConfigSchema;
@@ -444,6 +471,7 @@ export const KimiConfigPatchSchema = z
     loopControl: LoopControlPatchSchema.optional(),
     background: BackgroundConfigPatchSchema.optional(),
     subagent: SubagentConfigPatchSchema.optional(),
+    agora: AgoraConfigPatchSchema.optional(),
     image: ImageConfigPatchSchema.optional(),
     modelCatalog: ModelCatalogConfigPatchSchema.optional(),
     experimental: ExperimentalConfigPatchSchema.optional(),

@@ -31,6 +31,7 @@ export {
   buildAgoraExecutionEnvelope,
   hashAgoraExecutionEnvelope,
   consumeAgoraOverride,
+  resolveDefaultAgoraPeerRoutes,
   verifyAgoraOverride,
 } from './approval';
 export type { AgoraExecutionEnvelope, AgoraOverrideApproval, AgoraApprovalMetadata } from './approval';

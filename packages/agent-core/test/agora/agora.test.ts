@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   hashAgoraExecutionEnvelope,
+  resolveDefaultAgoraPeerRoutes,
   type AgoraExecutionEnvelope,
   bindAgoraSessionHandoff,
+  buildAgoraExecutionEnvelope,
   buildAgoraPeerPacket,
   buildAgoraPeerTasks,
   buildAgoraRecoveryTask,
@@ -978,5 +980,71 @@ describe('synthesizeAgoraDecision', () => {
         acceptanceCriteriaConfirmed: true,
       }),
     ).toMatchObject({ status: 'actionable', confidence: 'high', claims });
+  });
+});
+
+describe('config-driven default peer roster', () => {
+  const baseArgs = {
+    run_id: 'run-roster',
+    mode: 'planning' as const,
+    exact_question: 'Which direction is best supported?',
+    desired_decision: 'Pick a direction',
+    project_state: 'state',
+    dissatisfaction_or_uncertainty: 'uncertain',
+    user_goal: 'goal',
+    packet_revision: 1,
+    redaction_summary: 'none',
+    recovery: false,
+    necessity: {
+      impact_if_wrong: 'medium' as const,
+      uncertainty_or_disagreement: 'medium' as const,
+      expected_information_gain: 'medium' as const,
+      incremental_cost_latency: 'low' as const,
+    },
+  };
+
+  it('falls back to the built-in roster when no agora config exists', () => {
+    const envelope = buildAgoraExecutionEnvelope(baseArgs, undefined);
+    expect(Object.keys(envelope.peerRoutes)).toEqual(['claude', 'grok']);
+    expect(resolveDefaultAgoraPeerRoutes(undefined)).toEqual({
+      claude: { backend: 'claude-code', modelOverride: 'Opus 4.8' },
+      grok: { backend: 'kimi', modelOverride: 'kimicode-grok-4.5' },
+    });
+  });
+
+  it('falls back to the built-in roster when config peers are empty', () => {
+    expect(Object.keys(resolveDefaultAgoraPeerRoutes({ peers: {} }))).toEqual(['claude', 'grok']);
+  });
+
+  it('uses agora.peers from config when args omit peers', () => {
+    const envelope = buildAgoraExecutionEnvelope(baseArgs, undefined, {
+      peers: {
+        terra: { backend: 'kimi', modelOverride: 'gpt-5.6-terra', displayName: 'p5.6-terra-max' },
+      },
+    });
+    expect(Object.keys(envelope.peerRoutes)).toEqual(['terra']);
+    expect(envelope.peerRoutes['terra']?.backend).toBe('kimi');
+    expect(envelope.peerRoutes['terra']?.modelOverride).toBe('gpt-5.6-terra');
+    expect(envelope.peerRoutes['terra']?.displayName).toBe('p5.6-terra-max');
+  });
+
+  it('prefers explicit args.peers over the configured roster', () => {
+    const envelope = buildAgoraExecutionEnvelope(
+      { ...baseArgs, peers: { solo: { backend: 'kimi', model_override: 'kimi-code/k3' } } },
+      undefined,
+      { peers: { terra: { backend: 'kimi', modelOverride: 'gpt-5.6-terra' } } },
+    );
+    expect(Object.keys(envelope.peerRoutes)).toEqual(['solo']);
+    expect(envelope.peerRoutes['solo']?.modelOverride).toBe('kimi-code/k3');
+  });
+
+  it('binds the configured roster into the envelope hash', () => {
+    const withTerra = hashAgoraExecutionEnvelope(buildAgoraExecutionEnvelope(baseArgs, undefined, {
+      peers: { terra: { backend: 'kimi', modelOverride: 'gpt-5.6-terra' } },
+    }));
+    const withGrok = hashAgoraExecutionEnvelope(buildAgoraExecutionEnvelope(baseArgs, undefined, {
+      peers: { grok: { backend: 'kimi', modelOverride: 'kimicode-grok-4.5' } },
+    }));
+    expect(withTerra).not.toBe(withGrok);
   });
 });

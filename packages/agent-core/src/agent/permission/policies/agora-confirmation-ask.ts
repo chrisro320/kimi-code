@@ -75,7 +75,7 @@ export class AgoraConfirmationAskPermissionPolicy implements PermissionPolicy {
     // model is submitting and the durable lifecycle epoch. This hash is frozen
     // at approval time; the tool recomputes it at execution time and rejects
     // any mismatch (TOCTOU).
-    const envelope = buildAgoraExecutionEnvelope(args, this.agent.records);
+    const envelope = buildAgoraExecutionEnvelope(args, this.agent.records, this.agent.kimiConfig?.agora);
     const envelopeHash = hashAgoraExecutionEnvelope(envelope);
     const needsNecessityOverride = args.necessity.force_after_decline === true;
     const needsReferenceOverride =

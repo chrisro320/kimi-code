@@ -280,6 +280,36 @@ network = "none"
     expect(parseConfigString(text, configPath).subagent).toEqual(config.subagent);
   });
 
+  it('round-trips the [agora] peer roster', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'agora-peers.toml');
+    const toml = `
+[agora.peers.terra]
+backend = "kimi"
+model_override = "gpt-5.6-terra"
+display_name = "p5.6-terra-max"
+
+[agora.peers.grok]
+backend = "kimi"
+model_override = "kimicode-grok-4.5"
+role = "dissenter"
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.agora).toEqual({
+      peers: {
+        terra: { backend: 'kimi', modelOverride: 'gpt-5.6-terra', displayName: 'p5.6-terra-max' },
+        grok: { backend: 'kimi', modelOverride: 'kimicode-grok-4.5', role: 'dissenter' },
+      },
+    });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[agora.peers.terra]');
+    expect(text).toContain('model_override = "gpt-5.6-terra"');
+    expect(text).toContain('display_name = "p5.6-terra-max"');
+    expect(parseConfigString(text, configPath).agora).toEqual(config.agora);
+  });
+
   it('round-trips a weighted subagent route pool', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'subagent-pools.toml');
