@@ -773,6 +773,79 @@ describe("TUI differential rendering", () => {
 
 		tui.stop();
 	});
+
+	it("skips a full redraw when a changed line is entirely above the viewport", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		// 12 lines with a 5-row viewport puts previousViewportTop at 7 after the
+		// initial render, so line 2 is well above what's currently visible.
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		const initialRedraws = tui.fullRedraws;
+
+		// Simulate a background-task ticker rewriting an already-scrolled-past
+		// line (regression for the tui-scroll-jump-bug fix).
+		const lines = component.lines.slice();
+		lines[2] = "Line 2 (ticked)";
+		component.lines = lines;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Invisible-only change must not trigger a full redraw");
+		assert.ok(!terminal.getWrites().includes("\x1b[3J"), "Invisible-only change must not clear scrollback");
+		assert.deepStrictEqual(
+			terminal.getViewport(),
+			["Line 7", "Line 8", "Line 9", "Line 10", "Line 11"],
+			"Visible viewport must be unaffected by the invisible change",
+		);
+
+		// A subsequent visible-region change must still diff correctly against
+		// the synced cache, proving the skipped redraw didn't desync state.
+		const linesVisible = component.lines.slice();
+		linesVisible[8] = "CHANGED";
+		component.lines = linesVisible;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "CHANGED", "Line 9", "Line 10", "Line 11"]);
+
+		tui.stop();
+	});
+
+	it("still does a full redraw when the changed range extends into the viewport", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		const initialRedraws = tui.fullRedraws;
+
+		// Line 2 is above the viewport (top=7) but line 8 is inside it, so this
+		// must still take the full-redraw path.
+		const lines = component.lines.slice();
+		lines[2] = "Line 2 (ticked)";
+		lines[8] = "CHANGED";
+		component.lines = lines;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > initialRedraws, "Change reaching into the viewport must still full-redraw");
+		assert.ok(terminal.getWrites().includes("\x1b[3J"), "Full redraw must still clear scrollback");
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "CHANGED", "Line 9", "Line 10", "Line 11"]);
+
+		tui.stop();
+	});
 });
 
 describe("Container width clamping", () => {

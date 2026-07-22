@@ -1515,8 +1515,26 @@ export class TUI extends Container {
 		}
 
 		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// If the first changed line is above the previous viewport, we normally need a full redraw.
 		if (firstChanged < prevViewportTop) {
+			// But if every changed line is above the viewport too, nothing on screen
+			// actually changed (e.g. a background-task ticker rewriting an old,
+			// already-scrolled-past line). Skip the redraw and just sync caches so
+			// the next visible-region diff compares against correct content —
+			// avoids nuking scrollback for an edit the user can't see.
+			if (lastChanged < prevViewportTop) {
+				logRedraw(
+					`skipped: changes above viewport, none visible (${firstChanged}..${lastChanged} < ${prevViewportTop})`,
+				);
+				this.positionHardwareCursor(cursorPos, newLines.length);
+				this.previousLines = newLines;
+				this.previousRawLines = rawLines;
+				this.previousLineImageIds = lineImageIds;
+				this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+				this.previousViewportTop = prevViewportTop;
+				this.previousHeight = height;
+				return;
+			}
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 			fullRender(true);
 			return;
