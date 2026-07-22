@@ -19,7 +19,7 @@
 import { IAuthSummaryService } from '@moonshot-ai/agent-core-v2/app/auth/auth';
 import { IConfigService } from '@moonshot-ai/agent-core-v2/app/config/config';
 import { IFlagService } from '@moonshot-ai/agent-core-v2/app/flag/flag';
-import { IProviderService } from '@moonshot-ai/agent-core-v2/app/provider/provider';
+import { IProviderService } from '@moonshot-ai/agent-core-v2/kosong/provider/provider';
 
 import { ISessionApprovalService } from '@moonshot-ai/agent-core-v2/session/approval/approval';
 import { ISessionInitService } from '@moonshot-ai/agent-core-v2/session/sessionInit/sessionInit';
@@ -272,8 +272,6 @@ export const AGENT_PANELS: readonly ServicePanelDef[] = [
         input: 'Steps',
         run: (svc, n) => call(svc, 'undoHistory', { count: Number(n) }),
       },
-      { label: 'beginCompaction', run: (svc) => call(svc, 'beginCompaction', {}) },
-      { label: 'clearContext', danger: true, run: (svc) => call(svc, 'clearContext', {}) },
     ],
   },
 ];

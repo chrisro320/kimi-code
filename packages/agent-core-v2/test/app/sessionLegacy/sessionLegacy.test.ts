@@ -19,7 +19,7 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import { IAgentPlanService } from '#/agent/plan/plan';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
-import { UNKNOWN_CAPABILITY } from '#/app/llmProtocol/capability';
+import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { ISessionLegacyService } from '#/app/sessionLegacy/sessionLegacy';
 import { SessionLegacyService } from '#/app/sessionLegacy/sessionLegacyService';
 import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
@@ -117,6 +117,84 @@ describe('Session legacy status (best-effort runtime state)', () => {
       model: 'removed-model',
       thinking_level: 'high',
       max_context_tokens: 0,
+    });
+  });
+
+  it('uses the input cap as the status denominator and clamps usage to 1', async () => {
+    const profile = {
+      _serviceBrand: undefined,
+      data: () => ({
+        cwd: '/workspace',
+        modelAlias: 'gpt-5',
+        modelCapabilities: {
+          image_in: false,
+          video_in: false,
+          audio_in: false,
+          thinking: true,
+          tool_use: true,
+          max_context_tokens: 200_000,
+          max_input_tokens: 100_000,
+          dynamically_loaded_tools: false,
+        },
+        thinkingLevel: 'medium',
+        systemPrompt: '',
+      }),
+      getModel: () => 'gpt-5',
+      getModelCapabilities: () => ({
+        image_in: false,
+        video_in: false,
+        audio_in: false,
+        thinking: true,
+        tool_use: true,
+        max_context_tokens: 200_000,
+        max_input_tokens: 100_000,
+        dynamically_loaded_tools: false,
+      }),
+      getEffectiveThinkingLevel: () => 'medium',
+    } as unknown as IAgentProfileService;
+    const agent: IAgentScopeHandle = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: accessor([
+        [IAgentProfileService, profile],
+        [IAgentContextSizeService, { get: () => ({ size: 120_000, measured: 110_000, estimated: 10_000 }) }],
+        [IAgentPermissionModeService, { mode: 'manual' }],
+        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentSwarmService, { isActive: false }],
+        [
+          IAgentActivityView,
+          { state: () => ({ lifecycle: 'ready', background: [] }) },
+        ],
+      ]),
+      dispose: () => {},
+    };
+    const agents = {
+      create: () => Promise.resolve(agent),
+      whenReady: () => Promise.resolve(agent),
+      list: () => [agent],
+    } as unknown as IAgentLifecycleService;
+    const session: ISessionScopeHandle = {
+      id: 'session-capped',
+      kind: LifecycleScope.Session,
+      accessor: accessor([
+        [IAgentLifecycleService, agents],
+        [ISessionCronService, { _serviceBrand: undefined }],
+      ]),
+      dispose: () => {},
+    };
+    ix.stub(ISessionLifecycleService, {
+      resume: () => Promise.resolve(session),
+      get: () => session,
+    });
+    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
+
+    const status = await ix.get(ISessionLegacyService).status('session-capped');
+
+    // 120k in context against the 100k input cap (not the 200k window):
+    // usage would exceed the wire schema bound and is clamped to 1.
+    expect(status).toMatchObject({
+      max_context_tokens: 100_000,
+      context_usage: 1,
     });
   });
 
