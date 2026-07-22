@@ -278,6 +278,10 @@ export class KimiHarness {
     return this.rpc.removeProvider(providerId);
   }
 
+  async removeAgoraPeer(peerId: string): Promise<KimiConfig> {
+    return this.rpc.removeAgoraPeer(peerId);
+  }
+
   /** User-global MCP entries from `<KIMI_CODE_HOME>/mcp.json` only. */
   async listMcpServers(): Promise<readonly McpServerConfig[]> {
     return this.rpc.listGlobalMcpServers();

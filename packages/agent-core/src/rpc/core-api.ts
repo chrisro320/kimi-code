@@ -510,6 +510,10 @@ export interface RemoveKimiProviderPayload {
   readonly providerId: string;
 }
 
+export interface RemoveAgoraPeerPayload {
+  readonly peerId: string;
+}
+
 export interface GetCronTasksResult {
   readonly tasks: readonly CronTaskSnapshot[];
 }
@@ -593,6 +597,7 @@ export interface CoreAPI extends SessionAPIWithId {
   getConfigDiagnostics: (payload: EmptyPayload) => ConfigDiagnostics;
   setKimiConfig: (payload: SetKimiConfigPayload) => KimiConfig;
   removeKimiProvider: (payload: RemoveKimiProviderPayload) => KimiConfig;
+  removeAgoraPeer: (payload: RemoveAgoraPeerPayload) => KimiConfig;
   listGlobalMcpServers: (payload: EmptyPayload) => readonly GlobalMcpServerConfig[];
   addGlobalMcpServer: (payload: PutGlobalMcpServerPayload) => readonly GlobalMcpServerConfig[];
   updateGlobalMcpServer: (payload: PutGlobalMcpServerPayload) => readonly GlobalMcpServerConfig[];

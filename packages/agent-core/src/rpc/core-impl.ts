@@ -129,6 +129,7 @@ import type {
   RegisterToolPayload,
   ReloadSessionPayload,
   ReloadPluginsResult,
+  RemoveAgoraPeerPayload,
   RemoveKimiProviderPayload,
   RemovePluginPayload,
   RenameSessionPayload,
@@ -712,6 +713,20 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       config.defaultProvider = undefined;
     }
 
+    await writeConfigFile(this.configPath, config);
+    return this.reloadRuntimeConfig();
+  }
+
+  async removeAgoraPeer(input: RemoveAgoraPeerPayload): Promise<KimiConfig> {
+    const config = this.readConfigForWrite();
+    if (config.agora?.peers !== undefined) {
+      delete config.agora.peers[input.peerId];
+      // Drop the whole [agora] section once the roster is empty so the file
+      // falls back to the built-in default without a stale empty table.
+      if (Object.keys(config.agora.peers).length === 0) {
+        config.agora = undefined;
+      }
+    }
     await writeConfigFile(this.configPath, config);
     return this.reloadRuntimeConfig();
   }

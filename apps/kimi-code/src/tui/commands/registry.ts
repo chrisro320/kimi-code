@@ -35,6 +35,7 @@ const DISPATCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
 const AGORA_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'status', description: 'Show the active Agora review' },
   { value: 'cancel', description: 'Cancel Agora and restore its origin task' },
+  { value: 'roster', description: 'Manage the default peer roster (config.toml agora.peers)' },
 ];
 
 const RESEARCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [

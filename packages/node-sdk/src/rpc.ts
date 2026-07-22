@@ -277,6 +277,11 @@ export abstract class SDKRpcClientBase {
     return rpc.removeKimiProvider({ providerId });
   }
 
+  async removeAgoraPeer(peerId: string): Promise<KimiConfig> {
+    const rpc = await this.getRpc();
+    return rpc.removeAgoraPeer({ peerId });
+  }
+
   async listGlobalMcpServers(): Promise<readonly McpServerConfig[]> {
     const rpc = await this.getRpc();
     return rpc.listGlobalMcpServers({});
