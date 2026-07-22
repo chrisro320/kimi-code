@@ -24,10 +24,7 @@ If `run_in_background=true`, the command will be started as a background task an
 
 **Guidelines for efficiency:**
 - Use `&&` to chain commands that genuinely depend on each other, e.g. `npm install && npm test`. Independent read-only commands (separate `git show`, `ls`, or status checks) should be issued as separate parallel Bash calls in one response, not chained into a single call — chaining serializes their execution and mixes their output. Do not stitch outputs together with `echo` separators.
-- Use `;` to run commands sequentially regardless of success/failure
-- Use `||` for conditional execution (run second command only if first fails)
-- Use pipe operations (`|`) and redirections (`>`, `>>`) to chain input and output between commands
-- Always quote file paths containing spaces with double quotes (e.g., cd "/path with spaces/")
+- Standard shell operators (`;`, `||`, `|`, `>`/`>>`) work as usual; always quote paths with spaces (e.g. `cd "/path with spaces/"`).
 - Compose multi-step logic in a single call with `if` / `case` / `for` / `while` control flows.
 - Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.
 
