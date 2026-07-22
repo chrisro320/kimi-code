@@ -24,6 +24,15 @@ export const FLAG_DEFINITIONS = [
   //   surface: 'core',
   // },
   {
+    id: 'tool-result-compaction',
+    title: 'Tool-result outbound compaction',
+    description:
+      'Under context pressure, replace old large successful tool results only in provider-bound projections. Canonical history, records, UI, and full-compaction input retain the original output.',
+    env: 'KIMI_CODE_EXPERIMENTAL_TOOL_RESULT_COMPACTION',
+    default: false,
+    surface: 'core',
+  },
+  {
     id: 'tool-select',
     title: 'Tool select (progressive tool disclosure)',
     description:

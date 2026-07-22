@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Agent, AgentOptions } from '../../src/agent';
 import { trimTrailingOpenToolExchange } from '../../src/agent/context/projector';
+import { FLAG_DEFINITIONS, FlagResolver } from '../../src/flags';
 import { ProviderManager } from '../../src/session/provider-manager';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
@@ -471,6 +472,60 @@ describe('AgentAPI.startBtw', () => {
       expect(followUpHistoryText).toContain('What are you working on right now?');
       expect(followUpHistoryText).toContain('Can you say that another way?');
       await expect(access(join(sessionDir, 'agents', 'agent-0', 'wire.jsonl'))).rejects.toThrow();
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('copies raw tool results into btw history before child outbound compaction', async () => {
+    const workDir = await makeTempDir();
+    const sessionDir = await makeTempDir();
+    const scripted = createScriptedGenerate();
+    const session = new Session({
+      id: 'test-btw-raw-tool-history',
+      kaos: testKaos.withCwd(workDir),
+      homedir: sessionDir,
+      rpc: createSessionRpc([]),
+      skills: { explicitDirs: [join(workDir, 'missing-skills')] },
+      providerManager: testProviderManager(),
+      experimentalFlags: new FlagResolver(
+        { KIMI_CODE_EXPERIMENTAL_TOOL_RESULT_COMPACTION: '1' },
+        FLAG_DEFINITIONS,
+      ),
+    });
+    const { agent: mainAgent } = await session.createAgent(
+      { type: 'main', generate: scripted.generate },
+      { profile: testProfile() },
+    );
+    mainAgent.config.update({ modelAlias: 'mock-model', thinkingEffort: 'off' });
+    mainAgent.tools.setActiveTools(['Read']);
+    mainAgent.context.appendUserMessage([{ type: 'text', text: 'Preserve tool output for /btw.' }]);
+    mainAgent.context.appendLoopEvent({
+      type: 'step.begin', uuid: 'tool-step', turnId: 'main-turn', step: 1,
+    });
+    mainAgent.context.appendLoopEvent({
+      type: 'tool.call', uuid: 'tool-call', turnId: 'main-turn', step: 1, stepUuid: 'tool-step',
+      toolCallId: 'call-raw-output', name: 'Read', args: { path: 'large.txt' },
+    });
+    mainAgent.context.appendLoopEvent({
+      type: 'step.end', uuid: 'tool-step', turnId: 'main-turn', step: 1,
+    });
+    mainAgent.context.appendLoopEvent({
+      type: 'tool.result', parentUuid: 'tool-call', toolCallId: 'call-raw-output',
+      result: { output: 'raw tool output '.repeat(40) },
+    });
+
+    try {
+      const api = new SessionAPIImpl(session);
+      const agentId = await api.startBtw({ agentId: 'main' });
+      const child = session.getReadyAgent(agentId);
+      if (child === undefined) throw new Error('Expected /btw child agent');
+      child.microCompaction.config.keepRecentMessages = 0;
+      child.microCompaction.config.minContentTokens = 1;
+      child.microCompaction.config.minContextUsageRatio = 0;
+      expect(JSON.stringify(child.context.history)).toContain('raw tool output');
+      expect(JSON.stringify(child.context.history)).not.toContain('Old successful tool result omitted');
+      expect(JSON.stringify(child.context.messages)).toContain('Old successful tool result omitted');
     } finally {
       await session.close();
     }

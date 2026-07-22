@@ -463,6 +463,7 @@ export class FullCompaction {
           ...this.agent.context.project(historyForModel, {
             synthesizeMissing: true,
             dropOrphanResults: true,
+            compactToolResults: false,
           }),
           createUserMessage(instruction),
         ];

@@ -24,7 +24,7 @@ import {
   DefaultCompactionStrategy,
   type CompactionStrategy,
 } from '../../../src/agent/compaction';
-import { FLAG_DEFINITIONS, MASTER_ENV } from '../../../src/flags';
+import { FLAG_DEFINITIONS, FlagResolver, MASTER_ENV } from '../../../src/flags';
 import { HookEngine, type HookEngineTriggerArgs } from '../../../src/session/hooks';
 import { estimateTokens, estimateTokensForMessages } from '../../../src/utils/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../fixtures/telemetry';
@@ -374,40 +374,36 @@ describe('FullCompaction', () => {
     ).toBe(false);
   });
 
-  // Micro compaction is disabled; this scenario is skipped because the feature
-  // can no longer be enabled.
-  it.skip('micro-compacts old tool results before sending the summary request', async () => {
-    vi.useFakeTimers();
-    enableMicroCompactionFlag();
+  it('keeps original tool output in the full-compaction summarizer request', async () => {
+    const rawOutput = 'tool output required by the summary '.repeat(40);
     const ctx = testAgent({
-      compactionStrategy: alwaysCompactOnce,
-      microCompaction: {
-        keepRecentMessages: 2,
-        minContentTokens: 1,
-        cacheMissedThresholdMs: 60 * 60 * 1000,
-        minContextUsageRatio: 0,
-      },
+      experimentalFlags: new FlagResolver(
+        { KIMI_CODE_EXPERIMENTAL_TOOL_RESULT_COMPACTION: '1' },
+        FLAG_DEFINITIONS,
+      ),
+      microCompaction: { keepRecentMessages: 0, minContentTokens: 1, minContextUsageRatio: 0 },
     });
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
-      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+      modelCapabilities: { ...CATALOGUED_MODEL_CAPABILITIES, max_context_tokens: 100 },
     });
-
-    vi.setSystemTime(0);
     ctx.appendToolExchange();
-    ctx.appendToolExchange();
+    const tool = ctx.agent.context.history.find((message) => message.role === 'tool');
+    if (tool === undefined) throw new Error('Expected tool result');
+    (tool.content[0] as { text: string }).text = rawOutput;
 
-    vi.setSystemTime(61 * 60 * 1000);
-
-    ctx.agent.microCompaction.detect();
-    const compacted = ctx.once('context.apply_compaction');
+    expect(ctx.agent.context.messages.some((message) => messageText(message).includes('Old successful tool result omitted'))).toBe(true);
     ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
-    await ctx.rpc.beginCompaction({ instruction: 'Summarize tool exchanges.' });
-    await compacted;
+    await ctx.rpc.beginCompaction({});
+    await ctx.once('compaction.completed');
 
     const [compactionCall] = ctx.llmCalls;
-    expect(messageText(compactionCall?.history[2])).toBe('[Old tool result content cleared]');
-    expect(messageText(compactionCall?.history[5])).toBe('lookup result');
+    expect(compactionCall?.history.some((message) => messageText(message).includes(rawOutput))).toBe(true);
+    expect(
+      compactionCall?.history.some((message) =>
+        messageText(message).includes('Old successful tool result omitted'),
+      ),
+    ).toBe(false);
   });
 
   it('force-refreshes OAuth credentials on compaction 401 and treats replay 401 as provider auth error', async () => {

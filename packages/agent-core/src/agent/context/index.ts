@@ -448,7 +448,10 @@ export class ContextMemory {
     return this._history;
   }
 
-  project(messages: readonly ContextMessage[], options?: ProjectOptions): Message[] {
+  project(
+    messages: readonly ContextMessage[],
+    options?: ProjectOptions & { readonly compactToolResults?: boolean },
+  ): Message[] {
     // Shape for the current model BEFORE projecting: a model without the
     // dynamically-loaded-tools capability must not see dynamic-tool schema
     // messages or loadable-tools announcements (the canonical history keeps
@@ -457,8 +460,12 @@ export class ContextMemory {
     // setModel never rewrites history, so a mid-session switch
     // degrades/upgrades losslessly.
     const shaped = this.agent.toolSelectEnabled ? messages : stripDynamicToolContext(messages);
+    // Full compaction must summarize original output, never a lossy projection.
+    const compacted = options?.compactToolResults === false
+      ? shaped
+      : this.agent.microCompaction.compact(shaped, this._history);
     const anomalies: ProjectionAnomaly[] = [];
-    const result = project(this.agent.microCompaction.compact(shaped), {
+    const result = project(compacted, {
       ...options,
       onAnomaly: (anomaly) => {
         anomalies.push(anomaly);
@@ -586,7 +593,14 @@ export class ContextMemory {
 
   useProjectedHistoryFrom(source: ContextMemory): void {
     this.clear();
-    this.pushHistory(...trimTrailingOpenToolExchange(source.project(source.history)));
+    // This materializes another agent's canonical history, not an outbound
+    // request. Preserve full tool output; this agent applies its own lossy
+    // projection only when it later sends a provider request.
+    this.pushHistory(
+      ...trimTrailingOpenToolExchange(
+        source.project(source.history, { compactToolResults: false }),
+      ),
+    );
   }
 
   finishResume(): void {

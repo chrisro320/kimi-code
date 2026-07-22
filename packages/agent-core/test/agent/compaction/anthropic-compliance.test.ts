@@ -19,6 +19,7 @@ import type { Message, Tool } from '@moonshot-ai/kosong';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ContextMessage } from '../../../src/agent/context';
+import { FLAG_DEFINITIONS, FlagResolver } from '../../../src/flags';
 import { testAgent } from '../harness/agent';
 
 const PROVIDER = { type: 'kimi', apiKey: 'test-key', model: 'kimi-code' } as const;
@@ -120,6 +121,32 @@ const BASH_TOOL: Tool = {
 };
 
 describe('compaction — Anthropic wire compliance', () => {
+  it('keeps a compacted tool result paired with its assistant call on the Anthropic wire', async () => {
+    const ctx = testAgent({
+      experimentalFlags: new FlagResolver(
+        { KIMI_CODE_EXPERIMENTAL_TOOL_RESULT_COMPACTION: '1' },
+        FLAG_DEFINITIONS,
+      ),
+      microCompaction: { keepRecentMessages: 0, minContentTokens: 1, minContextUsageRatio: 0 },
+    });
+    ctx.configure({
+      provider: PROVIDER,
+      modelCapabilities: { ...CAPS, max_context_tokens: 100 },
+    });
+    ctx.appendToolExchange();
+
+    const projected = ctx.agent.context.messages;
+    expect(
+      projected.some((m) =>
+        m.content.some(
+          (part) => part.type === 'text' && part.text.includes('Old successful tool result omitted'),
+        ),
+      ),
+    ).toBe(true);
+    const wire = await toAnthropicWire(projected, [BASH_TOOL]);
+    assertValidAnthropic(wire);
+  });
+
   it('post-compaction context plus a follow-up tool turn is a valid Anthropic request', async () => {
     const ctx = testAgent();
     ctx.configure({ provider: PROVIDER, modelCapabilities: CAPS });

@@ -787,6 +787,147 @@ describe.skip('MicroCompaction', () => {
   });
 });
 
+describe('tool-result outbound compaction', () => {
+  const FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_TOOL_RESULT_COMPACTION';
+  const MARKER = '[Old successful tool result omitted from model context; re-run the tool if its full output is needed.]';
+  const caps = {
+    image_in: false,
+    video_in: false,
+    audio_in: false,
+    thinking: false,
+    tool_use: true,
+    max_context_tokens: 100,
+  } as const;
+
+  function compactingFlags(enabled: boolean): FlagResolver {
+    return new FlagResolver({ [FLAG_ENV]: enabled ? '1' : '0' }, FLAG_DEFINITIONS);
+  }
+
+  function context(): TestAgentContext {
+    const ctx = testAgent({
+      experimentalFlags: compactingFlags(true),
+      microCompaction: { keepRecentMessages: 4, minContentTokens: 1, minContextUsageRatio: 0.5 },
+    });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: caps });
+    return ctx;
+  }
+
+  it('is byte-for-byte unchanged while the flag is off', () => {
+    const ctx = testAgent({
+      experimentalFlags: compactingFlags(false),
+      microCompaction: { keepRecentMessages: 0, minContentTokens: 1, minContextUsageRatio: 0 },
+    });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: caps });
+    appendMicroToolExchange(ctx, 1, { output: 'large successful output '.repeat(40) });
+
+    expect(ctx.agent.context.project(ctx.agent.context.history)).toEqual(
+      ctx.agent.context.project(ctx.agent.context.history, { compactToolResults: false }),
+    );
+  });
+
+  it('projects only old large successful results and preserves canonical history', () => {
+    const ctx = context();
+    appendMicroToolExchange(ctx, 1, { output: 'old successful output '.repeat(40) });
+    appendMicroToolExchange(ctx, 2, { output: 'old error output '.repeat(40), isError: true });
+    appendMicroToolExchange(ctx, 3, { output: 'recent successful output '.repeat(40) });
+
+    const projected = ctx.agent.context.project(ctx.agent.context.history);
+    expect(toolTexts(projected)[0]).toBe(MARKER);
+    expect(toolTexts(projected)[1]).toContain('old error output');
+    expect(toolTexts(projected)[2]).toBe('recent successful output '.repeat(40));
+    expect(toolTexts(ctx.agent.context.history)).toEqual([
+      'old successful output '.repeat(40),
+      'old error output '.repeat(40),
+      'recent successful output '.repeat(40),
+    ]);
+    const compacted = projected.find((message) => textOf(message) === MARKER);
+    expect(compacted).toMatchObject({ role: 'tool', toolCallId: 'call_micro_1' });
+  });
+
+  it('does not compact a sliced suffix and reports only actual projection reduction once', () => {
+    const records: TelemetryRecord[] = [];
+    const ctx = testAgent({
+      experimentalFlags: compactingFlags(true),
+      telemetry: recordingTelemetry(records),
+      microCompaction: { keepRecentMessages: 4, minContentTokens: 1, minContextUsageRatio: 0.5 },
+    });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: caps });
+    appendMicroToolExchange(ctx, 1, { output: 'old output '.repeat(40) });
+    appendMicroToolExchange(ctx, 2, { output: 'middle output '.repeat(40) });
+    appendMicroToolExchange(ctx, 3, { output: 'recent output '.repeat(40) });
+
+    const suffix = ctx.agent.context.project(ctx.agent.context.history.slice(-4));
+    expect(toolTexts(suffix)).toEqual([
+      'middle output '.repeat(40),
+      'recent output '.repeat(40),
+    ]);
+    expect(records).toHaveLength(0);
+
+    const rawWhole = ctx.agent.context.project(ctx.agent.context.history, {
+      compactToolResults: false,
+    });
+    const whole = ctx.agent.context.project(ctx.agent.context.history);
+    expect(estimateTokensForMessages(whole)).toBeLessThan(estimateTokensForMessages(rawWhole));
+    expect(toolTexts(whole)).toContain(MARKER);
+    ctx.agent.context.project(ctx.agent.context.history);
+
+    const events = records.filter((record) => record.event === 'tool_result_compaction_finished');
+    expect(events).toHaveLength(1);
+    expect(numberProperty(events[0]!, 'truncated_tool_result_tokens_before')).toBeGreaterThan(
+      numberProperty(events[0]!, 'truncated_tool_result_tokens_after'),
+    );
+  });
+
+  it('records separate telemetry for a partial projection before full outbound projection', () => {
+    const records: TelemetryRecord[] = [];
+    const ctx = testAgent({
+      experimentalFlags: compactingFlags(true),
+      telemetry: recordingTelemetry(records),
+      microCompaction: { keepRecentMessages: 4, minContentTokens: 1, minContextUsageRatio: 0.5 },
+    });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: caps });
+    appendMicroToolExchange(ctx, 1, { output: 'old output one '.repeat(40) });
+    appendMicroToolExchange(ctx, 2, { output: 'old output two '.repeat(40) });
+    appendMicroToolExchange(ctx, 3, { output: 'recent output one '.repeat(40) });
+    appendMicroToolExchange(ctx, 4, { output: 'recent output two '.repeat(40) });
+
+    ctx.agent.context.project(ctx.agent.context.history.slice(0, 3));
+    ctx.agent.context.project(ctx.agent.context.history);
+
+    const events = records.filter((record) => record.event === 'tool_result_compaction_finished');
+    expect(events).toHaveLength(2);
+    expect(numberProperty(events[0]!, 'truncated_tool_result_count')).toBe(1);
+    expect(numberProperty(events[1]!, 'truncated_tool_result_count')).toBe(2);
+  });
+
+  it('keeps compaction active after provider usage reports a compacted projection', () => {
+    const ctx = context();
+    appendMicroToolExchange(ctx, 1, { output: 'old output '.repeat(40) });
+    appendMicroToolExchange(ctx, 2, { output: 'middle output '.repeat(40) });
+    appendMicroToolExchange(ctx, 3, { output: 'recent output '.repeat(40) });
+
+    expect(toolTexts(ctx.agent.context.messages)[0]).toBe(MARKER);
+    ctx.agent.context.updateTokenCount(0);
+    expect(toolTexts(ctx.agent.context.messages)[0]).toBe(MARKER);
+  });
+
+  it('does not compact recent or failed results that reuse an old tool call id', () => {
+    const ctx = context();
+    appendMicroToolExchange(ctx, 1, { output: 'old successful output '.repeat(40) });
+    appendMicroToolExchange(ctx, 2, { output: 'recent successful output '.repeat(40) });
+    appendMicroToolExchange(ctx, 3, { output: 'recent error output '.repeat(40), isError: true });
+    const tools = ctx.agent.context.history.filter((message) => message.role === 'tool');
+    (tools[1] as { toolCallId: string }).toolCallId = tools[0]!.toolCallId!;
+    (tools[2] as { toolCallId: string }).toolCallId = tools[0]!.toolCallId!;
+
+    expect(toolTexts(ctx.agent.microCompaction.compact(ctx.agent.context.history))).toEqual([
+      MARKER,
+      'recent successful output '.repeat(40),
+      'recent error output '.repeat(40),
+    ]);
+  });
+});
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();

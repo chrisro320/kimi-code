@@ -1,16 +1,21 @@
-// Micro compaction is disabled; ContentPart is no longer referenced here.
-// import type { ContentPart } from '@moonshot-ai/kosong';
+import type { ContentPart } from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
 import type { ContextMessage } from '../context';
-import {
-  estimateTokensForContentParts,
-  // estimateTokensForMessages, // disabled with micro compaction
-} from '../../utils/tokens';
+import { estimateTokensForContentParts, estimateTokensForMessages } from '../../utils/tokens';
 
+/**
+ * Outbound-only tool-result compaction policy.
+ *
+ * The class and option name remain `MicroCompaction` so existing Agent wiring
+ * and old wire records stay compatible. It intentionally does not restore the
+ * removed cache-age/cutoff behaviour: selection is recomputed from each full
+ * canonical history by message occurrence, never by an absolute message index.
+ */
 export interface MicroCompactionConfig {
   keepRecentMessages: number;
   minContentTokens: number;
+  /** Legacy option kept for host compatibility; no longer used as a trigger. */
   cacheMissedThresholdMs: number;
   truncatedMarker: string;
   minContextUsageRatio: number;
@@ -20,13 +25,13 @@ const DEFAULT_CONFIG: MicroCompactionConfig = {
   keepRecentMessages: 20,
   minContentTokens: 100,
   cacheMissedThresholdMs: 60 * 60 * 1000,
-  truncatedMarker: '[Old tool result content cleared]',
+  truncatedMarker: '[Old successful tool result omitted from model context; re-run the tool if its full output is needed.]',
   minContextUsageRatio: 0.5,
 };
 
 export class MicroCompaction {
-  private cutoff = 0;
   readonly config: MicroCompactionConfig;
+  private lastSelectionSignature: string | undefined;
 
   constructor(
     public readonly agent: Agent,
@@ -35,134 +40,103 @@ export class MicroCompaction {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  reset(maxCutoff = 0): void {
-    this.cutoff = Math.min(this.cutoff, maxCutoff);
+  /** Legacy `micro_compaction.apply` replay records are intentionally no-ops. */
+  apply(_cutoff: number): void {}
+
+  /** A compaction/clear changed canonical history; allow the next selection to be measured. */
+  reset(_maxCutoff?: number): void {
+    this.lastSelectionSignature = undefined;
   }
 
-  apply(cutoff: number): void {
-    this.agent.records.logRecord({
-      type: 'micro_compaction.apply',
-      cutoff,
-    });
-    this.cutoff = cutoff;
-  }
+  /**
+   * Kept at the pre-step hook boundary for compatibility. Selection happens in
+   * compact(), where the actual outbound history is available.
+   */
+  detect(): void {}
 
-  detect(): void {
-    // Micro compaction is disabled: the `micro_compaction` experimental flag has
-    // been removed from the registry, so detection is intentionally a no-op.
-    return;
-
-    // Original implementation (disabled):
-    // if (!this.agent.experimentalFlags.enabled('micro_compaction')) return;
-    //
-    // const config = this.config;
-    // const { history, lastAssistantAt } = this.agent.context;
-    // const cacheAgeMs = lastAssistantAt === null ? null : Date.now() - lastAssistantAt;
-    // const cacheMissed = cacheAgeMs !== null && cacheAgeMs >= config.cacheMissedThresholdMs;
-    // if (!cacheMissed) return;
-    //
-    // const maxContextTokens = this.agent.config.modelCapabilities.max_context_tokens;
-    // const contextTokens = this.agent.context.tokenCountWithPending;
-    // const contextUsageRatio =
-    //   maxContextTokens !== undefined && maxContextTokens > 0
-    //     ? contextTokens / maxContextTokens
-    //     : 1;
-    // if (contextUsageRatio < config.minContextUsageRatio) return;
-    //
-    // const previousCutoff = this.cutoff;
-    // const nextCutoff = Math.max(0, history.length - config.keepRecentMessages);
-    // this.apply(nextCutoff);
-    // if (previousCutoff !== nextCutoff) {
-    //   const effect = this.measureEffect(history, nextCutoff);
-    //   const previousEffect = this.measureEffect(history, previousCutoff);
-    //   const rawContextTokens = estimateTokensForMessages(history);
-    //   // Whole-context length before/after this cutoff change, mirroring the
-    //   // `tokens_before`/`tokens_after` fields on `compaction_finished` so the
-    //   // two compaction paths can be compared on the same axis.
-    //   const tokensBefore =
-    //     rawContextTokens -
-    //     previousEffect.truncatedToolResultTokensBefore +
-    //     previousEffect.truncatedToolResultTokensAfter;
-    //   const tokensAfter =
-    //     rawContextTokens -
-    //     effect.truncatedToolResultTokensBefore +
-    //     effect.truncatedToolResultTokensAfter;
-    //   this.agent.telemetry.track('micro_compaction_finished', {
-    //     keep_recent_messages: config.keepRecentMessages,
-    //     min_content_tokens: config.minContentTokens,
-    //     cache_missed_threshold_ms: config.cacheMissedThresholdMs,
-    //     truncated_marker: config.truncatedMarker,
-    //     min_context_usage_ratio: config.minContextUsageRatio,
-    //     truncated_tool_result_count: effect.truncatedToolResultCount,
-    //     truncated_tool_result_tokens_before: effect.truncatedToolResultTokensBefore,
-    //     truncated_tool_result_tokens_after: effect.truncatedToolResultTokensAfter,
-    //     tokens_before: tokensBefore,
-    //     tokens_after: tokensAfter,
-    //     previous_cutoff: previousCutoff,
-    //     cutoff: nextCutoff,
-    //     message_count: history.length,
-    //     cache_age_ms: cacheAgeMs,
-    //     thinking_effort: this.agent.config.thinkingEffort,
-    //   });
-    // }
-  }
-
-  compact(messages: readonly ContextMessage[]): readonly ContextMessage[] {
-    // Micro compaction is disabled: the `micro_compaction` experimental flag has
-    // been removed from the registry, so messages are always returned unchanged.
-    return messages;
-
-    // Original implementation (disabled):
-    // if (!this.agent.experimentalFlags.enabled('micro_compaction')) return messages;
-    //
-    // const config = this.config;
-    // const result: ContextMessage[] = [];
-    // let i = 0;
-    // for (const msg of messages) {
-    //   if (
-    //     i < this.cutoff &&
-    //     msg.role === 'tool' &&
-    //     msg.toolCallId !== undefined &&
-    //     estimateTokensForContentParts(msg.content) >= config.minContentTokens
-    //   ) {
-    //     result.push({
-    //       ...msg,
-    //       content: [{ type: 'text', text: config.truncatedMarker } satisfies ContentPart],
-    //     });
-    //   } else {
-    //     result.push(msg);
-    //   }
-    //   i++;
-    // }
-    // return result;
-  }
-
-  private measureEffect(
+  compact(
     messages: readonly ContextMessage[],
-    cutoff: number,
-  ) {
-    let markerTokenCount: number | undefined;
-    let truncatedToolResultCount = 0;
-    let truncatedToolResultTokensBefore = 0;
-    let truncatedToolResultTokensAfter = 0;
-    for (let i = 0; i < messages.length && i < cutoff; i++) {
-      const message = messages[i];
-      if (message?.role !== 'tool' || message.toolCallId === undefined) continue;
+    canonicalHistory: readonly ContextMessage[] = messages,
+  ): readonly ContextMessage[] {
+    if (!this.agent.experimentalFlags.enabled('tool-result-compaction')) return messages;
 
-      const contentTokens = estimateTokensForContentParts(message.content);
-      if (contentTokens < this.config.minContentTokens) continue;
+    const maxContextTokens = this.agent.config.modelCapabilities.max_context_tokens;
+    if (maxContextTokens <= 0) return messages;
+    // Provider usage can describe a previously compacted projection. Canonical
+    // history remains raw, so never let that smaller number turn compaction off.
+    const estimatedCanonicalTokens = estimateTokensForMessages(canonicalHistory);
+    const contextTokens = Math.max(this.agent.context.tokenCountWithPending, estimatedCanonicalTokens);
+    const contextUsageRatio = contextTokens / maxContextTokens;
+    if (contextUsageRatio < this.config.minContextUsageRatio) return messages;
 
-      markerTokenCount ??= estimateTokensForContentParts([
-        { type: 'text', text: this.config.truncatedMarker },
-      ]);
-      truncatedToolResultCount += 1;
-      truncatedToolResultTokensBefore += contentTokens;
-      truncatedToolResultTokensAfter += markerTokenCount;
+    const candidates = this.candidates(canonicalHistory);
+    if (candidates.length === 0) return messages;
+
+    const selected = new Set(candidates.map((candidate) => candidate.message));
+    const targets = messages.filter((message) => selected.has(message));
+    if (targets.length === 0) return messages;
+
+    const candidateByMessage = new Map(candidates.map((candidate) => [candidate.message, candidate]));
+    const signature = targets
+      .map((target) => {
+        const candidate = candidateByMessage.get(target);
+        if (candidate === undefined) throw new Error('Selected tool-result candidate is missing');
+        return `${String(candidate.index)}:${candidate.toolCallId}`;
+      })
+      .toSorted()
+      .join('\0');
+    if (signature !== this.lastSelectionSignature) {
+      const markerTokens = estimateTokensForContentParts([this.markerPart()]);
+      const before = targets.reduce(
+        (total, target) => total + estimateTokensForContentParts(target.content),
+        0,
+      );
+      this.agent.telemetry.track('tool_result_compaction_finished', {
+        keep_recent_messages: this.config.keepRecentMessages,
+        min_content_tokens: this.config.minContentTokens,
+        min_context_usage_ratio: this.config.minContextUsageRatio,
+        context_usage_ratio: contextUsageRatio,
+        truncated_tool_result_count: targets.length,
+        truncated_tool_result_tokens_before: before,
+        truncated_tool_result_tokens_after: markerTokens * targets.length,
+      });
+      this.lastSelectionSignature = signature;
     }
-    return {
-      truncatedToolResultCount,
-      truncatedToolResultTokensBefore,
-      truncatedToolResultTokensAfter,
-    };
+
+    const compacted = messages.map((message) => {
+      if (!selected.has(message)) return message;
+      // Keep all tool-exchange and ContextMessage metadata intact. The projector
+      // still renders note/isError and repairs pairing from the same call id.
+      return { ...message, content: [this.markerPart()] };
+    });
+    return compacted;
+  }
+
+  private candidates(messages: readonly ContextMessage[]): Array<{
+    index: number;
+    message: ContextMessage;
+    toolCallId: string;
+  }> {
+    const recentStart = Math.max(0, messages.length - this.config.keepRecentMessages);
+    const candidates: Array<{ index: number; message: ContextMessage; toolCallId: string }> = [];
+    for (let index = 0; index < recentStart; index++) {
+      const message = messages[index];
+      if (
+        message?.role !== 'tool' ||
+        message.toolCallId === undefined ||
+        message.isError === true
+      ) {
+        continue;
+      }
+      const contentTokens = estimateTokensForContentParts(message.content);
+      if (contentTokens >= this.config.minContentTokens) {
+        candidates.push({ index, message, toolCallId: message.toolCallId });
+      }
+    }
+    return candidates;
+  }
+
+  private markerPart(): ContentPart {
+    return { type: 'text', text: this.config.truncatedMarker };
   }
 }
