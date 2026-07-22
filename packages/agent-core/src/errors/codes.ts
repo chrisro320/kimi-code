@@ -32,6 +32,7 @@ export const ErrorCodes = {
   SESSION_INIT_FAILED: 'session.init_failed',
 
   AGENT_NOT_FOUND: 'agent.not_found',
+  AGENT_NOT_RESUMABLE: 'agent.not_resumable',
   TURN_AGENT_BUSY: 'turn.agent_busy',
 
   GOAL_ALREADY_EXISTS: 'goal.already_exists',
@@ -222,6 +223,13 @@ export const KIMI_ERROR_INFO = {
     retryable: false,
     public: true,
     action: 'Check the agent id or list available agents.',
+  },
+  'agent.not_resumable': {
+    title: 'Subagent is not resumable',
+    retryable: false,
+    public: true,
+    action:
+      'Dispatch a fresh subagent instead of resuming; prior partial output/candidate is preserved separately.',
   },
   'turn.agent_busy': {
     title: 'Agent is busy',

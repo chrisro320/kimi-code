@@ -12,7 +12,7 @@ import {
 
 import type { Agent } from '../agent';
 import type { PromptOrigin } from '../agent/context';
-import { ErrorCodes } from '../errors';
+import { ErrorCodes, KimiError } from '../errors';
 import { DenyAllPermissionPolicy } from '../agent/permission/policies/deny-all';
 import { isEditingCapableProfile } from '../agent/dispatch/profile';
 import type {
@@ -22,6 +22,7 @@ import type {
 } from '../agent/dispatch/controller';
 import { InMemoryAgentRecordPersistence } from '../agent/records';
 import { isAbortError } from '../loop/errors';
+import { sleepForRetry } from '../loop/retry';
 import { redactUntrustedRaw } from '../security/redaction';
 import {
   DEFAULT_AGENT_PROFILES,
@@ -70,6 +71,38 @@ export const DEFAULT_SUBAGENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_SUBAGENT_TIMEOUT_DESCRIPTION = '2 hours';
 
 const SUBAGENT_TIMEOUT_ENV = 'KIMI_SUBAGENT_TIMEOUT_MS';
+
+/**
+ * External subagents run as a detached child process with no provider-level
+ * retry (unlike internal subagents, which go through `chatWithRetry`). A
+ * transient non-zero exit (network blip, backend crash) previously killed
+ * the subagent permanently. These bound a small local retry loop around
+ * `runExternalSubagent` — any non-zero exit is retried (no stderr parsing/
+ * classification), up to a small attempt cap.
+ */
+const EXTERNAL_SUBAGENT_MAX_ATTEMPTS = 4;
+const EXTERNAL_RETRY_BASE_DELAY_MS = 500;
+const EXTERNAL_RETRY_FACTOR = 2;
+const EXTERNAL_RETRY_MAX_DELAY_MS = 8_000;
+
+/**
+ * Tags an error already reported via `emitSubagentFailed` inside
+ * `withExternalRetry`, so `spawnExternal`'s catch-all does not emit a second
+ * `subagent.failed` for the same failure (e.g. an abort landing during the
+ * inter-attempt backoff delay).
+ */
+const EXTERNAL_RETRY_EMITTED = Symbol('externalRetryEmitted');
+
+function markExternalRetryEmitted<T>(error: T): T {
+  if (typeof error === 'object' && error !== null) {
+    Object.defineProperty(error, EXTERNAL_RETRY_EMITTED, { value: true, enumerable: false });
+  }
+  return error;
+}
+
+function hasExternalRetryEmitted(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && EXTERNAL_RETRY_EMITTED in error;
+}
 
 /**
  * Resolve the effective subagent per-task timeout. Precedence:
@@ -471,6 +504,85 @@ export class SessionSubagentHost {
     }
   }
 
+  /**
+   * External subagents run as a bare child process with no provider-level
+   * retry — a transient non-zero exit previously killed them outright. Wraps
+   * `runExternalSubagent` in a small bounded retry loop: any non-zero exit
+   * (not a user-initiated abort) is retried up to
+   * `EXTERNAL_SUBAGENT_MAX_ATTEMPTS` times, no stderr classification. When
+   * the launcher supports resume, retries after the first failure resume the
+   * same external session; otherwise each retry is a fresh spawn under a new
+   * session id. Emits one `subagent.failed` per failed attempt so callers can
+   * reconstruct the full attempt history; throws a structured
+   * `agent.not_resumable` error once the budget is exhausted.
+   */
+  private async withExternalRetry(
+    parent: Agent,
+    id: string,
+    route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
+    launcher: SubagentLauncher,
+    cwd: string,
+    prompt: string,
+    onStderr: (stderr: string) => void,
+    onUsage: (usage: ExternalSubagentUsage) => void,
+    initialResumed: boolean,
+    initialSessionId: string,
+    runOptions: RunSubagentOptions,
+  ): Promise<{ completion: SubagentCompletion; sessionId: string }> {
+    let resumed = initialResumed;
+    let sessionId = initialSessionId;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= EXTERNAL_SUBAGENT_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const args = resumed ? launcher.resumeArgs ?? [] : launcher.args ?? [];
+        const completion = await runExternalSubagent(
+          route,
+          cwd,
+          prompt,
+          runOptions.signal,
+          onStderr,
+          onUsage,
+          args,
+          sessionId,
+          launcher,
+        );
+        return { completion, sessionId };
+      } catch (error) {
+        if (isAbortError(error) || runOptions.signal.aborted) throw error;
+        lastError = error;
+        this.emitSubagentFailed(parent, id, runOptions, error, attempt, attempt >= EXTERNAL_SUBAGENT_MAX_ATTEMPTS);
+        if (attempt >= EXTERNAL_SUBAGENT_MAX_ATTEMPTS) break;
+        if (launcher.resumeArgs !== undefined) {
+          resumed = true;
+        } else {
+          resumed = false;
+          sessionId = randomUUID();
+        }
+        const delay = Math.min(
+          EXTERNAL_RETRY_BASE_DELAY_MS * EXTERNAL_RETRY_FACTOR ** (attempt - 1),
+          EXTERNAL_RETRY_MAX_DELAY_MS,
+        );
+        try {
+          await sleepForRetry(delay, runOptions.signal);
+        } catch (sleepError) {
+          // Already emitted for this attempt above; mark so the caller's
+          // catch-all does not double-report the same failure.
+          markExternalRetryEmitted(sleepError);
+          throw sleepError;
+        }
+      }
+    }
+    throw markExternalRetryEmitted(
+      new KimiError(
+        ErrorCodes.AGENT_NOT_RESUMABLE,
+        `External subagent "${id}" exhausted ${EXTERNAL_SUBAGENT_MAX_ATTEMPTS} attempts: ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+        { cause: lastError },
+      ),
+    );
+  }
+
   private spawnExternal(
     parent: Agent,
     profileName: string,
@@ -510,11 +622,13 @@ export class SessionSubagentHost {
         runOptions.signal.throwIfAborted();
         this.emitSubagentStarted(parent, id);
         runOptions.onReady?.();
-        const completion = await runExternalSubagent(
+        const { completion, sessionId: finalSessionId } = await this.withExternalRetry(
+          parent,
+          id,
           route,
+          launcher,
           worktree?.cwd ?? parent.config.cwd,
           wrapExternalSubagentPrompt(profileName, runOptions.prompt),
-          runOptions.signal,
           (stderr) => {
             this.session.log.warn('external subagent stderr', {
               subagentId: id,
@@ -529,9 +643,9 @@ export class SessionSubagentHost {
               usage,
             });
           },
-          resumed ? launcher.resumeArgs ?? [] : launcher.args ?? [],
+          resumed,
           sessionId,
-          launcher,
+          runOptions,
         );
         const finishResult = worktree
           ? await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'))
@@ -541,7 +655,7 @@ export class SessionSubagentHost {
           finishResult,
           id,
           runOptions,
-          sessionId,
+          finalSessionId,
         );
         this.emitSubagentCompleted(parent, id, result);
         this.triggerSubagentStop(parent, profileName, completion.result);
@@ -550,7 +664,9 @@ export class SessionSubagentHost {
         if (worktree) {
           await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'failure')).catch(() => {});
         }
-        this.emitSubagentFailed(parent, id, runOptions, error);
+        if (!hasExternalRetryEmitted(error)) {
+          this.emitSubagentFailed(parent, id, runOptions, error);
+        }
         throw error;
       }
     });
@@ -1076,17 +1192,27 @@ export class SessionSubagentHost {
     });
   }
 
+  /**
+   * `attempt`/`exhausted` default to 1/true for the single-shot internal and
+   * resume/retry paths, which never loop — they either succeed or fail once.
+   * `withExternalRetry` passes its own per-attempt values explicitly so the
+   * emitted event stream reconstructs the full external attempt history.
+   */
   private emitSubagentFailed(
     parent: Agent,
     childId: string,
     options: RunSubagentOptions,
     error: unknown,
+    attempt = 1,
+    exhausted = true,
   ): void {
     if (shouldSuppressQueuedAttemptFailureEvent(options, error)) return;
     parent.emitEvent({
       type: 'subagent.failed',
       subagentId: childId,
       error: error instanceof Error ? error.message : String(error),
+      attempt,
+      exhausted,
     });
   }
 }

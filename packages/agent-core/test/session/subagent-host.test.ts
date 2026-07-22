@@ -12,6 +12,7 @@ import type { KimiConfig } from '../../src/config';
 import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
+import { ErrorCodes } from '../../src/errors';
 import { Session } from '../../src/session';
 import { collectGitContext } from '../../src/session/git-context';
 import {
@@ -1751,6 +1752,254 @@ describe('SessionSubagentHost worktree isolation', () => {
       'read_only_launcher.resume_args; this handle is non-resumable',
     );
   });
+});
+
+describe('SessionSubagentHost external retry', () => {
+  async function makeCounterFile(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-subagent-retry-'));
+    tempDirs.push(dir);
+    return join(dir, 'attempts');
+  }
+
+  // Fails the first `failCount` spawns (non-zero exit), then succeeds and
+  // echoes its own argv (minus the node binary) so tests can see which arg
+  // set / session id the surviving attempt actually used.
+  // Note: no curly braces allowed anywhere in this script string —
+  // `validateBackendTemplate` scans every backend arg for `{...}` and
+  // rejects anything that is not one of its known placeholders.
+  function retryScript(counterFile: string, failCount: number): string {
+    const file = JSON.stringify(counterFile);
+    return (
+      `const fs=require('fs');` +
+      `const n=fs.existsSync(${file})?(parseInt(fs.readFileSync(${file},'utf8'),10)||0):0;` +
+      `fs.writeFileSync(${file},String(n+1));` +
+      `n<${failCount}?(process.stderr.write('boom-'+n),process.exit(1)):process.stdout.write('OK:'+process.argv.slice(1).join('|'))`
+    );
+  }
+
+  function failedEventArgs(
+    events: readonly unknown[],
+  ): Array<{ attempt?: number; exhausted?: boolean }> {
+    return events
+      .filter(
+        (entry): entry is { type: string; event: string; args: { attempt?: number; exhausted?: boolean } } =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          (entry as { event?: string }).event === 'subagent.failed',
+      )
+      .map((entry) => ({ attempt: entry.args.attempt, exhausted: entry.args.exhausted }));
+  }
+
+  it('retries a transient external exit and resumes the same session once the launcher supports resume', async () => {
+    const counterFile = await makeCounterFile();
+    const script = retryScript(counterFile, 2);
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            args: ['-e', script, 'FRESH'],
+            resumeArgs: ['-e', script, 'RESUMED', '{session_id}'],
+          },
+        },
+      },
+    });
+    Object.assign(session, { log: { warn: vi.fn() } });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_retry_resume',
+      prompt: 'Review only',
+      description: 'External retry with resume',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        workCard: {
+          id: 'external-retry-resume',
+          title: 'External retry',
+          goal: 'Retry then resume',
+          acceptance: 'Return output',
+          routeOverride: { backend: 'external' },
+        },
+      },
+    });
+
+    const externalSessionId = session.metadata.agents[handle.agentId]?.externalSessionId;
+    await expect(handle.completion).resolves.toEqual({
+      result: `OK:RESUMED|${externalSessionId}`,
+    });
+
+    const failed = failedEventArgs(parent.allEvents);
+    expect(failed).toEqual([
+      { attempt: 1, exhausted: false },
+      { attempt: 2, exhausted: false },
+    ]);
+    expect(parent.allEvents).toContainEqual(
+      expect.objectContaining({ type: '[rpc]', event: 'subagent.completed' }),
+    );
+  }, 10_000);
+
+  it('falls back to a fresh spawn under a new session id when the launcher has no resume args', async () => {
+    const counterFile = await makeCounterFile();
+    const script = retryScript(counterFile, 1);
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: {
+            command: process.execPath,
+            args: ['-e', script, 'FRESH', '{session_id}'],
+          },
+        },
+      },
+    });
+    Object.assign(session, { log: { warn: vi.fn() } });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_retry_fresh',
+      prompt: 'Review only',
+      description: 'External retry without resume',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        workCard: {
+          id: 'external-retry-fresh',
+          title: 'External retry',
+          goal: 'Retry with a fresh spawn',
+          acceptance: 'Return output',
+          routeOverride: { backend: 'external' },
+        },
+      },
+    });
+
+    const originalSessionId = session.metadata.agents[handle.agentId]?.externalSessionId;
+    const result = await handle.completion;
+    expect(result.result.startsWith('OK:FRESH|')).toBe(true);
+    const finalSessionId = result.result.slice('OK:FRESH|'.length);
+    expect(finalSessionId).not.toBe(originalSessionId);
+
+    expect(failedEventArgs(parent.allEvents)).toEqual([{ attempt: 1, exhausted: false }]);
+  }, 10_000);
+
+  it('throws a structured agent.not_resumable error once the retry budget is exhausted, preserving worktree state', async () => {
+    const counterFile = await makeCounterFile();
+    const script = retryScript(counterFile, 999);
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+    const finish = vi.fn(async () => ({ applied: false, reason: 'incomplete' }));
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({ cwd: process.cwd(), finish });
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: { command: process.execPath, args: ['-e', script, 'FRESH'] },
+        },
+      },
+    });
+    Object.assign(session, { log: { warn: vi.fn() } });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_retry_exhausted',
+      prompt: 'Implement the fix',
+      description: 'External retry exhausted',
+      runInBackground: false,
+      signal,
+      dispatch: {
+        discardChanges: true,
+        workCard: {
+          id: 'external-retry-exhausted',
+          title: 'External retry',
+          goal: 'Exhaust the retry budget',
+          acceptance: 'Return output',
+          routeOverride: { backend: 'external' },
+        },
+      },
+    });
+
+    await expect(handle.completion).rejects.toMatchObject({
+      code: ErrorCodes.AGENT_NOT_RESUMABLE,
+    });
+
+    const failed = failedEventArgs(parent.allEvents);
+    expect(failed).toEqual([
+      { attempt: 1, exhausted: false },
+      { attempt: 2, exhausted: false },
+      { attempt: 3, exhausted: false },
+      { attempt: 4, exhausted: true },
+    ]);
+    // Cleanup runs once for the whole retry sequence, not once per attempt.
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({
+      kind: 'discard',
+      reason: 'analysis-only subagent delta discarded after failure',
+    });
+  }, 15_000);
+
+  it('does not retry when the caller aborts, and reports the failure exactly once', async () => {
+    const counterFile = await makeCounterFile();
+    const script = retryScript(counterFile, 999);
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+    const controller = new AbortController();
+    const session = fakeSession(parent.agent, parent.agent, {}, {
+      providers: {},
+      subagent: {
+        backends: {
+          external: { command: process.execPath, args: ['-e', script, 'FRESH'] },
+        },
+      },
+    });
+    Object.assign(session, { log: { warn: vi.fn() } });
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_retry_abort',
+      prompt: 'Review only',
+      description: 'External retry aborted mid-backoff',
+      runInBackground: false,
+      signal: controller.signal,
+      dispatch: {
+        workCard: {
+          id: 'external-retry-abort',
+          title: 'External retry',
+          goal: 'Abort mid-backoff',
+          acceptance: 'Return output',
+          routeOverride: { backend: 'external' },
+        },
+      },
+    });
+
+    // Let the first attempt fail and enter the backoff delay, then abort
+    // before the second attempt would fire.
+    await vi.waitFor(async () => {
+      const fs = await import('node:fs/promises');
+      const contents = await fs.readFile(counterFile, 'utf8').catch(() => '0');
+      expect(Number(contents)).toBeGreaterThanOrEqual(1);
+    });
+    controller.abort(userCancellationReason());
+
+    await expect(handle.completion).rejects.toThrow();
+
+    const fs = await import('node:fs/promises');
+    const attemptsMade = Number(await fs.readFile(counterFile, 'utf8').catch(() => '0'));
+    expect(attemptsMade).toBe(1);
+    expect(failedEventArgs(parent.allEvents)).toHaveLength(1);
+  }, 10_000);
 });
 
 describe('SessionSubagentHost route pools', () => {

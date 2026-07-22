@@ -249,6 +249,7 @@ export type KimiErrorCode =
   | 'session.question_handler_error'
   | 'session.init_failed'
   | 'agent.not_found'
+  | 'agent.not_resumable'
   | 'turn.agent_busy'
   | 'goal.already_exists'
   | 'goal.not_found'
@@ -837,6 +838,10 @@ export interface SubagentFailedEvent {
   readonly type: 'subagent.failed';
   readonly subagentId: string;
   readonly error: string;
+  /** 1-based attempt number for this failure (external retry loop only; always 1 for non-retrying paths). */
+  readonly attempt?: number;
+  /** True once the retry budget is exhausted and no further attempt will be made. */
+  readonly exhausted?: boolean;
 }
 
 export interface CompactionStartedEvent {
@@ -1231,6 +1236,7 @@ export const kimiErrorCodeSchema = z.enum([
   'session.question_handler_error',
   'session.init_failed',
   'agent.not_found',
+  'agent.not_resumable',
   'turn.agent_busy',
   'goal.already_exists',
   'goal.not_found',
@@ -1748,6 +1754,8 @@ export const subagentFailedEventSchema = z.object({
   type: z.literal('subagent.failed'),
   subagentId: z.string(),
   error: z.string(),
+  attempt: z.number().optional(),
+  exhausted: z.boolean().optional(),
 }) satisfies z.ZodType<SubagentFailedEvent>;
 
 export const compactionStartedEventSchema = z.object({
