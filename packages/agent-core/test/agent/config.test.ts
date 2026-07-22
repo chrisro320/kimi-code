@@ -1,6 +1,7 @@
 import type { ModelCapability, ProviderConfig, ToolCall } from '@moonshot-ai/kosong';
 import { describe, expect, it } from 'vitest';
 
+import { FLAG_DEFINITIONS, FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import { createCommandKaos, testAgent } from './harness/agent';
 import { DEFAULT_TEST_SYSTEM_PROMPT } from './harness/snapshots';
@@ -105,6 +106,24 @@ describe('Agent config', () => {
     ctx.agent.useProfile(profile);
 
     expect(ctx.agent.config.systemPrompt).toBe('Prompt with additional dirs: none');
+  });
+
+  it('re-renders profiles with the current scoped compact-skill-listing flag', () => {
+    const flags = new FlagResolver({}, FLAG_DEFINITIONS, { 'compact-skill-listing': true });
+    const ctx = testAgent({ experimentalFlags: flags });
+    ctx.configure();
+    const profile: ResolvedAgentProfile = {
+      name: 'skill-listing-profile',
+      systemPrompt: (context) => `compact=${String(context.compactSkillListing)}`,
+      tools: ['Skill'],
+    };
+
+    ctx.agent.useProfile(profile);
+    expect(ctx.agent.config.systemPrompt).toBe('compact=true');
+
+    flags.setConfigOverrides({ 'compact-skill-listing': false });
+    ctx.agent.useProfile(profile);
+    expect(ctx.agent.config.systemPrompt).toBe('compact=false');
   });
 
   it('config.update with cwd initializes builtin tools', async () => {

@@ -6,5 +6,5 @@ export interface SkillRegistry {
   renderSkillPrompt(skill: SkillDefinition, rawArgs: string): string;
   listInvocableSkills(): readonly SkillDefinition[];
   getSkillRoots(): readonly string[];
-  getModelSkillListing(): string;
+  getModelSkillListing(options?: { readonly compact?: boolean }): string;
 }

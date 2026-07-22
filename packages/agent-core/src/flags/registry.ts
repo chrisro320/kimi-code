@@ -33,6 +33,15 @@ export const FLAG_DEFINITIONS = [
     surface: 'core',
   },
   {
+    id: 'compact-skill-listing',
+    title: 'Compact skill listing',
+    description:
+      'Render a short, path-free catalog of invocable skills in the system prompt; selected skills still load their full instructions.',
+    env: 'KIMI_CODE_EXPERIMENTAL_COMPACT_SKILL_LISTING',
+    default: false,
+    surface: 'core',
+  },
+  {
     id: 'subagent-worktree-isolation',
     title: 'Editing subagent worktree isolation',
     description:

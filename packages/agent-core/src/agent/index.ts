@@ -481,6 +481,7 @@ export class Agent {
       osEnv: this.kaos.osEnv,
       cwd: this.config.cwd,
       skills: this.skills?.registry,
+      compactSkillListing: this.experimentalFlags.enabled('compact-skill-listing'),
       cwdListing: context?.cwdListing,
       agentsMd: context?.agentsMd,
       additionalDirsInfo: context?.additionalDirsInfo,

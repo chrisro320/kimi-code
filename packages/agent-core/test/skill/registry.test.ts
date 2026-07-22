@@ -99,6 +99,66 @@ describe('skill registry prompt rendering', () => {
 });
 
 describe('getModelSkillListing description truncation', () => {
+  it('keeps the default listing detailed for backward compatibility', () => {
+    const skill = {
+      ...makeSkill('demo', 'user', 'Detailed description', '/tmp/user/demo/SKILL.md'),
+      metadata: { type: 'prompt' as const, whenToUse: 'Use for detailed work.' },
+    };
+
+    const rendered = makeRegistry([skill]).getModelSkillListing();
+
+    expect(rendered).toContain('- demo: Detailed description');
+    expect(rendered).toContain('  When to use: Use for detailed work.');
+    expect(rendered).toContain('  Path: /tmp/user/demo/SKILL.md');
+  });
+
+  it('renders a short, path-free compact listing without changing scopes or names', () => {
+    const visible = makeRegistry([
+      makeSkill('builtin-a', 'builtin', 'builtin description'),
+      makeSkill('user-a', 'user', 'user description'),
+      makeSkill('project-a', 'project', 'project description'),
+      makeSkill('extra-a', 'extra', 'extra description'),
+      { ...makeSkill('subskill', 'user'), metadata: { type: 'prompt', isSubSkill: true } },
+      { ...makeSkill('disabled', 'user'), metadata: { type: 'prompt', disableModelInvocation: true } },
+    ]).getModelSkillListing({ compact: true });
+
+    expect(visible).toContain('### Project');
+    expect(visible.indexOf('### Project')).toBeLessThan(visible.indexOf('### User'));
+    expect(visible.indexOf('### User')).toBeLessThan(visible.indexOf('### Extra'));
+    expect(visible.indexOf('### Extra')).toBeLessThan(visible.indexOf('### Built-in'));
+    expect(visible).toContain('- project-a: project description');
+    expect(visible).toContain('- user-a: user description');
+    expect(visible).toContain('- extra-a: extra description');
+    expect(visible).toContain('- builtin-a: builtin description');
+    expect(visible).not.toContain('subskill');
+    expect(visible).not.toContain('disabled');
+    expect(visible).not.toContain('Path:');
+    expect(visible).not.toContain('When to use:');
+  });
+
+  it('truncates compact descriptions on grapheme boundaries', () => {
+    const description = `${'a'.repeat(79)}😀${'b'.repeat(10)}`;
+    const rendered = makeRegistry([makeSkill('demo', 'user', description)]).getModelSkillListing({
+      compact: true,
+    });
+
+    expect(rendered).toContain(`- demo: ${'a'.repeat(79)}…`);
+    expect(rendered).not.toContain('😀');
+    expect(rendered).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  });
+
+  it('normalizes compact descriptions to one line before truncation', () => {
+    const rendered = makeRegistry([
+      makeSkill('demo', 'user', 'first line\nPath: /secret\nWhen to use: leaked\n### Injected'),
+    ]).getModelSkillListing({ compact: true });
+
+    expect(rendered.split('\n').filter((line) => line.startsWith('- demo:'))).toHaveLength(1);
+    expect(rendered).not.toContain('\nPath:');
+    expect(rendered).not.toContain('\nWhen to use:');
+    expect(rendered).not.toContain('\n### Injected');
+  });
   it('keeps descriptions at or below the 250-char limit unchanged', () => {
     const description = 'a'.repeat(250);
     const rendered = makeRegistry([makeSkill('demo', 'user', description)]).getModelSkillListing();

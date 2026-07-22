@@ -40,6 +40,7 @@ export interface SystemPromptContext {
   readonly cwdListing?: string;
   readonly agentsMd?: string;
   readonly skills?: SkillRegistry | string;
+  readonly compactSkillListing?: boolean;
   readonly additionalDirsInfo?: string;
   readonly roleAdditional?: string;
 }

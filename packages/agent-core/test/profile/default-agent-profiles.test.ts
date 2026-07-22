@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import type { SkillRegistry } from '../../src/agent/skill';
 import { DEFAULT_AGENT_PROFILES, loadAgentProfilesFromSources } from '../../src/profile';
 
 const promptContext = {
@@ -38,6 +39,26 @@ describe('default agent profiles', () => {
     expect(prompt.indexOf('Only read skill details when needed')).toBeLessThan(
       prompt.indexOf('- test-skill: does things'),
     );
+  });
+
+  it('passes compact listing mode only when requested by runtime context', () => {
+    const getModelSkillListing = vi.fn((options?: { readonly compact?: boolean }) =>
+      options?.compact === true ? '- compact-skill' : '- full-skill',
+    );
+    const skills = { getModelSkillListing } as unknown as SkillRegistry;
+
+    const compactPrompt = DEFAULT_AGENT_PROFILES['agent']?.systemPrompt({
+      ...promptContext,
+      skills,
+      compactSkillListing: true,
+    });
+    const fullPrompt = DEFAULT_AGENT_PROFILES['agent']?.systemPrompt({ ...promptContext, skills });
+
+    expect(compactPrompt).toContain('- compact-skill');
+    expect(compactPrompt).not.toContain('- full-skill');
+    expect(fullPrompt).toContain('- full-skill');
+    expect(getModelSkillListing).toHaveBeenNthCalledWith(1, { compact: true });
+    expect(getModelSkillListing).toHaveBeenNthCalledWith(2, { compact: false });
   });
 
   it('lists main-only goal and collaboration tools on the agent profile but not on subagent profiles', () => {
