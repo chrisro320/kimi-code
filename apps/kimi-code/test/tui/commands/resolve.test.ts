@@ -17,6 +17,7 @@ function resolve(
     pluginCommandMap: new Map<string, string>(),
     isStreaming: false,
     isCompacting: false,
+    isAgoraResolutionPending: false,
     ...overrides,
   });
 }
@@ -60,6 +61,35 @@ describe('resolveSlashCommandInput', () => {
       kind: 'builtin',
       name: 'experiments',
       args: '',
+    });
+  });
+
+  it('blocks commands that can replace or close a retained Agora source session', () => {
+    for (const input of [
+      '/new',
+      '/clear',
+      '/sessions',
+      '/resume',
+      '/fork',
+      '/logout',
+      '/provider',
+      '/web',
+      '/exit',
+    ]) {
+      expect(resolve(input, { isAgoraResolutionPending: true })).toEqual({
+        kind: 'blocked',
+        commandName: input.slice(1),
+        reason: 'agora-resolution-pending',
+      });
+    }
+    expect(resolve('/agora retry', { isAgoraResolutionPending: true })).toMatchObject({
+      kind: 'builtin',
+      name: 'agora',
+      args: 'retry',
+    });
+    expect(resolve('/help', { isAgoraResolutionPending: true })).toMatchObject({
+      kind: 'builtin',
+      name: 'help',
     });
   });
 
@@ -308,6 +338,9 @@ describe('slash command busy helpers', () => {
     expect(slashCommandBusyReason({ isStreaming: false, isCompacting: true })).toBe('compacting');
     expect(slashBusyMessage('new', 'streaming')).toContain('Cannot /new while streaming');
     expect(slashBusyMessage('new', 'compacting')).toContain('Cannot /new while compacting');
+    expect(slashBusyMessage('new', 'agora-resolution-pending')).toContain(
+      'Run /agora retry before changing sessions',
+    );
   });
 
   it('resolves a namespaced plugin command to a plugin-command intent', () => {

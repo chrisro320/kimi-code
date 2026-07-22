@@ -34,6 +34,7 @@ import type {
   PluginSummary,
   PromptInput,
   ReloadSessionOptions,
+  ResolveAgoraHandoffInput,
   ReloadSummary,
   ResumedSessionState,
   ResumedSessionSummary,
@@ -704,6 +705,34 @@ export class Session {
       capability: input.capability,
       proposal: input.proposal,
       confirmation: input.confirmation,
+    });
+  }
+
+  async resolveAgoraHandoff(input: ResolveAgoraHandoffInput): Promise<AgoraLifecycleTransitionResult> {
+    this.ensureOpen();
+    const runId = normalizeRequiredString(
+      input.runId,
+      'Agora run id cannot be empty',
+      ErrorCodes.REQUEST_INVALID,
+    );
+    if (input.capability.runId !== runId || input.handoff.runId !== runId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora handoff run id does not match the lifecycle capability');
+    }
+    if (input.handoff.sourceSessionId !== this.id) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora handoff is bound to a different source session');
+    }
+    const transitionId = normalizeRequiredString(
+      input.transitionId,
+      'Agora transition id cannot be empty',
+      ErrorCodes.REQUEST_INVALID,
+    );
+    return this.rpc.resolveAgoraHandoff({
+      sessionId: this.id,
+      runId,
+      transitionId,
+      capability: input.capability,
+      handoff: input.handoff,
+      resolution: input.resolution,
     });
   }
 

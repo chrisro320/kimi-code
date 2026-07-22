@@ -49,6 +49,8 @@ export {
   fromKimiErrorPayload,
   isKimiError,
   toKimiErrorPayload,
+  // Shared Agora terminal-phase set — TUI may import only via this SDK surface.
+  TERMINAL_PHASES,
 } from '@moonshot-ai/agent-core';
 
 // Diagnostic logging — public surface only.

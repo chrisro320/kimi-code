@@ -50,6 +50,7 @@ export interface ResolveSlashCommandInput {
   readonly pluginCommandMap: ReadonlyMap<string, string>;
   readonly isStreaming: boolean;
   readonly isCompacting: boolean;
+  readonly isAgoraResolutionPending: boolean;
 }
 
 export function resolveSlashCommandInput(options: ResolveSlashCommandInput): SlashCommandIntent {
@@ -57,11 +58,21 @@ export function resolveSlashCommandInput(options: ResolveSlashCommandInput): Sla
   if (parsed === null) return { kind: 'not-command' };
 
   const command = findBuiltInSlashCommand(parsed.name);
-  // `command` is a literal union where only some members carry `experimentalFlag`; widen to read it.
+  // `command` is a literal union where only some members carry optional metadata; widen to read it.
   if (
     command !== undefined &&
     isExperimentalFlagEnabled((command as KimiSlashCommand).experimentalFlag)
   ) {
+    if (
+      options.isAgoraResolutionPending &&
+      (command as KimiSlashCommand).changesSession === true
+    ) {
+      return {
+        kind: 'blocked',
+        commandName: parsed.name,
+        reason: 'agora-resolution-pending',
+      };
+    }
     const busyReason = slashCommandBusyReason(options);
     if (
       busyReason !== undefined &&
@@ -148,5 +159,8 @@ export function slashBusyMessage(
   if (reason === 'streaming') {
     return `Cannot /${commandName} while streaming — press Esc or Ctrl-C first.`;
   }
-  return `Cannot /${commandName} while compacting — wait for compaction to finish first.`;
+  if (reason === 'compacting') {
+    return `Cannot /${commandName} while compacting — wait for compaction to finish first.`;
+  }
+  return `Cannot /${commandName} while Agora handoff terminal resolution is pending. Run /agora retry before changing sessions.`;
 }

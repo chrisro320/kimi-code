@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { AgoraLifecycleCapability, KimiConfig } from '@moonshot-ai/kimi-code-sdk';
+import { TERMINAL_PHASES, type AgoraLifecycleCapability, type KimiConfig } from '@moonshot-ai/kimi-code-sdk';
 
 import { ChoicePickerComponent, type ChoiceOption } from '../components/dialogs/choice-picker';
 import {
@@ -10,6 +10,7 @@ import {
 import { LLM_NOT_SET_MESSAGE } from '../constant/kimi-tui';
 import type { AgoraPeerStatus, AgoraStatus } from '../types';
 import { formatErrorMessage } from '../utils/event-payload';
+import { formatAgoraRecoveryInstructions } from '../utils/agora-recovery';
 import type { SlashCommandHost } from './dispatch';
 
 const DEFAULT_AGORA_PEERS = [
@@ -19,12 +20,19 @@ const DEFAULT_AGORA_PEERS = [
 
 /**
  * Agora lifecycle capabilities minted by `insertAgoraReview`, kept in process
- * memory only (never persisted or broadcast) and consumed by `/agora cancel`.
- * A capability is a bearer secret bound to this process; if the session is
- * resumed elsewhere it will not be present here and cancel degrades to a
- * local-only state clear (see the cancel branch below).
+ * memory only (never persisted or broadcast) and consumed by cancellation or
+ * the source-session terminal handoff transition. A capability is a bearer
+ * secret bound to this process; a resumed process must recover without it.
  */
 const agoraCapabilities = new Map<string, AgoraLifecycleCapability>();
+
+export function getAgoraLifecycleCapability(runId: string): AgoraLifecycleCapability | undefined {
+  return agoraCapabilities.get(runId);
+}
+
+export function releaseAgoraLifecycleCapability(runId: string): void {
+  agoraCapabilities.delete(runId);
+}
 
 function invocation(runId: string): string {
   return [
@@ -52,15 +60,68 @@ function formatStatus(agora: AgoraStatus): string {
   ].filter((part): part is string => part !== undefined).join(' · ');
 }
 
+function isAgoraTerminalResolutionPending(host: SlashCommandHost): boolean {
+  return (
+    host.isAgoraSessionTransitionPending?.() ??
+    host.state.appState.agora?.phase === 'resolution_pending'
+  );
+}
+
+interface AgoraMutationContext {
+  readonly sourceSession: SlashCommandHost['session'];
+  readonly transitionGeneration?: number;
+}
+
+function captureAgoraMutationContext(host: SlashCommandHost): AgoraMutationContext {
+  return {
+    sourceSession: host.session,
+    transitionGeneration: host.getSessionTransitionGeneration?.(),
+  };
+}
+
+function blockAgoraMutationDuringTerminalResolution(
+  host: SlashCommandHost,
+  context?: AgoraMutationContext,
+): boolean {
+  if (isAgoraTerminalResolutionPending(host)) {
+    host.showError(
+      'Agora handoff terminal resolution is pending. Run /agora retry before starting or changing another Agora review.',
+    );
+    return true;
+  }
+  if (
+    context !== undefined &&
+    (host.session !== context.sourceSession ||
+      (context.transitionGeneration !== undefined &&
+        host.getSessionTransitionGeneration?.() !== context.transitionGeneration))
+  ) {
+    host.showError('Agora change cancelled because a handoff changed the active session.');
+    return true;
+  }
+  return false;
+}
+
 export async function handleAgoraCommand(host: SlashCommandHost, args: string): Promise<void> {
   const argument = args.trim();
   const action = argument.toLowerCase();
 
   if (action === 'status') {
     const agora = host.state.appState.agora;
-    host.showStatus(agora === null || agora === undefined ? 'No Agora review is active.' : formatStatus(agora));
+    host.showStatus(
+      agora === null || agora === undefined
+        ? isAgoraTerminalResolutionPending(host)
+          ? 'Agora handoff terminal resolution is pending. Run /agora retry.'
+          : 'No Agora review is active.'
+        : formatStatus(agora),
+    );
     return;
   }
+
+  if (action === 'retry') {
+    await host.retryAgoraHandoff();
+    return;
+  }
+  if (blockAgoraMutationDuringTerminalResolution(host)) return;
 
   if (action === 'cancel') {
     const agora = host.state.appState.agora;
@@ -68,27 +129,32 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
       host.showStatus('No Agora review is active.');
       return;
     }
-    if (host.session === undefined) {
-      host.showError(LLM_NOT_SET_MESSAGE);
+    if (agora.phase === 'resolution_pending') {
+      host.showError('Agora handoff terminal resolution is pending. Run /agora retry to retry the durable flush.');
       return;
     }
-    const capability = agora.runId === undefined ? undefined : agoraCapabilities.get(agora.runId);
+    if (host.session === undefined) {
+      host.setAppState({ agora: null });
+      host.showError(`Cannot cancel Agora review: session unavailable; the durable review was not cancelled.${formatAgoraRecoveryInstructions(agora)}`);
+      return;
+    }
+    const capability = agora.runId === undefined ? undefined : getAgoraLifecycleCapability(agora.runId);
     if (capability === undefined) {
       if (agora.runId !== undefined) {
         try {
           const durable = await host.session.getAgoraReview(agora.runId);
-          if (durable !== undefined && durable.phase !== 'cancelled') {
-            // No bearer in this process (e.g. cross-process resume): the durable
-            // cancel cannot be driven from here, but the local preflight must
-            // not stay stuck. Clear the UI; the durable record may need cleanup
-            // from the owning host.
+          if (durable !== undefined) {
             host.setAppState({ agora: null });
-            host.showError('Cleared local Agora status, but the durable review could not be cancelled from here (no host capability in this process) — clean it up from the owning host if needed.');
+            if (TERMINAL_PHASES.has(durable.phase)) {
+              host.showStatus(`Durable Agora review is already terminal (${durable.phase}); cleared stale local status.`);
+              return;
+            }
+            host.showError(`Cleared local Agora status; this process cannot cancel the durable review because host capability is unavailable. The durable review was not cancelled.${formatAgoraRecoveryInstructions(durable)}`);
             return;
           }
         } catch (error) {
           host.setAppState({ agora: null });
-          host.showError(`Cleared local Agora status; durable state could not be verified (${error instanceof Error ? error.message : String(error)}).`);
+          host.showError(`Cleared local Agora status; durable state verification failed (${error instanceof Error ? error.message : String(error)}); the durable review was not cancelled.${formatAgoraRecoveryInstructions(agora)}`);
           return;
         }
       }
@@ -105,7 +171,7 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
         transitionId: randomUUID(),
         capability,
       });
-      agoraCapabilities.delete(capability.runId);
+      releaseAgoraLifecycleCapability(capability.runId);
       // The durable cancel transition emits `agora.lifecycle.updated` with a
       // terminal phase; the session event handler is the sole authority that
       // clears `AppState.agora` for a run with a real lifecycle record. Any
@@ -118,7 +184,7 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
       // clear it so the UI recovers, and tell the user what may still need an
       // out-of-band cleanup.
       host.setAppState({ agora: null });
-      host.showError(`Agora review could not be cancelled cleanly (cleared local status): ${error instanceof Error ? error.message : String(error)}`);
+      host.showError(`Agora review could not be cancelled cleanly (cleared local status): ${error instanceof Error ? error.message : String(error)}.${formatAgoraRecoveryInstructions(agora)}`);
     }
     return;
   }
@@ -137,7 +203,7 @@ export async function handleAgoraCommand(host: SlashCommandHost, args: string): 
     return;
   }
   if (argument.length === 0) {
-    host.showError('Usage: /agora <review focus> | /agora status | /agora cancel | /agora roster');
+    host.showError('Usage: /agora <review focus> | /agora status | /agora retry | /agora cancel | /agora roster');
     return;
   }
 
@@ -213,6 +279,8 @@ function effectiveRoster(config: KimiConfig): { readonly peers: readonly AgoraPe
 }
 
 async function handleAgoraRoster(host: SlashCommandHost): Promise<void> {
+  if (blockAgoraMutationDuringTerminalResolution(host)) return;
+  const context = captureAgoraMutationContext(host);
   let config: KimiConfig;
   try {
     config = await host.harness.getConfig({ reload: true });
@@ -220,35 +288,51 @@ async function handleAgoraRoster(host: SlashCommandHost): Promise<void> {
     host.showError(`Failed to load Agora roster: ${formatErrorMessage(error)}`);
     return;
   }
-  showRosterManager(host, config);
+  if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
+  showRosterManager(host, config, context);
 }
 
-function showRosterManager(host: SlashCommandHost, config: KimiConfig): void {
+function showRosterManager(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  context: AgoraMutationContext,
+): void {
   const roster = effectiveRoster(config);
   host.mountEditorReplacement(
     new AgoraRosterManagerComponent({
       peers: roster.peers,
       configured: roster.configured,
-      onAdd: () => showRosterRoutePicker(host, config),
+      onAdd: () => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
+        showRosterRoutePicker(host, config, context);
+      },
       onEdit: (index) => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
         host.restoreEditor();
         if (!roster.configured) {
           host.showError('Built-in fallback peer; add your own peer to configure the roster.');
           return;
         }
         const peer = roster.peers[index];
-        if (peer !== undefined) showRosterMemberActions(host, config, peer.id);
+        if (peer !== undefined) showRosterMemberActions(host, config, peer.id, context);
       },
       onRemove: (index) => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
         const peer = roster.peers[index];
-        if (roster.configured && peer !== undefined) void removeRosterPeer(host, peer.id);
+        if (roster.configured && peer !== undefined) {
+          void removeRosterPeer(host, peer.id, context);
+        }
       },
       onClose: () => host.restoreEditor(),
     }),
   );
 }
 
-function showRosterRoutePicker(host: SlashCommandHost, config: KimiConfig): void {
+function showRosterRoutePicker(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  context: AgoraMutationContext,
+): void {
   const options: ChoiceOption[] = [
     ...Object.keys(config.models ?? {}).toSorted().map((alias) => ({
       value: `model:${alias}`,
@@ -277,15 +361,20 @@ function showRosterRoutePicker(host: SlashCommandHost, config: KimiConfig): void
       noticeTone: 'warning',
       options,
       onSelect: (value) => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
         host.restoreEditor();
         const choice = parseRosterChoice(value);
         if (choice.kind === 'model') {
-          void saveRosterPeer(host, {
-            id: choice.alias,
-            backend: 'kimi',
-            modelOverride: choice.alias,
-            displayName: config.models?.[choice.alias]?.displayName,
-          });
+          void saveRosterPeer(
+            host,
+            {
+              id: choice.alias,
+              backend: 'kimi',
+              modelOverride: choice.alias,
+              displayName: config.models?.[choice.alias]?.displayName,
+            },
+            context,
+          );
           return;
         }
         const backend = config.subagent?.backends?.[choice.name];
@@ -294,9 +383,9 @@ function showRosterRoutePicker(host: SlashCommandHost, config: KimiConfig): void
           return;
         }
         if ((backend.args ?? []).some((arg) => arg.includes('{model}'))) {
-          showRosterExternalModelPicker(host, config, choice.name);
+          showRosterExternalModelPicker(host, config, choice.name, context);
         } else {
-          void saveRosterPeer(host, { id: choice.name, backend: choice.name });
+          void saveRosterPeer(host, { id: choice.name, backend: choice.name }, context);
         }
       },
       onCancel: () => host.restoreEditor(),
@@ -304,7 +393,12 @@ function showRosterRoutePicker(host: SlashCommandHost, config: KimiConfig): void
   );
 }
 
-function showRosterExternalModelPicker(host: SlashCommandHost, config: KimiConfig, backendName: string): void {
+function showRosterExternalModelPicker(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  backendName: string,
+  context: AgoraMutationContext,
+): void {
   const aliases = Object.keys(config.models ?? {}).toSorted();
   if (aliases.length === 0) {
     host.showError(`Backend "${backendName}" requires {model}, but no model aliases are configured.`);
@@ -320,15 +414,25 @@ function showRosterExternalModelPicker(host: SlashCommandHost, config: KimiConfi
         description: config.models?.[alias]?.displayName,
       })),
       onSelect: (model) => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
         host.restoreEditor();
-        void saveRosterPeer(host, { id: model, backend: backendName, modelOverride: model });
+        void saveRosterPeer(
+          host,
+          { id: model, backend: backendName, modelOverride: model },
+          context,
+        );
       },
       onCancel: () => host.restoreEditor(),
     }),
   );
 }
 
-function showRosterMemberActions(host: SlashCommandHost, config: KimiConfig, peerId: string): void {
+function showRosterMemberActions(
+  host: SlashCommandHost,
+  config: KimiConfig,
+  peerId: string,
+  context: AgoraMutationContext,
+): void {
   host.mountEditorReplacement(
     new ChoicePickerComponent({
       title: `Manage Agora peer: ${peerId}`,
@@ -338,11 +442,12 @@ function showRosterMemberActions(host: SlashCommandHost, config: KimiConfig, pee
         { value: 'remove', label: 'Remove peer', tone: 'danger' },
       ],
       onSelect: (action) => {
+        if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
         host.restoreEditor();
         if (action === 'replace') {
-          void replaceRosterPeer(host, config, peerId);
+          void replaceRosterPeer(host, config, peerId, context);
         } else {
-          void removeRosterPeer(host, peerId);
+          void removeRosterPeer(host, peerId, context);
         }
       },
       onCancel: () => host.restoreEditor(),
@@ -353,7 +458,9 @@ function showRosterMemberActions(host: SlashCommandHost, config: KimiConfig, pee
 async function saveRosterPeer(
   host: SlashCommandHost,
   peer: { readonly id: string; readonly backend: string; readonly modelOverride?: string; readonly displayName?: string },
+  context: AgoraMutationContext,
 ): Promise<void> {
+  if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
   try {
     await host.harness.setConfig({
       agora: {
@@ -366,41 +473,61 @@ async function saveRosterPeer(
         },
       },
     });
+    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     const session = host.session;
     if (session !== undefined) {
       await session.reloadSession();
+      if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
       await host.reloadCurrentSessionView(session, 'Agora roster saved and applied.');
+      if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     }
     const refreshed = await host.harness.getConfig({ reload: true });
+    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     host.refreshSlashCommandAutocomplete();
     host.showStatus(`Agora peer "${peer.id}" saved to config.toml.`, 'success');
-    showRosterManager(host, refreshed);
+    showRosterManager(host, refreshed, context);
   } catch (error) {
     host.showError(`Failed to save Agora peer: ${formatErrorMessage(error)}`);
   }
 }
 
-async function replaceRosterPeer(host: SlashCommandHost, _config: KimiConfig, peerId: string): Promise<void> {
+async function replaceRosterPeer(
+  host: SlashCommandHost,
+  _config: KimiConfig,
+  peerId: string,
+  context: AgoraMutationContext,
+): Promise<void> {
+  if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
   try {
     const refreshed = await host.harness.removeAgoraPeer(peerId);
-    showRosterRoutePicker(host, refreshed);
+    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
+    showRosterRoutePicker(host, refreshed, context);
   } catch (error) {
     host.showError(`Failed to remove peer "${peerId}": ${formatErrorMessage(error)}`);
   }
 }
 
-async function removeRosterPeer(host: SlashCommandHost, peerId: string): Promise<void> {
+async function removeRosterPeer(
+  host: SlashCommandHost,
+  peerId: string,
+  context: AgoraMutationContext,
+): Promise<void> {
+  if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
   try {
     await host.harness.removeAgoraPeer(peerId);
+    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     const session = host.session;
     if (session !== undefined) {
       await session.reloadSession();
+      if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
       await host.reloadCurrentSessionView(session, 'Agora roster saved and applied.');
+      if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     }
     const refreshed = await host.harness.getConfig({ reload: true });
+    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     host.refreshSlashCommandAutocomplete();
     host.showStatus(`Agora peer "${peerId}" removed.`, 'success');
-    showRosterManager(host, refreshed);
+    showRosterManager(host, refreshed, context);
   } catch (error) {
     host.showError(`Failed to remove Agora peer: ${formatErrorMessage(error)}`);
   }

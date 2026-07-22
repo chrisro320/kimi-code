@@ -126,7 +126,7 @@ export interface SlashCommandHost {
 
   // Session
   requireSession(): Session;
-  switchToSession(session: Session, message: string): Promise<void>;
+  switchToSession(session: Session, message: string): Promise<boolean>;
   reloadCurrentSessionView(session: Session, message: string): Promise<void>;
   beginSessionRequest(): void;
   failSessionRequest(message: string): void;
@@ -154,6 +154,10 @@ export interface SlashCommandHost {
   setExitForegroundTask(task: (exitCode: number) => Promise<void>): void;
   showHelpPanel(): void;
   createNewSession(): Promise<void>;
+  retryAgoraHandoff(): Promise<void>;
+  isAgoraSessionTransitionPending?(): boolean;
+  getSessionTransitionGeneration?(): number;
+  blockSessionTransitionForPendingAgoraResolution?(): boolean;
   showSessionPicker(): Promise<void>;
   sendNormalUserInput(text: string): void;
   sendSkillActivation(session: Session, skillName: string, skillArgs: string): void;
@@ -193,6 +197,9 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
     pluginCommandMap: host.pluginCommandMap,
     isStreaming: host.state.appState.streamingPhase !== 'idle',
     isCompacting: host.state.appState.isCompacting,
+    isAgoraResolutionPending:
+      host.isAgoraSessionTransitionPending?.() ??
+      host.state.appState.agora?.phase === 'resolution_pending',
   });
 
   switch (intent.kind) {

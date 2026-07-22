@@ -1,6 +1,7 @@
 import type {
   AgoraLifecycleAdapter,
   AgoraLifecycleCapability,
+  AgoraLifecycleMaterializedHandoff,
   AgoraMaterializationConfirmationProof,
   AgoraMaterializationProposal,
   DispatchMode,
@@ -187,6 +188,14 @@ export interface MaterializeAgoraReviewInput {
   readonly capability: AgoraLifecycleCapability;
   readonly proposal: AgoraMaterializationProposal;
   readonly confirmation: AgoraMaterializationConfirmationProof;
+}
+
+export interface ResolveAgoraHandoffInput {
+  readonly runId: string;
+  readonly transitionId: string;
+  readonly capability: AgoraLifecycleCapability;
+  readonly handoff: AgoraLifecycleMaterializedHandoff;
+  readonly resolution: 'resolved_to_origin' | 'resolved_to_successor';
 }
 
 export interface AddAdditionalDirInput {

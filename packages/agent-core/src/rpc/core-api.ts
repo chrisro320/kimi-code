@@ -164,6 +164,14 @@ export interface MaterializeAgoraReviewPayload {
   readonly confirmation: AgoraMaterializationConfirmationProof;
 }
 
+export interface ResolveAgoraHandoffPayload {
+  readonly runId: string;
+  readonly transitionId: string;
+  readonly capability: AgoraLifecycleCapability;
+  readonly handoff: AgoraLifecycleMaterializedHandoff;
+  readonly resolution: 'resolved_to_origin' | 'resolved_to_successor';
+}
+
 export interface MaterializeAgoraReviewResult {
   readonly runId: string;
   readonly success: boolean;
@@ -586,6 +594,7 @@ export interface SessionAPI extends AgentAPIWithId {
   cancelAgoraReview: (payload: CancelAgoraReviewPayload) => AgoraLifecycleTransitionResult;
   confirmAgoraMaterialization: (payload: ConfirmAgoraMaterializationPayload) => AgoraMaterializationConfirmation;
   materializeAgoraReview: (payload: MaterializeAgoraReviewPayload) => MaterializeAgoraReviewResult;
+  resolveAgoraHandoff: (payload: ResolveAgoraHandoffPayload) => AgoraLifecycleTransitionResult;
 }
 
 type SessionAPIWithId = WithSessionId<SessionAPI>;

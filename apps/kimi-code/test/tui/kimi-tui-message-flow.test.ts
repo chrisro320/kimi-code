@@ -12,7 +12,9 @@ import type { ApprovalRequest, ApprovalResponse, Event } from '@moonshot-ai/kimi
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel';
+import { ChoicePickerComponent } from '#/tui/components/dialogs/choice-picker';
 import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
+import { ProviderManagerComponent } from '#/tui/components/dialogs/provider-manager';
 import { KIMI_CODE_PLUGIN_MARKETPLACE_URL } from '#/constant/app';
 import { MOON_SPINNER_FRAMES } from '#/tui/constant/rendering';
 import {
@@ -41,6 +43,7 @@ import {
 } from '#/tui/components/dialogs/plugins-selector';
 import {
   bindAgoraHandoff,
+  markAgoraHandoffFailed,
   prepareAgoraHandoff,
 } from '#/tui/agora-handoff';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
@@ -3553,7 +3556,11 @@ command = "vim"
     expect(driver.state.appState.agora).toMatchObject({ runId: 'run-1', phase: 'peer_review' });
   });
 
-  it('clears Agora only after a typed terminal lifecycle event', async () => {
+  it.each([
+    ['cancelled', 'cancelled'],
+    ['resolved_to_origin', 'resumed'],
+    ['resolved_to_successor', 'materialized'],
+  ] as const)('clears Agora only after a typed %s terminal lifecycle event', async (phase, terminalState) => {
     const { driver } = await makeDriver();
     driver.state.appState.agora = {
       runId: 'run-1',
@@ -3566,9 +3573,9 @@ command = "vim"
       agentId: 'main',
       sessionId: 'ses-1',
       runId: 'run-1',
-      phase: 'resolved_to_successor',
+      phase,
       targetTask: '.trellis/tasks/successor',
-      terminalState: 'materialized',
+      terminalState,
       sourceSessionId: 'ses-1',
     } as Event, vi.fn());
 
@@ -3606,6 +3613,719 @@ command = "vim"
         digest: 'a'.repeat(64),
       },
     );
+  });
+
+  it('binds the target before resolving the source handoff and clears only from its terminal event', async () => {
+    vi.mocked(prepareAgoraHandoff).mockReset();
+    vi.mocked(bindAgoraHandoff).mockReset();
+    const insertAgoraReview = vi.fn(async ({ runId }: { runId: string }) => ({
+      handle: { operationId: 'op-1', sessionId: 'ses-source', runId, epoch: 'epoch-1' },
+      snapshot: { runId, phase: 'packet_confirmation' },
+    }));
+    const resolveAgoraHandoff = vi.fn(async () => undefined);
+    const source = makeSession({
+      id: 'ses-source',
+      insertAgoraReview,
+      resolveAgoraHandoff,
+    });
+    const target = makeSession({ id: 'ses-target' });
+    const { driver, harness } = await makeDriver(source);
+
+    driver.handleUserInput('/agora validate terminal resolution');
+    await vi.waitFor(() => expect(insertAgoraReview).toHaveBeenCalledOnce());
+    const runId = driver.state.appState.agora?.runId;
+    if (runId === undefined) throw new Error('Expected Agora preflight run id.');
+    const targetTask = '.trellis/tasks/target';
+    const digest = 'a'.repeat(64);
+    const handoffPath = `${targetTask}/agora-handoff.json`;
+    const expected = {
+      runId,
+      sourceSessionId: source.id,
+      targetTask,
+      digest,
+      insertedTask: '.trellis/tasks/review',
+    };
+    const prepared = {
+      path: `/tmp/proj-a/${handoffPath}`,
+      handoff: {
+        schemaVersion: 1,
+        runId,
+        mode: 'acceptance',
+        sourceSessionId: source.id,
+        targetTask,
+        originDisposition: 'corrects',
+        phase: 'fresh_session_pending',
+        artifactPaths: [`${targetTask}/implement.md`],
+        artifactRevisions: {},
+        implementationResumeAnchor: 'Step 1',
+        validationState: 'confirmed',
+        sourceSessionLineage: [source.id],
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      todos: [{ title: 'Step 1', status: 'in_progress' }],
+    } satisfies Awaited<ReturnType<typeof prepareAgoraHandoff>>;
+    vi.mocked(prepareAgoraHandoff).mockResolvedValueOnce(prepared);
+    vi.mocked(bindAgoraHandoff).mockResolvedValueOnce({
+      ...prepared.handoff,
+      phase: 'resolved_to_successor',
+      targetSessionId: target.id,
+      transition: 'fresh_session_ready',
+    });
+    harness.createSession.mockResolvedValueOnce(target);
+    resolveAgoraHandoff.mockImplementationOnce(async () => {
+      expect(driver.state.appState.agora?.runId).toBe(runId);
+      driver.sessionEventHandler.handleEvent({
+        type: 'agora.lifecycle.updated',
+        agentId: 'main',
+        sessionId: source.id,
+        runId,
+        phase: 'resolved_to_successor',
+        sourceSessionId: source.id,
+        terminalState: 'materialized',
+      } as Event, vi.fn());
+    });
+
+    await driver.createAgoraHandoffSession(handoffPath, expected);
+
+    expect(vi.mocked(bindAgoraHandoff)).toHaveBeenCalledWith(prepared, target.id, '/tmp/proj-a');
+    expect(target.updateMetadata).toHaveBeenCalledWith(expect.objectContaining({
+      agoraHandoff: expect.objectContaining({
+        runId,
+        targetTask,
+        transition: 'fresh_session_ready',
+      }),
+    }));
+    expect(vi.mocked(bindAgoraHandoff).mock.invocationCallOrder[0]).toBeLessThan(
+      resolveAgoraHandoff.mock.invocationCallOrder[0]!,
+    );
+    expect(target.updateMetadata.mock.invocationCallOrder[0]).toBeLessThan(
+      resolveAgoraHandoff.mock.invocationCallOrder[0]!,
+    );
+    expect(resolveAgoraHandoff).toHaveBeenCalledWith(expect.objectContaining({
+      runId,
+      capability: expect.objectContaining({ runId }),
+      handoff: {
+        runId,
+        sourceSessionId: source.id,
+        targetTask,
+        handoffPath,
+        phase: 'fresh_session_pending',
+        digest,
+      },
+      resolution: 'resolved_to_successor',
+    }));
+    expect(driver.state.appState.agora).toBeNull();
+    expect(driver.getCurrentSessionId()).toBe(target.id);
+  });
+
+  it('clears a missing-capability handoff locally without creating or failing a durable handoff', async () => {
+    vi.mocked(prepareAgoraHandoff).mockReset();
+    vi.mocked(markAgoraHandoffFailed).mockReset();
+    const source = makeSession({ id: 'ses-source' });
+    const { driver, harness } = await makeDriver(source);
+    harness.createSession.mockClear();
+    source.close.mockClear();
+    const runId = 'run-missing-capability';
+    const targetTask = ".trellis/tasks/review's";
+    const digest = 'b'.repeat(64);
+    const handoffPath = `${targetTask}/agora-handoff.json`;
+    const expected = {
+      runId,
+      sourceSessionId: source.id,
+      targetTask,
+      digest,
+      insertedTask: targetTask,
+    };
+    driver.state.appState.agora = {
+      runId,
+      insertedTask: targetTask,
+      phase: 'fresh_session_pending',
+      hostRoute: 'coder',
+      peers: [],
+    };
+    const showError = vi.spyOn(
+      driver as unknown as { showError(message: string): void },
+      'showError',
+    );
+
+    await driver.createAgoraHandoffSession(handoffPath, expected);
+
+    expect(vi.mocked(prepareAgoraHandoff)).not.toHaveBeenCalled();
+    expect(vi.mocked(markAgoraHandoffFailed)).not.toHaveBeenCalled();
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(source.close).not.toHaveBeenCalled();
+    expect(driver.state.appState.agora).toBeNull();
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining(
+      'Agora handoff cannot resolve in this process because its lifecycle capability is unavailable',
+    ));
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining(
+      'durable completion was not confirmed',
+    ));
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining(
+      "python3 ./.trellis/scripts/task.py agora-cancel '.trellis/tasks/review'\\''s'",
+    ));
+  });
+
+  it('keeps a pending source exclusive and serializes concurrent retry dispatches', async () => {
+    vi.mocked(prepareAgoraHandoff).mockReset();
+    vi.mocked(bindAgoraHandoff).mockReset();
+    vi.mocked(markAgoraHandoffFailed).mockReset();
+    const insertAgoraReview = vi.fn(async ({ runId }: { runId: string }) => ({
+      handle: { operationId: 'op-resolve-fail', sessionId: 'ses-source', runId, epoch: 'epoch-1' },
+      snapshot: { runId, phase: 'packet_confirmation' },
+    }));
+    const resolveAgoraHandoff = vi.fn(async (_payload: unknown): Promise<void> => {
+      throw new Error('terminal flush unavailable');
+    });
+    const source = makeSession({
+      id: 'ses-source',
+      insertAgoraReview,
+      resolveAgoraHandoff,
+    });
+    const target = makeSession({ id: 'ses-target' });
+    const { driver, harness } = await makeDriver(source);
+    const setTodoList = vi.spyOn(driver.streamingUI, 'setTodoList');
+
+    driver.handleUserInput('/agora validate failed resolution');
+    await vi.waitFor(() => expect(insertAgoraReview).toHaveBeenCalledOnce());
+    const runId = driver.state.appState.agora?.runId;
+    if (runId === undefined) throw new Error('Expected Agora preflight run id.');
+    const targetTask = '.trellis/tasks/target';
+    const digest = 'c'.repeat(64);
+    const handoffPath = `${targetTask}/agora-handoff.json`;
+    const expected = {
+      runId,
+      sourceSessionId: source.id,
+      targetTask,
+      digest,
+      insertedTask: '.trellis/tasks/review',
+    };
+    const prepared = {
+      path: `/tmp/proj-a/${handoffPath}`,
+      handoff: {
+        schemaVersion: 1,
+        runId,
+        mode: 'acceptance',
+        sourceSessionId: source.id,
+        targetTask,
+        originDisposition: 'corrects',
+        phase: 'fresh_session_pending',
+        artifactPaths: [`${targetTask}/implement.md`],
+        artifactRevisions: {},
+        implementationResumeAnchor: 'Step 1',
+        validationState: 'confirmed',
+        sourceSessionLineage: [source.id],
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      todos: [{ title: 'Step 1', status: 'in_progress' }],
+    } satisfies Awaited<ReturnType<typeof prepareAgoraHandoff>>;
+    vi.mocked(prepareAgoraHandoff).mockResolvedValueOnce(prepared);
+    vi.mocked(bindAgoraHandoff).mockResolvedValueOnce({
+      ...prepared.handoff,
+      phase: 'resolved_to_successor',
+      targetSessionId: target.id,
+      transition: 'fresh_session_ready',
+    });
+    const staleCreated = makeSession({ id: 'ses-stale-created' });
+    const staleResumed = makeSession({ id: 'ses-stale-resumed' });
+    const staleForked = makeSession({ id: 'ses-stale-forked' });
+    let resolveStaleCreate!: (session: ReturnType<typeof makeSession>) => void;
+    const staleCreateResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveStaleCreate = resolve;
+    });
+    let resolveStaleResume!: (session: ReturnType<typeof makeSession>) => void;
+    const staleResumeResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveStaleResume = resolve;
+    });
+    let resolveStaleFork!: (session: ReturnType<typeof makeSession>) => void;
+    const staleForkResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveStaleFork = resolve;
+    });
+    harness.createSession.mockClear();
+    harness.resumeSession.mockClear();
+    harness.forkSession.mockClear();
+    harness.createSession
+      .mockImplementationOnce(async () => staleCreateResult)
+      .mockResolvedValueOnce(target);
+    harness.resumeSession.mockImplementationOnce(async () => staleResumeResult);
+    harness.forkSession.mockImplementationOnce(async () => staleForkResult);
+    const showError = vi.spyOn(
+      driver as unknown as { showError(message: string): void },
+      'showError',
+    );
+    const sessionDriver = driver as unknown as {
+      resumeSession(targetSessionId: string): Promise<boolean>;
+      switchToSession(session: ReturnType<typeof makeSession>, message: string): Promise<boolean>;
+      isAgoraSessionTransitionPending(): boolean;
+    };
+    const logoutConfig = {
+      providers: {
+        'managed:kimi-code': {},
+        acme: { type: 'openai', baseUrl: 'https://acme.test' },
+        beta: { type: 'openai', baseUrl: 'https://beta.test' },
+      },
+      models: {
+        k2: {
+          provider: 'managed:kimi-code',
+          model: 'moonshot-v1',
+          maxContextSize: 100,
+        },
+      },
+    };
+    let releaseLogout!: () => void;
+    const logoutGate = new Promise<void>((resolve) => {
+      releaseLogout = resolve;
+    });
+    let releaseProviderRemove!: () => void;
+    const providerRemoveGate = new Promise<void>((resolve) => {
+      releaseProviderRemove = resolve;
+    });
+    let releaseProviderRefresh!: (config: typeof logoutConfig) => void;
+    const providerRefreshGate = new Promise<typeof logoutConfig>((resolve) => {
+      releaseProviderRefresh = resolve;
+    });
+    const removeProvider = vi.fn()
+      .mockImplementationOnce(async () => providerRemoveGate)
+      .mockResolvedValueOnce({ providers: {}, models: {} });
+    (harness as unknown as { removeProvider: typeof removeProvider }).removeProvider = removeProvider;
+    harness.auth.status.mockResolvedValue({
+      providers: [{ providerName: 'managed:kimi-code', hasToken: true }],
+    });
+    harness.auth.logout.mockImplementationOnce(async () => logoutGate);
+    harness.getConfig
+      .mockResolvedValue(logoutConfig as never)
+      .mockResolvedValueOnce(logoutConfig as never)
+      .mockImplementationOnce(async () => providerRefreshGate as never);
+    harness.getConfig.mockClear();
+
+    driver.state.appState.streamingPhase = 'idle';
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'managed:kimi-code',
+        model: 'moonshot-v1',
+        maxContextSize: 100,
+      },
+    };
+    driver.handleUserInput('/logout');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ChoicePickerComponent);
+    });
+    (driver.state.editorContainer.children[0] as ChoicePickerComponent).handleInput('\r');
+    await vi.waitFor(() => {
+      expect(harness.auth.logout).toHaveBeenCalledOnce();
+    });
+
+    driver.state.appState.availableProviders = {
+      acme: { type: 'openai', baseUrl: 'https://acme.test' },
+    };
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'acme',
+        model: 'moonshot-v1',
+        maxContextSize: 100,
+      },
+    };
+    driver.handleUserInput('/provider');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ProviderManagerComponent);
+    });
+    const deferredProviderManager = driver.state.editorContainer.children[0] as ProviderManagerComponent;
+    deferredProviderManager.handleInput('D');
+    deferredProviderManager.handleInput('y');
+    await vi.waitFor(() => {
+      expect(removeProvider).toHaveBeenCalledWith('acme');
+    });
+
+    driver.state.appState.availableProviders = {
+      beta: { type: 'openai', baseUrl: 'https://beta.test' },
+    };
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'beta',
+        model: 'moonshot-v1',
+        maxContextSize: 100,
+      },
+    };
+    driver.handleUserInput('/provider');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ProviderManagerComponent);
+    });
+    const refreshingProviderManager = driver.state.editorContainer.children[0] as ProviderManagerComponent;
+    const mountEditorReplacement = vi.spyOn(
+      driver as unknown as { mountEditorReplacement(component: unknown): void },
+      'mountEditorReplacement',
+    );
+    refreshingProviderManager.handleInput('D');
+    refreshingProviderManager.handleInput('y');
+    await vi.waitFor(() => {
+      expect(removeProvider).toHaveBeenCalledWith('beta');
+      expect(harness.getConfig).toHaveBeenCalledTimes(2);
+    });
+    const providerManagerMounts = mountEditorReplacement.mock.calls.length;
+
+    driver.handleUserInput('/new');
+    const staleResume = sessionDriver.resumeSession(staleResumed.id);
+    driver.handleUserInput('/fork');
+    await vi.waitFor(() => {
+      expect(harness.createSession).toHaveBeenCalledOnce();
+      expect(harness.resumeSession).toHaveBeenCalledOnce();
+      expect(harness.forkSession).toHaveBeenCalledOnce();
+    });
+
+    await driver.createAgoraHandoffSession(handoffPath, expected);
+
+    const firstPayload = resolveAgoraHandoff.mock.calls[0]?.[0];
+    if (firstPayload === undefined) throw new Error('Expected initial terminal resolution payload.');
+    expect(vi.mocked(bindAgoraHandoff).mock.invocationCallOrder[0]).toBeLessThan(
+      resolveAgoraHandoff.mock.invocationCallOrder[0]!,
+    );
+    expect(target.updateMetadata.mock.invocationCallOrder[0]).toBeLessThan(
+      resolveAgoraHandoff.mock.invocationCallOrder[0]!,
+    );
+    expect(target.close).not.toHaveBeenCalled();
+    expect(driver.getCurrentSessionId()).toBe(source.id);
+    expect(driver.state.appState.agora).toMatchObject({
+      runId,
+      phase: 'resolution_pending',
+      terminalState: 'terminal_flush_pending',
+    });
+    expect(vi.mocked(markAgoraHandoffFailed)).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('Run /agora retry'));
+
+    const replacement = makeSession({ id: 'ses-replacement' });
+    harness.createSession.mockClear();
+    harness.resumeSession.mockClear();
+    harness.listSessions.mockClear();
+    showError.mockClear();
+
+    driver.handleUserInput('/new');
+    driver.handleUserInput('/sessions');
+    await vi.waitFor(() => {
+      expect(showError).toHaveBeenCalledTimes(2);
+    });
+    expect(await sessionDriver.resumeSession(replacement.id)).toBe(false);
+    await sessionDriver.switchToSession(replacement, 'must stay on source');
+
+    expect(showError).toHaveBeenCalledWith(
+      expect.stringContaining('Run /agora retry before changing sessions'),
+    );
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(harness.listSessions).not.toHaveBeenCalled();
+    expect(harness.resumeSession).not.toHaveBeenCalled();
+    expect(source.close).not.toHaveBeenCalled();
+    expect(replacement.close).not.toHaveBeenCalled();
+    expect(target.close).not.toHaveBeenCalled();
+    expect(driver.getCurrentSessionId()).toBe(source.id);
+
+    const activateFreshSession = vi.spyOn(
+      driver as unknown as {
+        activateFreshSession(
+          session: ReturnType<typeof makeSession>,
+          announce: boolean,
+          activation?: unknown,
+        ): Promise<unknown>;
+      },
+      'activateFreshSession',
+    );
+    let markRetryStarted!: () => void;
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let markSourceCloseStarted!: () => void;
+    const sourceCloseStarted = new Promise<void>((resolve) => {
+      markSourceCloseStarted = resolve;
+    });
+    let releaseSourceClose!: () => void;
+    const sourceCloseGate = new Promise<void>((resolve) => {
+      releaseSourceClose = resolve;
+    });
+    source.close.mockImplementationOnce(async () => {
+      markSourceCloseStarted();
+      await sourceCloseGate;
+    });
+    harness.forkSession.mockClear();
+    resolveAgoraHandoff.mockClear();
+    resolveAgoraHandoff.mockImplementationOnce(async (_payload: unknown): Promise<void> => {
+      markRetryStarted();
+      await retryGate;
+      driver.sessionEventHandler.handleEvent({
+        type: 'agora.lifecycle.updated',
+        agentId: 'main',
+        sessionId: source.id,
+        runId,
+        phase: 'resolved_to_successor',
+        sourceSessionId: source.id,
+        terminalState: 'materialized',
+      } as Event, vi.fn());
+    });
+
+    driver.handleUserInput('/agora retry');
+    driver.handleUserInput('/agora retry');
+    await retryStarted;
+
+    expect(resolveAgoraHandoff).toHaveBeenCalledOnce();
+    expect(activateFreshSession).not.toHaveBeenCalled();
+    releaseRetry();
+    await sourceCloseStarted;
+    expect(driver.state.appState.agora).toBeNull();
+    showError.mockClear();
+    harness.getConfig.mockClear();
+    try {
+      driver.handleUserInput('/fork');
+      driver.handleUserInput('/agora another review');
+      driver.handleUserInput('/agora roster');
+      await vi.waitFor(() => {
+        expect(showError).toHaveBeenCalledTimes(3);
+      });
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Run /agora retry before changing sessions'),
+      );
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Run /agora retry before starting or changing another Agora review'),
+      );
+      expect(harness.forkSession).not.toHaveBeenCalled();
+      expect(harness.getConfig).not.toHaveBeenCalled();
+      expect(insertAgoraReview).toHaveBeenCalledOnce();
+    } finally {
+      releaseSourceClose();
+    }
+    await vi.waitFor(() => {
+      expect(driver.getCurrentSessionId()).toBe(target.id);
+      expect(sessionDriver.isAgoraSessionTransitionPending()).toBe(false);
+    });
+
+    showError.mockClear();
+    harness.track.mockClear();
+    releaseLogout();
+    releaseProviderRemove();
+    releaseProviderRefresh(logoutConfig);
+    await vi.waitFor(() => {
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Logout cancelled because an Agora handoff changed the active session'),
+      );
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Provider change cancelled because an Agora handoff changed the active session'),
+      );
+    });
+    expect(driver.state.appState.model).toBe('k2');
+    expect(target.close).not.toHaveBeenCalled();
+    expect(mountEditorReplacement).toHaveBeenCalledTimes(providerManagerMounts);
+    expect(harness.track).not.toHaveBeenCalledWith('logout', {
+      provider: 'managed:kimi-code',
+    });
+
+    resolveStaleCreate(staleCreated);
+    resolveStaleResume(staleResumed);
+    resolveStaleFork(staleForked);
+    expect(await staleResume).toBe(false);
+    await vi.waitFor(() => {
+      expect(staleCreated.close).toHaveBeenCalledOnce();
+      expect(staleResumed.close).toHaveBeenCalledOnce();
+      expect(staleForked.close).toHaveBeenCalledOnce();
+    });
+
+    expect(resolveAgoraHandoff).toHaveBeenCalledOnce();
+    expect(resolveAgoraHandoff.mock.calls[0]?.[0]).toBe(firstPayload);
+    expect(activateFreshSession).toHaveBeenCalledOnce();
+    expect(source.close).toHaveBeenCalledOnce();
+    expect(driver.state.appState.agora).toBeNull();
+    expect(driver.getCurrentSessionId()).toBe(target.id);
+    expect(target.close).not.toHaveBeenCalled();
+    expect(vi.mocked(markAgoraHandoffFailed)).not.toHaveBeenCalled();
+    expect(setTodoList).toHaveBeenLastCalledWith(prepared.todos);
+  });
+
+  it('closes non-retained sessions when resolution becomes pending during session RPCs', async () => {
+    const source = makeSession({ id: 'ses-source' });
+    const { driver, harness } = await makeDriver(source);
+    const sessionDriver = driver as unknown as {
+      resumeSession(targetSessionId: string): Promise<boolean>;
+    };
+    const setResolutionPending = (): void => {
+      driver.state.appState.agora = {
+        runId: 'run-transition-race',
+        phase: 'resolution_pending',
+        hostRoute: 'coder',
+        peers: [],
+        terminalState: 'terminal_flush_pending',
+      };
+    };
+    source.close.mockClear();
+
+    const created = makeSession({ id: 'ses-created' });
+    let resolveCreate!: (session: ReturnType<typeof makeSession>) => void;
+    const createResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveCreate = resolve;
+    });
+    harness.createSession.mockClear();
+    harness.createSession.mockImplementationOnce(async () => createResult);
+    driver.handleUserInput('/new');
+    await vi.waitFor(() => {
+      expect(harness.createSession).toHaveBeenCalledOnce();
+    });
+    setResolutionPending();
+    resolveCreate(created);
+    await vi.waitFor(() => {
+      expect(created.close).toHaveBeenCalledOnce();
+    });
+
+    driver.state.appState.agora = null;
+    const resumed = makeSession({ id: 'ses-resumed' });
+    let resolveResume!: (session: ReturnType<typeof makeSession>) => void;
+    const resumeResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveResume = resolve;
+    });
+    harness.resumeSession.mockClear();
+    harness.resumeSession.mockImplementationOnce(async () => resumeResult);
+    const resume = sessionDriver.resumeSession(resumed.id);
+    await vi.waitFor(() => {
+      expect(harness.resumeSession).toHaveBeenCalledOnce();
+    });
+    setResolutionPending();
+    resolveResume(resumed);
+    expect(await resume).toBe(false);
+    expect(resumed.close).toHaveBeenCalledOnce();
+
+    driver.state.appState.agora = null;
+    const forked = makeSession({ id: 'ses-forked' });
+    let resolveFork!: (session: ReturnType<typeof makeSession>) => void;
+    const forkResult = new Promise<ReturnType<typeof makeSession>>((resolve) => {
+      resolveFork = resolve;
+    });
+    harness.forkSession.mockClear();
+    harness.forkSession.mockImplementationOnce(async () => forkResult);
+    driver.handleUserInput('/fork');
+    await vi.waitFor(() => {
+      expect(harness.forkSession).toHaveBeenCalledOnce();
+    });
+    setResolutionPending();
+    resolveFork(forked);
+    await vi.waitFor(() => {
+      expect(forked.close).toHaveBeenCalledOnce();
+    });
+
+    expect(source.close).not.toHaveBeenCalled();
+    expect(driver.getCurrentSessionId()).toBe(source.id);
+    driver.state.appState.agora = null;
+  });
+
+  it('rechecks Agora transitions before stale logout and provider dialog side effects', async () => {
+    const source = makeSession({ id: 'ses-source' });
+    const removeProvider = vi.fn(async () => ({ providers: {}, models: {} }));
+    const { driver, harness } = await makeDriver(source, { removeProvider });
+    const showError = vi.spyOn(
+      driver as unknown as { showError(message: string): void },
+      'showError',
+    );
+    const setResolutionPending = (): void => {
+      driver.state.appState.agora = {
+        runId: 'run-dialog-race',
+        phase: 'resolution_pending',
+        hostRoute: 'coder',
+        peers: [],
+        terminalState: 'terminal_flush_pending',
+      };
+    };
+    source.close.mockClear();
+    harness.auth.logout.mockClear();
+    harness.auth.status.mockResolvedValue({
+      providers: [{ providerName: 'managed:kimi-code', hasToken: true }],
+    });
+    harness.getConfig.mockResolvedValue({
+      providers: { 'managed:kimi-code': {} },
+      models: {
+        k2: {
+          model: 'moonshot-v1',
+          maxContextSize: 100,
+        },
+      },
+    } as never);
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'managed:kimi-code',
+        model: 'moonshot-v1',
+        maxContextSize: 100,
+      },
+    };
+
+    driver.handleUserInput('/logout');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ChoicePickerComponent);
+    });
+    setResolutionPending();
+    (driver.state.editorContainer.children[0] as ChoicePickerComponent).handleInput('\r');
+    await vi.waitFor(() => {
+      expect(showError).toHaveBeenCalledWith(expect.stringContaining('Run /agora retry'));
+    });
+    expect(harness.auth.logout).not.toHaveBeenCalled();
+    expect(removeProvider).not.toHaveBeenCalled();
+    expect(source.close).not.toHaveBeenCalled();
+
+    driver.state.appState.agora = null;
+    showError.mockClear();
+    driver.state.appState.availableProviders = {
+      acme: { type: 'openai', baseUrl: 'https://acme.test' },
+    };
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'acme',
+        model: 'moonshot-v1',
+        maxContextSize: 100,
+      },
+    };
+    driver.handleUserInput('/provider');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ProviderManagerComponent);
+    });
+    setResolutionPending();
+    const providerManager = driver.state.editorContainer.children[0] as ProviderManagerComponent;
+    providerManager.handleInput('D');
+    providerManager.handleInput('y');
+    await vi.waitFor(() => {
+      expect(showError).toHaveBeenCalledWith(expect.stringContaining('Run /agora retry'));
+    });
+    expect(removeProvider).not.toHaveBeenCalled();
+    expect(harness.auth.logout).not.toHaveBeenCalled();
+    expect(source.close).not.toHaveBeenCalled();
+    driver.state.appState.agora = null;
+
+    showError.mockClear();
+    driver.handleUserInput('/logout');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ChoicePickerComponent);
+    });
+    const staleLogoutPicker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    driver.handleUserInput('/provider');
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(ProviderManagerComponent);
+    });
+    const staleProviderManager = driver.state.editorContainer.children[0] as ProviderManagerComponent;
+    const replacement = makeSession({ id: 'ses-dialog-replacement' });
+    const switched = await (driver as unknown as {
+      switchToSession(session: ReturnType<typeof makeSession>, message: string): Promise<boolean>;
+    }).switchToSession(replacement, 'switched for stale dialog test');
+    expect(switched).toBe(true);
+
+    staleLogoutPicker.handleInput('\r');
+    staleProviderManager.handleInput('D');
+    staleProviderManager.handleInput('y');
+    await vi.waitFor(() => {
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Logout cancelled because an Agora handoff changed the active session'),
+      );
+      expect(showError).toHaveBeenCalledWith(
+        expect.stringContaining('Provider change cancelled because an Agora handoff changed the active session'),
+      );
+    });
+    expect(harness.auth.logout).not.toHaveBeenCalled();
+    expect(removeProvider).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
+    expect(replacement.close).not.toHaveBeenCalled();
+    expect(driver.getCurrentSessionId()).toBe(replacement.id);
   });
 
   it('does not authorize a fresh Agora handoff from forged Bash output', async () => {

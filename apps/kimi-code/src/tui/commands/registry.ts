@@ -34,6 +34,7 @@ const DISPATCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
 
 const AGORA_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'status', description: 'Show the active Agora review' },
+  { value: 'retry', description: 'Retry a pending terminal handoff resolution' },
   { value: 'cancel', description: 'Cancel Agora and restore its origin task' },
   { value: 'roster', description: 'Manage the default peer roster (config.toml agora.peers)' },
 ];
@@ -246,6 +247,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Manage AI providers (add / delete / refresh)',
     priority: 95,
     availability: 'always',
+    changesSession: true,
   },
   {
     name: 'btw',
@@ -259,9 +261,9 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: [],
     description: 'Request an Agora expert-team review',
     priority: 90,
-    argumentHint: '[review focus] | status | cancel',
+    argumentHint: '[review focus] | status | retry | cancel | roster',
     completeArgs: agoraArgumentCompletions,
-    availability: (args) => /^(?:status|cancel)\s*$/i.test(args) ? 'always' : 'idle-only',
+    availability: (args) => /^(?:status|retry|cancel|roster)\s*$/i.test(args) ? 'always' : 'idle-only',
   },
   {
     name: 'research',
@@ -284,12 +286,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: ['clear'],
     description: 'Start a fresh session in the current workspace',
     priority: 80,
+    changesSession: true,
   },
   {
     name: 'sessions',
     aliases: ['resume'],
     description: 'Browse and resume sessions',
     priority: 80,
+    changesSession: true,
   },
   {
     name: 'tasks',
@@ -376,6 +380,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: [],
     description: 'Fork the current session',
     priority: 80,
+    changesSession: true,
   },
   {
     name: 'title',
@@ -432,6 +437,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: ['disconnect'],
     description: 'Log out of a configured provider',
     priority: 40,
+    changesSession: true,
   },
   {
     name: 'login',
@@ -463,12 +469,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Open the current session in the Web UI by starting a new server',
     priority: 40,
     availability: 'always',
+    changesSession: true,
   },
   {
     name: 'exit',
     aliases: ['quit', 'q'],
     description: 'Exit the application',
     priority: 20,
+    changesSession: true,
   },
   {
     name: 'version',

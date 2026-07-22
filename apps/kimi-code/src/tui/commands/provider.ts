@@ -41,29 +41,89 @@ import type { SlashCommandHost } from './dispatch';
 // /provider command
 // ---------------------------------------------------------------------------
 
+interface ProviderManagerContext {
+  readonly sourceSession: SlashCommandHost['session'];
+  readonly transitionGeneration?: number;
+}
+
+function captureProviderManagerContext(host: SlashCommandHost): ProviderManagerContext {
+  return {
+    sourceSession: host.session,
+    transitionGeneration: host.getSessionTransitionGeneration?.(),
+  };
+}
+
+function providerOperationWasInvalidated(
+  host: SlashCommandHost,
+  context: ProviderManagerContext,
+): boolean {
+  if (
+    host.session === context.sourceSession &&
+    (context.transitionGeneration === undefined ||
+      host.getSessionTransitionGeneration?.() === context.transitionGeneration)
+  ) {
+    return false;
+  }
+  host.showError('Provider change cancelled because an Agora handoff changed the active session.');
+  return true;
+}
+
+function blockProviderOperation(host: SlashCommandHost, context: ProviderManagerContext): boolean {
+  return (
+    host.blockSessionTransitionForPendingAgoraResolution?.() === true ||
+    providerOperationWasInvalidated(host, context)
+  );
+}
+
+async function refreshProviderStateAfterLogout(
+  host: SlashCommandHost,
+  context: ProviderManagerContext,
+): Promise<boolean> {
+  const config = await host.harness.getConfig({ reload: true });
+  if (blockProviderOperation(host, context)) return false;
+  host.setAppState({
+    availableModels: config.models ?? {},
+    availableProviders: config.providers ?? {},
+    model: '',
+    thinkingEffort: 'off',
+    maxContextTokens: 0,
+    contextUsage: 0,
+    contextTokens: 0,
+  });
+  return true;
+}
+
+type ProviderDeleteResult = 'updated' | 'cleared-active-session' | 'cancelled';
+
 export async function handleProviderCommand(host: SlashCommandHost): Promise<void> {
-  const options = buildProviderManagerOptions(host);
+  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) return;
+  const options = buildProviderManagerOptions(host, captureProviderManagerContext(host));
   const component = new ProviderManagerComponent(options);
   host.mountEditorReplacement(component);
 }
 
-function buildProviderManagerOptions(host: SlashCommandHost): ProviderManagerOptions {
+function buildProviderManagerOptions(
+  host: SlashCommandHost,
+  context: ProviderManagerContext,
+): ProviderManagerOptions {
   const activeProviderId =
     host.state.appState.availableModels[host.state.appState.model]?.provider;
   return {
     providers: host.state.appState.availableProviders,
     activeProviderId,
     onAdd: () => {
-      void handleProviderAdd(host).catch((error: unknown) => {
+      if (blockProviderOperation(host, context)) return;
+      void handleProviderAdd(host, context).catch((error: unknown) => {
         host.showError(`Add provider failed: ${formatErrorMessage(error)}`);
       });
     },
     onDeleteSource: (providerIds) => {
-      void handleProviderManagerDeleteSource(host, providerIds).catch((error: unknown) => {
+      void handleProviderManagerDeleteSource(host, providerIds, context).catch((error: unknown) => {
         host.showError(`Remove provider failed: ${formatErrorMessage(error)}`);
       });
     },
     onClose: () => {
+      if (blockProviderOperation(host, context)) return;
       host.restoreEditor();
     },
   };
@@ -72,42 +132,60 @@ function buildProviderManagerOptions(host: SlashCommandHost): ProviderManagerOpt
 async function handleProviderManagerDeleteSource(
   host: SlashCommandHost,
   providerIds: readonly string[],
+  context: ProviderManagerContext,
 ): Promise<void> {
+  if (blockProviderOperation(host, context)) return;
   for (const providerId of providerIds) {
     try {
-      await handleProviderDelete(host, providerId);
+      const result = await handleProviderDelete(host, providerId, context);
+      if (result !== 'updated') return;
     } catch (error) {
       const msg = formatErrorMessage(error);
       host.showError(`Failed to delete provider ${providerId}: ${msg}`);
     }
   }
+  if (blockProviderOperation(host, context)) return;
   reopenProviderManager(host);
 }
 
-async function handleProviderDelete(host: SlashCommandHost, providerId: string): Promise<void> {
+async function handleProviderDelete(
+  host: SlashCommandHost,
+  providerId: string,
+  context: ProviderManagerContext,
+): Promise<ProviderDeleteResult> {
+  if (blockProviderOperation(host, context)) return 'cancelled';
   if (providerId === DEFAULT_OAUTH_PROVIDER_NAME) {
     await host.harness.auth.logout(DEFAULT_OAUTH_PROVIDER_NAME);
-    await host.authFlow.refreshConfigAfterLogout();
+    if (blockProviderOperation(host, context)) return 'cancelled';
+    if (!(await refreshProviderStateAfterLogout(host, context))) return 'cancelled';
+    if (blockProviderOperation(host, context)) return 'cancelled';
     await host.authFlow.clearActiveSessionAfterLogout();
-    return;
+    return 'cleared-active-session';
   }
 
   const activeProvider =
     host.state.appState.availableModels[host.state.appState.model]?.provider;
   const config = await host.harness.removeProvider(providerId);
+  if (blockProviderOperation(host, context)) return 'cancelled';
   if (activeProvider === providerId) {
-    await host.authFlow.refreshConfigAfterLogout();
+    if (!(await refreshProviderStateAfterLogout(host, context))) return 'cancelled';
+    if (blockProviderOperation(host, context)) return 'cancelled';
     await host.authFlow.clearActiveSessionAfterLogout();
-  } else {
-    host.setAppState({
-      availableProviders: config.providers ?? {},
-      availableModels: config.models ?? {},
-    });
+    return 'cleared-active-session';
   }
+  host.setAppState({
+    availableProviders: config.providers ?? {},
+    availableModels: config.models ?? {},
+  });
+  return 'updated';
 }
 
-async function handleProviderAdd(host: SlashCommandHost): Promise<void> {
+async function handleProviderAdd(
+  host: SlashCommandHost,
+  context: ProviderManagerContext,
+): Promise<void> {
   const source = await promptProviderAddSource(host);
+  if (blockProviderOperation(host, context)) return;
   if (source === undefined) {
     reopenProviderManager(host);
     return;
@@ -118,13 +196,13 @@ async function handleProviderAdd(host: SlashCommandHost): Promise<void> {
     return;
   }
   const handled = await handleCustomRegistryAddViaDialog(host);
-  if (!handled) {
+  if (!handled && !blockProviderOperation(host, context)) {
     reopenProviderManager(host);
   }
 }
 
 function reopenProviderManager(host: SlashCommandHost): void {
-  const options = buildProviderManagerOptions(host);
+  const options = buildProviderManagerOptions(host, captureProviderManagerContext(host));
   const component = new ProviderManagerComponent(options);
   host.mountEditorReplacement(component);
 }

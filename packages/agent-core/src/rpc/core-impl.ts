@@ -118,6 +118,7 @@ import type {
   ListSessionsPayload,
   ListWorkspaceSkillsPayload,
   MaterializeAgoraReviewPayload,
+  ResolveAgoraHandoffPayload,
   McpServerInfo,
   McpStartupMetrics,
   PluginInfo,
@@ -1103,6 +1104,10 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
   materializeAgoraReview({ sessionId, ...payload }: SessionScopedPayload<MaterializeAgoraReviewPayload>) {
     return this.sessionApi(sessionId).materializeAgoraReview(payload);
+  }
+
+  resolveAgoraHandoff({ sessionId, ...payload }: SessionScopedPayload<ResolveAgoraHandoffPayload>) {
+    return this.sessionApi(sessionId).resolveAgoraHandoff(payload);
   }
 
   startBtw({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>): Promise<string> {

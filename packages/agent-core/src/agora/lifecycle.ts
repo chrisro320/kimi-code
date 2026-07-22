@@ -22,7 +22,7 @@ const DISPATCH_ALLOWED_PHASES: ReadonlySet<AgoraLifecyclePhase> = new Set([
   'peer_review',
 ]);
 
-const TERMINAL_PHASES: ReadonlySet<AgoraLifecyclePhase> = new Set([
+export const TERMINAL_PHASES: ReadonlySet<AgoraLifecyclePhase> = new Set([
   'resolved_to_origin',
   'resolved_to_successor',
   'cancelled',
@@ -523,6 +523,67 @@ export async function cancelAgoraLifecycleTransition(
   });
   records.logRecord(record);
   return { runId: handle.runId, phase: 'cancelled', terminalState: record.terminalState, cancelled: true };
+}
+
+/**
+ * Resolve a materialized fresh-session handoff after the target task is bound.
+ * The capability remains valid through `fresh_session_pending` so a failed
+ * terminal flush can retry this same transition without rematerializing.
+ */
+export function resolveAgoraHandoffTransition(
+  records: AgentRecords,
+  handle: AgoraLifecycleCapabilityToken,
+  transitionId: string,
+  handoff: AgoraLifecycleMaterializedHandoff,
+  resolution: 'resolved_to_origin' | 'resolved_to_successor',
+): AgoraLifecycleTransitionResult {
+  const latest = verifyAgoraLifecycleHandle(records, handle);
+  if (TERMINAL_PHASES.has(latest.phase)) {
+    if (latest.transitionId !== transitionId || latest.phase !== resolution) {
+      throw new Error(`Agora run ${handle.runId} is already terminal by transition ${latest.transitionId}.`);
+    }
+    return {
+      runId: handle.runId,
+      phase: latest.phase,
+      terminalState: latest.terminalState,
+      cancelled: false,
+    };
+  }
+  if (latest.phase !== 'fresh_session_pending') {
+    throw new Error(`Agora run ${handle.runId} is not awaiting fresh-session handoff resolution.`);
+  }
+  if (
+    handoff.runId !== handle.runId
+    || handoff.sourceSessionId !== latest.sourceSessionId
+    || handoff.targetTask !== latest.targetTask
+    || handoff.handoffPath !== latest.materializationHandoffPath
+    || handoff.digest !== latest.materializationDigest
+    || handoff.phase !== 'fresh_session_pending'
+  ) {
+    throw new Error(`Agora run ${handle.runId} handoff provenance does not match the pending lifecycle record.`);
+  }
+  const terminalState = resolution === 'resolved_to_origin' ? 'resumed' : 'materialized';
+  const record = recordAgoraLifecycleTransition(records, {
+    sessionId: latest.sourceSessionId,
+    runId: handle.runId,
+    transitionId,
+    phase: resolution,
+    originTask: latest.originTask,
+    insertedTask: latest.insertedTask,
+    targetTask: latest.targetTask,
+    terminalState,
+    capability: handle,
+    envelopeRevision: latest.envelopeRevision,
+    materializationTransitionId: latest.materializationTransitionId,
+    materializationHandoffPath: latest.materializationHandoffPath,
+    materializationDigest: latest.materializationDigest,
+  });
+  return {
+    runId: handle.runId,
+    phase: record.phase,
+    terminalState: record.terminalState,
+    cancelled: false,
+  };
 }
 
 export function recordAgoraLifecycleToTaskMaterialization(

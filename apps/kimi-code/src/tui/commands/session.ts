@@ -48,11 +48,13 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
 
 export async function handleForkCommand(host: SlashCommandHost, args: string): Promise<void> {
   void args;
+  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) return;
   const session = host.session;
   if (session === undefined) {
     host.showError(NO_ACTIVE_SESSION_MESSAGE);
     return;
   }
+  const transitionGeneration = host.getSessionTransitionGeneration?.();
 
   const sourceTitle = forkSourceTitle(host, session);
   let forked: Session;
@@ -66,12 +68,26 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
     host.showError(`Failed to fork session: ${msg}`);
     return;
   }
+  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) {
+    await forked.close().catch(() => undefined);
+    return;
+  }
+  if (
+    host.session !== session ||
+    (transitionGeneration !== undefined &&
+      host.getSessionTransitionGeneration?.() !== transitionGeneration)
+  ) {
+    host.showError('Fork cancelled because an Agora handoff changed the active session.');
+    await forked.close().catch(() => undefined);
+    return;
+  }
 
   try {
-    await host.switchToSession(
+    const switched = await host.switchToSession(
       forked,
       `Session forked (${forked.id}). To return to the original session: kimi -r ${session.id}`,
     );
+    if (!switched) await forked.close().catch(() => undefined);
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to switch to forked session: ${msg}`);

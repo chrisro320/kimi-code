@@ -11,7 +11,7 @@ function makeHost(options: {
   cancelError?: Error;
   insertAgoraReviewError?: Error;
   cancelAgoraReviewError?: Error;
-  getAgoraReviewResult?: { runId: string; phase: string };
+  getAgoraReviewResult?: { runId: string; phase: string; insertedTask?: string };
   getAgoraReviewError?: Error;
 } = {}) {
   const cancel = vi.fn(async () => {});
@@ -27,6 +27,7 @@ function makeHost(options: {
   const getAgoraReview = options.getAgoraReviewError === undefined
     ? vi.fn(async () => options.getAgoraReviewResult)
     : vi.fn(async () => { throw options.getAgoraReviewError ?? new Error('lookup failed'); });
+  const retryAgoraHandoff = vi.fn(async () => {});
   const appState = {
     model: options.model ?? 'kimi-k2',
     workDir: '/work',
@@ -36,6 +37,7 @@ function makeHost(options: {
   };
   const host = {
     state: { appState },
+    harness: { getConfig: vi.fn(async () => ({})) },
     session: options.hasSession === false ? undefined : { cancel, insertAgoraReview, cancelAgoraReview, getAgoraReview },
     skillCommandMap: new Map<string, string>(),
     pluginCommandMap: new Map<string, string>(),
@@ -44,12 +46,14 @@ function makeHost(options: {
     sendNormalUserInput: vi.fn(),
     setAppState: vi.fn((patch: Record<string, unknown>) => Object.assign(appState, patch)),
     track: vi.fn(),
+    retryAgoraHandoff,
   } as unknown as SlashCommandHost & {
     showError: ReturnType<typeof vi.fn>;
     showStatus: ReturnType<typeof vi.fn>;
     sendNormalUserInput: ReturnType<typeof vi.fn>;
     setAppState: ReturnType<typeof vi.fn>;
     track: ReturnType<typeof vi.fn>;
+    retryAgoraHandoff: ReturnType<typeof vi.fn>;
     session: {
       cancel: ReturnType<typeof vi.fn>;
       insertAgoraReview: ReturnType<typeof vi.fn>;
@@ -135,6 +139,34 @@ describe('handleAgoraCommand', () => {
     expect(host.sendNormalUserInput).not.toHaveBeenCalled();
   });
 
+  it('dispatches a pending terminal resolution retry without sending model input', async () => {
+    const host = makeHost({
+      agora: { ...activeAgora, phase: 'resolution_pending', terminalState: 'terminal_flush_pending' },
+    });
+
+    await handleAgoraCommand(host, 'retry');
+
+    expect(host.retryAgoraHandoff).toHaveBeenCalledOnce();
+    expect(host.sendNormalUserInput).not.toHaveBeenCalled();
+  });
+
+  it('blocks cancellation while terminal resolution retry is pending', async () => {
+    const pendingAgora: AgoraStatus = {
+      ...activeAgora,
+      phase: 'resolution_pending',
+      terminalState: 'terminal_flush_pending',
+    };
+    const host = makeHost({ agora: pendingAgora });
+
+    await handleAgoraCommand(host, 'cancel');
+
+    expect(host.session?.cancel).not.toHaveBeenCalled();
+    expect(host.session?.cancelAgoraReview).not.toHaveBeenCalled();
+    expect(host.setAppState).not.toHaveBeenCalled();
+    expect(host.state.appState.agora).toBe(pendingAgora);
+    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining('/agora retry'));
+  });
+
   it('cancels a run with a live capability through the typed session call', async () => {
     const host = makeHost();
     await handleAgoraCommand(host, 'review the rejected visual result');
@@ -153,10 +185,14 @@ describe('handleAgoraCommand', () => {
     expect(host.showStatus).toHaveBeenLastCalledWith('Agora review cancelled.');
   });
 
-  it('does not fake cancellation after resume when durable state exists but the capability is unavailable', async () => {
+  it('clears local state and gives Trellis recovery after resume when capability is unavailable', async () => {
     const host = makeHost({
       agora: activeAgora,
-      getAgoraReviewResult: { runId: activeAgora.runId!, phase: 'peer_review' },
+      getAgoraReviewResult: {
+        runId: activeAgora.runId!,
+        phase: 'peer_review',
+        insertedTask: activeAgora.insertedTask,
+      },
     });
 
     await handleAgoraCommand(host, 'cancel');
@@ -164,8 +200,76 @@ describe('handleAgoraCommand', () => {
     expect(host.session?.getAgoraReview).toHaveBeenCalledWith(activeAgora.runId);
     expect(host.session?.cancel).not.toHaveBeenCalled();
     expect(host.session?.cancelAgoraReview).not.toHaveBeenCalled();
-    expect(host.setAppState).not.toHaveBeenCalledWith({ agora: null });
-    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining('was not cancelled'));
+    expect(host.setAppState).toHaveBeenLastCalledWith({ agora: null });
+    const error = host.showError.mock.calls[0]?.[0] as string;
+    expect(error).toContain('host capability is unavailable');
+    expect(error).toContain('durable review was not cancelled');
+    expect(error).toContain(`Known run id ${activeAgora.runId}`);
+    expect(error).toContain(`Known inserted task ${activeAgora.insertedTask}`);
+    expect(error).toContain(`python3 ./.trellis/scripts/task.py agora-cancel '${activeAgora.insertedTask}'`);
+  });
+
+  it('uses authoritative durable task provenance and shell-quotes it for recovery', async () => {
+    const staleTask = '.trellis/tasks/stale-local-review';
+    const durableTask = ".trellis/tasks/review's";
+    const host = makeHost({
+      agora: { ...activeAgora, insertedTask: staleTask },
+      getAgoraReviewResult: {
+        runId: activeAgora.runId!,
+        phase: 'peer_review',
+        insertedTask: durableTask,
+      },
+    });
+
+    await handleAgoraCommand(host, 'cancel');
+
+    const error = host.showError.mock.calls[0]?.[0] as string;
+    expect(error).toContain(`Known inserted task ${durableTask}`);
+    expect(error).toContain("python3 ./.trellis/scripts/task.py agora-cancel '.trellis/tasks/review'\\''s'");
+    expect(error).not.toContain(staleTask);
+  });
+
+  it('clears local state when the session is unavailable without claiming a durable cancel', async () => {
+    const host = makeHost({ agora: activeAgora, hasSession: false });
+
+    await handleAgoraCommand(host, 'cancel');
+
+    expect(host.setAppState).toHaveBeenLastCalledWith({ agora: null });
+    const error = host.showError.mock.calls[0]?.[0] as string;
+    expect(error).toContain('session unavailable');
+    expect(error).toContain('durable review was not cancelled');
+    expect(error).toContain(`python3 ./.trellis/scripts/task.py agora-cancel '${activeAgora.insertedTask}'`);
+  });
+
+  it.each(['cancelled', 'resolved_to_origin', 'resolved_to_successor'] as const)(
+    'clears only stale local state when durable review is already terminal (%s)',
+    async (phase) => {
+      const host = makeHost({
+        agora: activeAgora,
+        getAgoraReviewResult: { runId: activeAgora.runId!, phase },
+      });
+
+      await handleAgoraCommand(host, 'cancel');
+
+      expect(host.setAppState).toHaveBeenLastCalledWith({ agora: null });
+      expect(host.showStatus).toHaveBeenLastCalledWith(
+        `Durable Agora review is already terminal (${phase}); cleared stale local status.`,
+      );
+      expect(host.showError).not.toHaveBeenCalled();
+    },
+  );
+
+  it('clears local state and preserves recovery details when durable lookup fails', async () => {
+    const host = makeHost({ agora: activeAgora, getAgoraReviewError: new Error('lookup denied') });
+
+    await handleAgoraCommand(host, 'cancel');
+
+    expect(host.setAppState).toHaveBeenLastCalledWith({ agora: null });
+    const error = host.showError.mock.calls[0]?.[0] as string;
+    expect(error).toContain('durable state verification failed (lookup denied)');
+    expect(error).toContain('durable review was not cancelled');
+    expect(error).toContain(`Known run id ${activeAgora.runId}`);
+    expect(error).toContain(`python3 ./.trellis/scripts/task.py agora-cancel '${activeAgora.insertedTask}'`);
   });
 
   it('clears only stale local state when durable lookup proves no review exists', async () => {
@@ -180,16 +284,16 @@ describe('handleAgoraCommand', () => {
     expect(host.showStatus).toHaveBeenLastCalledWith('No durable Agora review is active; cleared stale local status.');
   });
 
-  it('restores state on cancel failure', async () => {
+  it('clears local state on typed cancel failure', async () => {
     const host = makeHost({ cancelAgoraReviewError: new Error('cancel rejected') });
     await handleAgoraCommand(host, 'review the rejected visual result');
-    const state = host.setAppState.mock.calls[0]?.[0] as { agora: AgoraStatus };
-    const preflightAgora = { ...state.agora };
 
     await handleAgoraCommand(host, 'cancel');
 
-    expect(host.setAppState).toHaveBeenLastCalledWith({ agora: preflightAgora });
-    expect(host.showError).toHaveBeenCalledWith('Failed to cancel Agora review: cancel rejected');
+    expect(host.setAppState).toHaveBeenLastCalledWith({ agora: null });
+    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining(
+      'Agora review could not be cancelled cleanly (cleared local status): cancel rejected',
+    ));
   });
 
   it('rejects duplicate runs, empty focus, or missing model/session', async () => {
@@ -199,7 +303,7 @@ describe('handleAgoraCommand', () => {
 
     const empty = makeHost();
     await handleAgoraCommand(empty, '');
-    expect(empty.showError).toHaveBeenCalledWith('Usage: /agora <review focus> | /agora status | /agora cancel');
+    expect(empty.showError).toHaveBeenCalledWith('Usage: /agora <review focus> | /agora status | /agora retry | /agora cancel | /agora roster');
 
     const noModel = makeHost({ model: '' });
     await handleAgoraCommand(noModel, 'review');

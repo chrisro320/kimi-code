@@ -61,6 +61,7 @@ import type {
   SessionUsage,
   PromptInput,
   RenameSessionInput,
+  ResolveAgoraHandoffInput,
   ResumeSessionInput,
   ResumedSessionSummary,
   SessionSummary,
@@ -516,6 +517,13 @@ export abstract class SDKRpcClientBase {
   ): Promise<{ readonly runId: string; readonly success: boolean; readonly error?: string; readonly handoff?: AgoraLifecycleMaterializedHandoff }> {
     const rpc = await this.getRpc();
     return rpc.materializeAgoraReview(input);
+  }
+
+  async resolveAgoraHandoff(
+    input: SessionIdRpcInput & ResolveAgoraHandoffInput,
+  ): Promise<AgoraLifecycleTransitionResult> {
+    const rpc = await this.getRpc();
+    return rpc.resolveAgoraHandoff(input);
   }
 
   async updateSessionMetadata(input: UpdateSessionMetadataRpcInput): Promise<void> {

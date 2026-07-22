@@ -5,14 +5,18 @@ import {
   confirmAgoraMaterializationProposal,
   createAgoraLifecycleCapability,
   hashAgoraMaterializationProposal,
+  isAgoraLifecycleTerminal,
   materializeAgoraLifecycleTransition,
   recordAgoraLifecycleToTaskMaterialization,
   recordAgoraLifecycleTransition,
+  TERMINAL_PHASES,
+  toAgoraLifecycleHandle,
   verifyAgoraLifecycleHandle,
   type AgoraLifecycleAdapter,
   type AgoraLifecycleCapability,
   type AgoraMaterializationProposal,
 } from '../../src/agora/lifecycle';
+import { TERMINAL_PHASES as TERMINAL_PHASES_FROM_BARREL } from '../../src/agora';
 import {
   InMemoryAgentRecordPersistence,
   type AgentRecord,
@@ -163,6 +167,19 @@ function adapter(): AgoraLifecycleAdapter & {
 }
 
 describe('Agora typed lifecycle capabilities', () => {
+  it('exports the shared terminal phase set from lifecycle and the agora barrel', () => {
+    expect([...TERMINAL_PHASES].toSorted()).toEqual([
+      'cancelled',
+      'resolved_to_origin',
+      'resolved_to_successor',
+    ]);
+    expect(TERMINAL_PHASES_FROM_BARREL).toBe(TERMINAL_PHASES);
+    for (const phase of TERMINAL_PHASES) {
+      expect(isAgoraLifecycleTerminal(phase)).toBe(true);
+    }
+    expect(isAgoraLifecycleTerminal('peer_review')).toBe(false);
+  });
+
   it('rejects handles across sessions, runs, replays, and old epochs', async () => {
     const { agent, persistence, handle } = setup();
     expect(() => verifyAgoraLifecycleHandle(agent.records, { ...handle, sessionId: 'session-2' })).toThrow('different session');
@@ -557,7 +574,6 @@ describe('Agora typed lifecycle capabilities', () => {
     expect(snapshot).not.toHaveProperty('capabilityHash');
     expect(snapshot).not.toHaveProperty('capabilityEpoch');
   });
-});
 
   it('keeps the bearer across SessionAPIImpl instances that share a vault (reload survival)', async () => {
     // A session reload builds a fresh SessionAPIImpl; if the bearer vault were
@@ -602,3 +618,492 @@ describe('Agora typed lifecycle capabilities', () => {
     })).rejects.toMatchObject({ code: ErrorCodes.REQUEST_INVALID });
     expect(trusted.cancel).not.toHaveBeenCalled();
   });
+
+  it('retries cancel flush with the same handle without re-invoking the adapter', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const agent = testAgent({ persistence }).agent;
+    const trusted = adapter();
+    const session = createSession(agent, trusted);
+    const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+    const api = new SessionAPIImpl(session, vault);
+
+    const inserted = await api.insertAgoraReview({
+      runId: 'run-cancel-flush',
+      transitionId: 'insert-cancel-flush',
+    });
+    expect(vault.size).toBe(1);
+
+    const flush = vi.spyOn(agent.records, 'flush')
+      .mockRejectedValueOnce(new Error('cancel flush unavailable'));
+    await expect(api.cancelAgoraReview({
+      runId: 'run-cancel-flush',
+      transitionId: 'cancel-1',
+      capability: inserted.handle,
+    })).rejects.toThrow('cancel flush unavailable');
+    expect(trusted.cancel).toHaveBeenCalledTimes(1);
+    expect(vault.size).toBe(1);
+    expect(agent.records.latestAgoraLifecycle('run-cancel-flush')?.phase).toBe('cancelled');
+
+    flush.mockResolvedValue(undefined);
+    await expect(api.cancelAgoraReview({
+      runId: 'run-cancel-flush',
+      transitionId: 'cancel-1',
+      capability: inserted.handle,
+    })).resolves.toMatchObject({ phase: 'cancelled', cancelled: true });
+    expect(trusted.cancel).toHaveBeenCalledTimes(1);
+    expect(vault.size).toBe(0);
+
+    await expect(api.cancelAgoraReview({
+      runId: 'run-cancel-flush',
+      transitionId: 'cancel-1',
+      capability: inserted.handle,
+    })).rejects.toMatchObject({ code: ErrorCodes.REQUEST_INVALID });
+  });
+
+  it('drops vault entry on explicit insert failure but retains it when only flush fails', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const agent = testAgent({ persistence }).agent;
+    const trusted = adapter();
+    const session = createSession(agent, trusted);
+    const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+    const api = new SessionAPIImpl(session, vault);
+
+    trusted.insert.mockResolvedValueOnce({ success: false, error: 'trellis refused insert' });
+    await expect(api.insertAgoraReview({
+      runId: 'run-insert-fail',
+      transitionId: 'insert-fail',
+      title: 'Review',
+    })).rejects.toMatchObject({ code: ErrorCodes.REQUEST_INVALID });
+    expect(vault.size).toBe(0);
+    expect(agent.records.latestAgoraLifecycle('run-insert-fail')).toBeUndefined();
+
+    trusted.insert.mockResolvedValueOnce({ success: true, insertedTask: '.trellis/tasks/review' });
+    const flush = vi.spyOn(agent.records, 'flush')
+      .mockRejectedValueOnce(new Error('insert flush unavailable'));
+    let retryHandle: AgoraLifecycleCapability | undefined;
+    try {
+      await api.insertAgoraReview({
+        runId: 'run-insert-retain',
+        transitionId: 'insert-retain',
+        title: 'Review',
+      });
+      throw new Error('expected failed flush');
+    } catch (error) {
+      expect(error).toBeInstanceOf(KimiError);
+      expect((error as KimiError).code).toBe(ErrorCodes.RECORDS_WRITE_FAILED);
+      retryHandle = (error as KimiError).details?.['retryHandle'] as AgoraLifecycleCapability;
+    }
+    expect(vault.size).toBe(1);
+    expect(trusted.insert).toHaveBeenCalledTimes(2);
+
+    flush.mockResolvedValue(undefined);
+    await expect(api.insertAgoraReview({
+      runId: 'run-insert-retain',
+      transitionId: 'insert-retain',
+      title: 'Review',
+      capability: retryHandle!,
+    })).resolves.toMatchObject({ handle: retryHandle });
+    expect(trusted.insert).toHaveBeenCalledTimes(2);
+    expect(vault.size).toBe(1);
+  });
+
+  it('does not return a successful handoff resolution before the terminal event is accepted', async () => {
+    const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+    const trusted = adapter();
+    let acceptTerminalEvent!: () => void;
+    let eventPublished!: () => void;
+    const terminalEventAccepted = new Promise<void>((resolve) => {
+      acceptTerminalEvent = resolve;
+    });
+    const terminalEventPublished = new Promise<void>((resolve) => {
+      eventPublished = resolve;
+    });
+    const session = createSession(agent, trusted);
+    session.rpc.emitEvent = vi.fn(() => {
+      eventPublished();
+      return terminalEventAccepted;
+    });
+    const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+    const api = new SessionAPIImpl(session, vault);
+    const capability = createAgoraLifecycleCapability('session-1', 'run-event-order', 'epoch-event-order', 'secret-event-order');
+    const handoff = {
+      runId: 'run-event-order',
+      sourceSessionId: 'session-1',
+      targetTask: '.trellis/tasks/successor',
+      handoffPath: '.trellis/tasks/successor/agora-handoff.json',
+      phase: 'fresh_session_pending' as const,
+      digest: 'c'.repeat(64),
+    };
+    recordAgoraLifecycleTransition(agent.records, {
+      sessionId: 'session-1',
+      runId: 'run-event-order',
+      transitionId: 'materialize-event-order',
+      phase: 'fresh_session_pending',
+      insertedTask: '.trellis/tasks/review',
+      targetTask: handoff.targetTask,
+      terminalState: 'materialized',
+      capability,
+      materializationTransitionId: 'materialize-event-order',
+      materializationHandoffPath: handoff.handoffPath,
+      materializationDigest: handoff.digest,
+    });
+    vault.set(capability.operationId, capability);
+
+    let resolved = false;
+    let resolutionError: unknown;
+    let resolutionSettled!: () => void;
+    const resolutionSettledPromise = new Promise<void>((resolve) => {
+      resolutionSettled = resolve;
+    });
+    const resolution = api.resolveAgoraHandoff({
+      runId: 'run-event-order',
+      transitionId: 'resolve-event-order',
+      capability: toAgoraLifecycleHandle(capability),
+      handoff,
+      resolution: 'resolved_to_successor',
+    }).then(
+      () => {
+        resolved = true;
+        resolutionSettled();
+      },
+      (error: unknown) => {
+        resolutionError = error;
+        resolutionSettled();
+      },
+    );
+
+    const first = await Promise.race([
+      terminalEventPublished.then(() => 'event' as const),
+      resolutionSettledPromise.then(() => 'resolution' as const),
+    ]);
+    expect(first).toBe('event');
+    expect(resolutionError).toBeUndefined();
+    expect(session.rpc.emitEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'agora.lifecycle.updated',
+      runId: 'run-event-order',
+      phase: 'resolved_to_successor',
+    }));
+    expect(resolved).toBe(false);
+
+    acceptTerminalEvent();
+    await resolution;
+    expect(resolved).toBe(true);
+    expect(vault.size).toBe(0);
+  });
+
+  it('retains the handoff capability when terminal event delivery rejects, then releases it after retry', async () => {
+    const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+    const trusted = adapter();
+    const session = createSession(agent, trusted);
+    const emitEvent = vi.fn()
+      .mockRejectedValueOnce(new Error('terminal event transport unavailable'))
+      .mockResolvedValueOnce(undefined);
+    session.rpc.emitEvent = emitEvent;
+    const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+    const api = new SessionAPIImpl(session, vault);
+    const capability = createAgoraLifecycleCapability('session-1', 'run-event-retry', 'epoch-event-retry', 'secret-event-retry');
+    const handle = toAgoraLifecycleHandle(capability);
+    const handoff = {
+      runId: 'run-event-retry',
+      sourceSessionId: 'session-1',
+      targetTask: '.trellis/tasks/successor',
+      handoffPath: '.trellis/tasks/successor/agora-handoff.json',
+      phase: 'fresh_session_pending' as const,
+      digest: 'd'.repeat(64),
+    };
+    recordAgoraLifecycleTransition(agent.records, {
+      sessionId: 'session-1',
+      runId: 'run-event-retry',
+      transitionId: 'materialize-event-retry',
+      phase: 'fresh_session_pending',
+      insertedTask: '.trellis/tasks/review',
+      targetTask: handoff.targetTask,
+      terminalState: 'materialized',
+      capability,
+      materializationTransitionId: 'materialize-event-retry',
+      materializationHandoffPath: handoff.handoffPath,
+      materializationDigest: handoff.digest,
+    });
+    vault.set(capability.operationId, capability);
+
+    const payload = {
+      runId: 'run-event-retry',
+      transitionId: 'resolve-event-retry',
+      capability: handle,
+      handoff,
+      resolution: 'resolved_to_successor' as const,
+    };
+    await expect(api.resolveAgoraHandoff(payload)).rejects.toThrow('terminal event transport unavailable');
+    expect(agent.records.latestAgoraLifecycle('run-event-retry')).toMatchObject({
+      transitionId: 'resolve-event-retry',
+      phase: 'resolved_to_successor',
+    });
+    expect(vault.get(capability.operationId)).toBe(capability);
+
+    let retryResolved = false;
+    await api.resolveAgoraHandoff(payload).then(() => {
+      retryResolved = true;
+    });
+    expect(emitEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      type: 'agora.lifecycle.updated',
+      runId: 'run-event-retry',
+      phase: 'resolved_to_successor',
+    }));
+    expect(emitEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      type: 'agora.lifecycle.updated',
+      runId: 'run-event-retry',
+      phase: 'resolved_to_successor',
+    }));
+    expect(retryResolved).toBe(true);
+    expect(vault.has(capability.operationId)).toBe(false);
+  });
+
+  it('retains vault through fresh-session pending and releases only after final terminal flush', async () => {
+    const typedProposal = proposal();
+
+    // Unsuccessful materialize keeps the bearer for reconciliation.
+    {
+      const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+      const trusted = adapter();
+      const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+      const api = new SessionAPIImpl(createSession(agent, trusted), vault);
+      const inserted = await api.insertAgoraReview({
+        runId: 'run-materialize-fail',
+        transitionId: 'insert-materialize-fail',
+      });
+      logConvergedRun(agent, 'run-materialize-fail');
+      const confirmation = await api.confirmAgoraMaterialization({
+        runId: 'run-materialize-fail',
+        capability: inserted.handle,
+        proposal: typedProposal,
+      });
+      trusted.materialize.mockResolvedValueOnce({
+        success: false,
+        error: 'materialize refused',
+        mutationCommitted: false,
+      });
+      await expect(api.materializeAgoraReview({
+        runId: 'run-materialize-fail',
+        transitionId: 'materialize-fail',
+        capability: inserted.handle,
+        proposal: typedProposal,
+        confirmation: {
+          runId: confirmation.runId,
+          sourceSessionId: confirmation.sourceSessionId,
+          proposalRevision: confirmation.proposalRevision,
+          proposalHash: confirmation.proposalHash,
+        },
+      })).resolves.toMatchObject({ success: false });
+      expect(vault.size).toBe(1);
+    }
+
+    // A pending handoff is non-terminal: it retains the bearer until the
+    // target bind resolves a provenanced terminal transition.
+    {
+      const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+      const trusted = adapter();
+      const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+      const api = new SessionAPIImpl(createSession(agent, trusted), vault);
+      const inserted = await api.insertAgoraReview({
+        runId: 'run-materialize-ok',
+        transitionId: 'insert-materialize-ok',
+      });
+      logConvergedRun(agent, 'run-materialize-ok');
+      const confirmation = await api.confirmAgoraMaterialization({
+        runId: 'run-materialize-ok',
+        capability: inserted.handle,
+        proposal: typedProposal,
+      });
+
+      await expect(api.resolveAgoraHandoff({
+        runId: 'run-materialize-ok',
+        transitionId: 'resolve-before-pending',
+        capability: inserted.handle,
+        handoff: {
+          runId: 'run-materialize-ok',
+          sourceSessionId: 'session-1',
+          targetTask: '.trellis/tasks/successor',
+          handoffPath: '.trellis/tasks/successor/agora-handoff.json',
+          phase: 'fresh_session_pending',
+          digest: 'b'.repeat(64),
+        },
+        resolution: 'resolved_to_successor',
+      })).rejects.toThrow('not awaiting fresh-session handoff resolution');
+
+      const materialized = await api.materializeAgoraReview({
+        runId: 'run-materialize-ok',
+        transitionId: 'materialize-ok-final',
+        capability: inserted.handle,
+        proposal: typedProposal,
+        confirmation: {
+          runId: confirmation.runId,
+          sourceSessionId: confirmation.sourceSessionId,
+          proposalRevision: confirmation.proposalRevision,
+          proposalHash: confirmation.proposalHash,
+        },
+      });
+      if (!materialized.success || materialized.handoff === undefined) {
+        throw new Error('Expected a pending handoff from successful materialization.');
+      }
+      expect(vault.size).toBe(1);
+      expect(agent.records.latestAgoraLifecycle('run-materialize-ok')).toMatchObject({
+        phase: 'fresh_session_pending',
+        materializationTransitionId: 'materialize-ok-final',
+      });
+      expect(trusted.materialize).toHaveBeenCalledTimes(1);
+
+      await expect(api.resolveAgoraHandoff({
+        runId: 'run-materialize-ok',
+        transitionId: 'resolve-ok',
+        capability: inserted.handle,
+        handoff: { ...materialized.handoff, digest: 'b'.repeat(64) },
+        resolution: 'resolved_to_successor',
+      })).rejects.toThrow('handoff provenance does not match');
+      expect(vault.size).toBe(1);
+
+      await expect(api.resolveAgoraHandoff({
+        runId: 'run-materialize-ok',
+        transitionId: 'resolve-ok',
+        capability: inserted.handle,
+        handoff: materialized.handoff,
+        resolution: 'resolved_to_successor',
+      })).resolves.toMatchObject({
+        phase: 'resolved_to_successor',
+        terminalState: 'materialized',
+      });
+      expect(agent.records.latestAgoraLifecycle('run-materialize-ok')).toMatchObject({
+        phase: 'resolved_to_successor',
+        terminalState: 'materialized',
+      });
+      expect(vault.size).toBe(0);
+    }
+
+    // A terminal record may already be appended when its final durable flush
+    // fails. Its same transition retries without rematerializing, then releases.
+    {
+      const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+      const trusted = adapter();
+      const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+      const api = new SessionAPIImpl(createSession(agent, trusted), vault);
+      const inserted = await api.insertAgoraReview({
+        runId: 'run-terminal-flush',
+        transitionId: 'insert-terminal-flush',
+      });
+      logConvergedRun(agent, 'run-terminal-flush');
+      const confirmation = await api.confirmAgoraMaterialization({
+        runId: 'run-terminal-flush',
+        capability: inserted.handle,
+        proposal: typedProposal,
+      });
+      const materialized = await api.materializeAgoraReview({
+        runId: 'run-terminal-flush',
+        transitionId: 'materialize-terminal-flush',
+        capability: inserted.handle,
+        proposal: typedProposal,
+        confirmation: {
+          runId: confirmation.runId,
+          sourceSessionId: confirmation.sourceSessionId,
+          proposalRevision: confirmation.proposalRevision,
+          proposalHash: confirmation.proposalHash,
+        },
+      });
+      if (!materialized.success || materialized.handoff === undefined) {
+        throw new Error('Expected a pending handoff from successful materialization.');
+      }
+
+      const flush = vi.spyOn(agent.records, 'flush')
+        .mockRejectedValueOnce(new Error('final terminal flush unavailable'));
+      await expect(api.resolveAgoraHandoff({
+        runId: 'run-terminal-flush',
+        transitionId: 'resolve-terminal-flush',
+        capability: inserted.handle,
+        handoff: materialized.handoff,
+        resolution: 'resolved_to_successor',
+      })).rejects.toThrow('final terminal flush unavailable');
+      expect(agent.records.latestAgoraLifecycle('run-terminal-flush')?.phase).toBe('resolved_to_successor');
+      expect(vault.size).toBe(1);
+      expect(trusted.materialize).toHaveBeenCalledTimes(1);
+
+      flush.mockResolvedValue(undefined);
+      await expect(api.resolveAgoraHandoff({
+        runId: 'run-terminal-flush',
+        transitionId: 'resolve-terminal-flush',
+        capability: inserted.handle,
+        handoff: materialized.handoff,
+        resolution: 'resolved_to_successor',
+      })).resolves.toMatchObject({ phase: 'resolved_to_successor' });
+      expect(vault.size).toBe(0);
+      expect(trusted.materialize).toHaveBeenCalledTimes(1);
+    }
+
+    // Successful adapter + applied records, but the materialization wrapper
+    // flush fails. Retrying only re-flushes pending records; final resolution
+    // remains the sole release point.
+    {
+      const agent = testAgent({ persistence: new InMemoryAgentRecordPersistence() }).agent;
+      const trusted = adapter();
+      const vault = new Map<string, ReturnType<typeof createAgoraLifecycleCapability>>();
+      const api = new SessionAPIImpl(createSession(agent, trusted), vault);
+      const inserted = await api.insertAgoraReview({
+        runId: 'run-materialize-flush',
+        transitionId: 'insert-materialize-flush',
+      });
+      logConvergedRun(agent, 'run-materialize-flush');
+      const confirmation = await api.confirmAgoraMaterialization({
+        runId: 'run-materialize-flush',
+        capability: inserted.handle,
+        proposal: typedProposal,
+      });
+
+      let flushCount = 0;
+      const flush = vi.spyOn(agent.records, 'flush').mockImplementation(async () => {
+        flushCount += 1;
+        // Executing reservation + applied records flush inside lifecycle, then wrapper flush.
+        if (flushCount >= 3) throw new Error('final materialize flush unavailable');
+      });
+
+      await expect(api.materializeAgoraReview({
+        runId: 'run-materialize-flush',
+        transitionId: 'materialize-flush',
+        capability: inserted.handle,
+        proposal: typedProposal,
+        confirmation: {
+          runId: confirmation.runId,
+          sourceSessionId: confirmation.sourceSessionId,
+          proposalRevision: confirmation.proposalRevision,
+          proposalHash: confirmation.proposalHash,
+        },
+      })).rejects.toThrow('final materialize flush unavailable');
+      expect(vault.size).toBe(1);
+      expect(trusted.materialize).toHaveBeenCalledTimes(1);
+
+      flush.mockResolvedValue(undefined);
+      const materialized = await api.materializeAgoraReview({
+        runId: 'run-materialize-flush',
+        transitionId: 'materialize-flush',
+        capability: inserted.handle,
+        proposal: typedProposal,
+        confirmation: {
+          runId: confirmation.runId,
+          sourceSessionId: confirmation.sourceSessionId,
+          proposalRevision: confirmation.proposalRevision,
+          proposalHash: confirmation.proposalHash,
+        },
+      });
+      if (!materialized.success || materialized.handoff === undefined) {
+        throw new Error('Expected a pending handoff from materialization retry.');
+      }
+      expect(vault.size).toBe(1);
+      expect(trusted.materialize).toHaveBeenCalledTimes(1);
+
+      await api.resolveAgoraHandoff({
+        runId: 'run-materialize-flush',
+        transitionId: 'resolve-materialize-flush',
+        capability: inserted.handle,
+        handoff: materialized.handoff,
+        resolution: 'resolved_to_successor',
+      });
+      expect(vault.size).toBe(0);
+    }
+  });
+});

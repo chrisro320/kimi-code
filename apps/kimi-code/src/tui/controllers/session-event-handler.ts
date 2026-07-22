@@ -1,4 +1,5 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
+import { TERMINAL_PHASES, type AgoraLifecyclePhase } from '@moonshot-ai/kimi-code-sdk';
 import type {
   AgentStatusUpdatedEvent,
   AgoraLifecycleUpdatedEvent,
@@ -113,7 +114,13 @@ export interface SessionEventHost {
   sendNormalUserInput(text: string): void;
   createAgoraHandoffSession(
     handoffPath: string,
-    expected: { readonly runId: string; readonly sourceSessionId: string; readonly targetTask: string; readonly digest: string },
+    expected: {
+      readonly runId: string;
+      readonly sourceSessionId: string;
+      readonly targetTask: string;
+      readonly digest: string;
+      readonly insertedTask?: string;
+    },
   ): Promise<void>;
   updateTerminalTitle(): void;
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
@@ -650,10 +657,7 @@ export class SessionEventHandler {
     if (event.sourceSessionId !== this.host.state.appState.sessionId) return;
     const active = this.host.state.appState.agora;
     if (active?.runId !== undefined && active.runId !== event.runId) return;
-    const terminal = event.phase === 'cancelled'
-      || event.phase === 'resolved_to_origin'
-      || event.phase === 'resolved_to_successor';
-    if (terminal) {
+    if (TERMINAL_PHASES.has(event.phase as AgoraLifecyclePhase)) {
       this.host.setAppState({ agora: null });
       return;
     }
@@ -668,6 +672,7 @@ export class SessionEventHandler {
         sourceSessionId: event.sourceSessionId,
         targetTask: event.targetTask,
         digest: event.materializationDigest,
+        insertedTask: event.insertedTask,
       });
       return;
     }

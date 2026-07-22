@@ -44,6 +44,7 @@ import type {
   ConfirmAgoraMaterializationPayload,
   MaterializeAgoraReviewPayload,
   MaterializeAgoraReviewResult,
+  ResolveAgoraHandoffPayload,
 } from '#/rpc';
 import type { Event } from '#/rpc/events';
 import {
@@ -52,6 +53,7 @@ import {
   recordAgoraLifecycleTransition,
   cancelAgoraLifecycleTransition,
   materializeAgoraLifecycleTransition,
+  resolveAgoraHandoffTransition,
   toAgoraLifecycleHandle,
   verifyAgoraLifecycleHandle,
   type AgoraLifecycleCapability,
@@ -406,6 +408,10 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
           insert: title === undefined && slug === undefined ? undefined : { title, slug },
         });
     if (!transition.success) {
+      // Explicit adapter failure never produced a typed transition; drop the
+      // just-registered bearer so a dead entry cannot pin the process vault.
+      // Successful insert + failed flush must retain the entry for reconcile.
+      this.agoraCapabilityVault.delete(capability.operationId);
       throw new KimiError(
         ErrorCodes.REQUEST_INVALID,
         transition.error ?? 'Agora insert transition failed',
@@ -431,7 +437,7 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
         { cause: error, details: { runId, transitionId, reconcile: true, retryHandle: handle } },
       );
     }
-    this.emitAgoraLifecycleUpdated(snapshot);
+    void this.emitAgoraLifecycleUpdated(snapshot);
     return { handle, snapshot };
   }
 
@@ -469,13 +475,14 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
       capability,
       transitionId,
     );
-    // Terminal: drop the bearer so the core-scoped vault cannot grow without
-    // bound across many reviews. A later insert for the same runId mints fresh.
-    this.agoraCapabilityVault.delete(capability.operationId);
+    // Flush BEFORE dropping the bearer: if the durable write fails, the retry
+    // (same transitionId + opaque handle) must still resolve the capability so
+    // it can re-flush idempotently without re-running the adapter.
     await agent.records.flush();
+    this.agoraCapabilityVault.delete(capability.operationId);
     const latest = agent.records.latestAgoraLifecycle(runId);
     if (latest !== undefined) {
-      this.emitAgoraLifecycleUpdated(latest);
+      void this.emitAgoraLifecycleUpdated(latest);
     }
     return result;
   }
@@ -503,7 +510,7 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
     );
     await agent.records.flush();
     const latest = agent.records.latestAgoraLifecycle(runId);
-    if (latest !== undefined) this.emitAgoraLifecycleUpdated(latest);
+    if (latest !== undefined) void this.emitAgoraLifecycleUpdated(latest);
     return confirmation;
   }
 
@@ -538,14 +545,62 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
       payload.proposal,
       payload.confirmation,
     );
+    // `fresh_session_pending` is durable but non-terminal. Keep the bearer so
+    // the source session can append the final resolution after Trellis binds
+    // the target task; retryable materialization and wrapper-flush failures
+    // likewise retain the same opaque handle.
     await agent.records.flush();
     if (result.success) {
       const latest = agent.records.latestAgoraLifecycle(runId);
       if (latest !== undefined) {
-        this.emitAgoraLifecycleUpdated(latest);
+        void this.emitAgoraLifecycleUpdated(latest);
       }
     }
     return { ...result, runId };
+  }
+
+  async resolveAgoraHandoff(
+    payload: ResolveAgoraHandoffPayload,
+  ): Promise<AgoraLifecycleTransitionResult> {
+    const runId = payload.runId.trim();
+    const transitionId = payload.transitionId.trim();
+    if (runId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id cannot be empty');
+    }
+    if (runId !== payload.capability.runId || runId !== payload.handoff.runId) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora handoff run id does not match the lifecycle capability');
+    }
+    if (payload.capability.sessionId !== this.session.options.id) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is bound to a different session');
+    }
+    if (transitionId.length === 0) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora transition id cannot be empty');
+    }
+    const capability = this.resolveAgoraCapabilityHandle(payload.capability);
+    if (capability === undefined) {
+      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is not available in this trusted host');
+    }
+    const agent = await this.session.ensureAgentResumed('main');
+    const result = resolveAgoraHandoffTransition(
+      agent.records,
+      capability,
+      transitionId,
+      payload.handoff,
+      payload.resolution,
+    );
+    // Terminal durable flush and lifecycle-event acceptance delimit capability
+    // lifetime. Either failure leaves the same handle available to retry this
+    // idempotent transition with the same handoff payload.
+    await agent.records.flush();
+    const latest = agent.records.latestAgoraLifecycle(runId);
+    if (latest !== undefined) {
+      // Target activation begins after this RPC resolves. Await acceptance of
+      // the terminal lifecycle event so the source UI observes its teardown
+      // before the caller can activate the target task.
+      await this.emitAgoraLifecycleUpdated(latest);
+    }
+    this.agoraCapabilityVault.delete(capability.operationId);
+    return result;
   }
 
   private resolveAgoraCapabilityHandle(
@@ -572,17 +627,25 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
     return lineage;
   }
 
-  private emitAgoraLifecycleUpdated(snapshot: AgoraLifecycleSnapshot): void {
+  private emitAgoraLifecycleUpdated(snapshot: AgoraLifecycleSnapshot): Promise<void> {
     const sessionId = this.session.options.id;
-    if (sessionId === undefined) return;
-    const { transitionId: _transitionId, ...eventPayload } = snapshot;
+    if (sessionId === undefined) return Promise.resolve();
     const event: Event = {
       type: 'agora.lifecycle.updated',
       agentId: 'main',
       sessionId,
-      ...eventPayload,
+      runId: snapshot.runId,
+      phase: snapshot.phase,
+      originTask: snapshot.originTask,
+      insertedTask: snapshot.insertedTask,
+      targetTask: snapshot.targetTask,
+      terminalState: snapshot.terminalState,
+      sourceSessionId: snapshot.sourceSessionId,
+      envelopeRevision: snapshot.envelopeRevision,
+      materializationHandoffPath: snapshot.materializationHandoffPath,
+      materializationDigest: snapshot.materializationDigest,
     };
-    void this.session.rpc.emitEvent(event);
+    return this.session.rpc.emitEvent(event);
   }
 
   private async getAgent(agentId: string): Promise<PromisableMethods<AgentAPI>> {
