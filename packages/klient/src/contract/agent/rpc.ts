@@ -129,7 +129,9 @@ export const getTasksPayloadSchema = z.object({
 
 const taskLifecycleStatusSchema = z.enum([
   'running',
+  'input_required',
   'completed',
+  'expansion_denied',
   'failed',
   'timed_out',
   'killed',
@@ -161,6 +163,13 @@ export const agentTaskInfoSchema = z.discriminatedUnion('kind', [
     kind: z.literal('agent'),
     agentId: z.string().optional(),
     subagentType: z.string().optional(),
+    candidate: z
+      .object({
+        hash: z.string(),
+        requestedScope: z.array(z.string()),
+        paths: z.array(z.string()),
+      })
+      .optional(),
     ...taskInfoBaseFields,
   }),
   z.object({
