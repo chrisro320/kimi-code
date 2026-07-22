@@ -794,4 +794,102 @@ describe('normalizeKimiToolSchema', () => {
     });
     expect(result).not.toHaveProperty('type');
   });
+
+  describe('root anyOf/oneOf union of object schemas', () => {
+    // Regression: a tool built from `z.union([objectSchemaA, objectSchemaB])`
+    // (e.g. TaskOutput's resolution-vs-inspect shapes) normalizes to a root
+    // `{ anyOf: [...] }` with no `type` at all. Moonshot's managed provider
+    // rejects that outright ("type is required and must be object"), and
+    // rejects `type: 'object'` added alongside a root anyOf just as hard
+    // ("when using anyOf, type should be defined in anyOf items instead of
+    // the parent schema") — it wants a single flat object, not a union, at
+    // the parameters root.
+    it('flattens a root anyOf of two object schemas into one object schema', () => {
+      const schema = {
+        anyOf: [
+          {
+            type: 'object',
+            properties: {
+              action: { type: 'string', enum: ['approve', 'deny'] },
+              task_id: { type: 'string' },
+              candidate_hash: { type: 'string' },
+            },
+            required: ['action', 'task_id', 'candidate_hash'],
+            additionalProperties: false,
+          },
+          {
+            type: 'object',
+            properties: {
+              action: { type: 'string', const: 'inspect' },
+              task_id: { type: 'string' },
+              block: { type: 'boolean' },
+            },
+            required: ['task_id'],
+            additionalProperties: false,
+          },
+        ],
+      };
+
+      const result = normalizeKimiToolSchema(schema);
+
+      expect(result['type']).toBe('object');
+      expect(result).not.toHaveProperty('anyOf');
+      // task_id is required in every branch -> stays required.
+      expect(result['required']).toEqual(['task_id']);
+      const properties = result['properties'] as Record<string, unknown>;
+      // action differs by branch -> combined into a nested anyOf (nested
+      // combinators are fine per Moonshot; only the root union is rejected).
+      expect(properties['action']).toEqual({
+        anyOf: [
+          { type: 'string', enum: ['approve', 'deny'] },
+          { type: 'string', const: 'inspect' },
+        ],
+      });
+      expect(properties['task_id']).toEqual({ type: 'string' });
+      expect(properties['candidate_hash']).toEqual({ type: 'string' });
+      expect(properties['block']).toEqual({ type: 'boolean' });
+      expect(result['additionalProperties']).toBe(false);
+    });
+
+    it('does not flatten when a branch is not itself object-typed', () => {
+      const schema = {
+        anyOf: [{ type: 'object', properties: {} }, { type: 'string' }],
+      };
+
+      const result = normalizeKimiToolSchema(schema);
+
+      expect(result).not.toHaveProperty('type');
+      expect(result['anyOf']).toBeDefined();
+    });
+
+    it('does not flatten a root that already has an explicit type', () => {
+      const schema = {
+        type: 'object',
+        anyOf: [{ type: 'object', properties: { a: { type: 'string' } } }],
+      };
+
+      const result = normalizeKimiToolSchema(schema);
+
+      // Unchanged shape (still object-typed with the anyOf alongside it) —
+      // this function only steps in when the root has no type at all.
+      expect(result['type']).toBe('object');
+      expect(result['anyOf']).toBeDefined();
+    });
+
+    it('deep-clones and does not mutate the original schema', () => {
+      const schema = {
+        anyOf: [
+          { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+          { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+        ],
+      };
+      const original = structuredClone(schema);
+
+      const result = normalizeKimiToolSchema(schema);
+
+      expect(result['type']).toBe('object');
+      expect(schema).toEqual(original);
+      expect(result).not.toBe(schema);
+    });
+  });
 });

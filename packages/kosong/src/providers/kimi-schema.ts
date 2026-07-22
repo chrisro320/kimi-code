@@ -116,8 +116,20 @@ const NUMERIC_STRUCTURE_KEYS = new Set([
  * a provider-compatibility normalizer, not a complete JSON Schema compiler:
  * it resolves local refs, preserves combinator nodes, infers obvious
  * scalar/object/array types, and falls back to `string` only for nested
- * typeless property schemas. The root schema object is treated as a container
- * and is not itself normalized.
+ * typeless property schemas.
+ *
+ * The root is also flattened when it is an `anyOf`/`oneOf` of several
+ * object schemas (see {@link mergeRootUnion}) — a tool built from
+ * `z.union([...])` of object schemas normalizes to exactly that shape, and
+ * Moonshot's function-calling schema flavor rejects a union sitting directly
+ * at the parameters root: a bare root with no `type` is rejected as
+ * "type is required and must be object", and adding `type: 'object'`
+ * alongside the root `anyOf` is *also* rejected ("when using anyOf, type
+ * should be defined in anyOf items instead of the parent schema" — i.e. it
+ * wants a flat object, not a union, at that position). Nested `anyOf` is
+ * fine per that same message, so a same-name property whose branches
+ * disagree is combined into a per-property `anyOf` instead of losing
+ * information.
  */
 export function normalizeKimiToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
   return ensureKimiPropertyTypes(derefJsonSchema(schema));
@@ -128,8 +140,69 @@ function ensureKimiPropertyTypes(schema: Record<string, unknown>): Record<string
   if (!isRecord(normalized)) {
     throw new Error('JSON Schema root must normalize to an object.');
   }
-  recurseSchema(normalized);
-  return normalized;
+  const flattened = mergeRootUnion(normalized) ?? normalized;
+  recurseSchema(flattened);
+  return flattened;
+}
+
+/**
+ * Flattens a root `{ anyOf: [...] }`/`{ oneOf: [...] }` of object schemas
+ * into a single `type: 'object'` schema Moonshot's function-calling flavor
+ * accepts (see {@link normalizeKimiToolSchema}'s doc for why). Returns
+ * `undefined` (no flattening) when there's no top-level union, a branch
+ * isn't itself `type: 'object'`, or the union sits alongside sibling
+ * keywords other than `description` (an actual mixed-type union, or a
+ * combinator used for something other than "one of these object shapes",
+ * is a real schema shape this function has no safe rewrite for).
+ */
+function mergeRootUnion(schema: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (hasOwn(schema, 'type')) return undefined;
+  const branches = schema['anyOf'] ?? schema['oneOf'];
+  if (!Array.isArray(branches) || branches.length === 0) return undefined;
+  const otherKeys = Object.keys(schema).filter(
+    (key) => key !== 'anyOf' && key !== 'oneOf' && key !== 'description' && key !== '$schema',
+  );
+  if (otherKeys.length > 0) return undefined;
+  if (!branches.every((branch) => isRecord(branch) && branch['type'] === 'object')) return undefined;
+  const objectBranches = branches as Record<string, unknown>[];
+
+  const propertyBranches = new Map<string, unknown[]>();
+  for (const branch of objectBranches) {
+    const branchProperties = isRecord(branch['properties'])
+      ? (branch['properties'] as Record<string, unknown>)
+      : {};
+    for (const [key, propertySchema] of Object.entries(branchProperties)) {
+      const existing = propertyBranches.get(key);
+      if (existing === undefined) {
+        propertyBranches.set(key, [propertySchema]);
+      } else if (!existing.some((seen) => deepEqualJson(seen, propertySchema))) {
+        existing.push(propertySchema);
+      }
+    }
+  }
+  const properties: Record<string, unknown> = {};
+  for (const [key, propertySchemas] of propertyBranches) {
+    properties[key] = propertySchemas.length === 1 ? propertySchemas[0] : { anyOf: propertySchemas };
+  }
+
+  const requiredPerBranch = objectBranches.map(
+    (branch) => new Set(Array.isArray(branch['required']) ? (branch['required'] as string[]) : []),
+  );
+  const required = [...propertyBranches.keys()].filter((key) =>
+    requiredPerBranch.every((set) => set.has(key)),
+  );
+
+  const merged: Record<string, unknown> = { type: 'object', properties };
+  if (required.length > 0) merged['required'] = required;
+  if (objectBranches.every((branch) => branch['additionalProperties'] === false)) {
+    merged['additionalProperties'] = false;
+  }
+  if (typeof schema['description'] === 'string') merged['description'] = schema['description'];
+  return merged;
+}
+
+function deepEqualJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function hasUnresolvedDefinitionRef(node: unknown, bucketKey: string): boolean {
