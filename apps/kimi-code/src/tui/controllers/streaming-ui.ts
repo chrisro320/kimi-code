@@ -214,7 +214,7 @@ export class StreamingUIController {
   applyBackgroundTaskTerminalStatus(args: {
     agentId?: string | undefined;
     description: string;
-    status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost';
+    status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost' | 'expansion_denied';
     /**
      * Real failure message to surface on the card. Pass the `subagent.failed`
      * event's `error` for live crashes — it is far more useful than the

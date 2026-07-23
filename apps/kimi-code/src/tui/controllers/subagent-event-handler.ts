@@ -334,6 +334,11 @@ export class SubAgentEventHandler {
   private handleSubagentFailed(
     event: SubagentLifecycleEventOf<'subagent.failed'>,
   ): void {
+    // External retry attempts emit a non-terminal failure per attempt; only an
+    // exhausted event is a real terminal failure. Tearing down on a transient
+    // attempt would leave the UI permanently "failed" even when a later
+    // retry succeeds (metadata gone, swarm member stuck in failed phase).
+    if (event.exhausted === false) return;
     const backgroundMeta = this.backgroundAgentMetadata.get(event.subagentId);
     if (backgroundMeta !== undefined) {
       const taskId = this.findAgentTaskId(

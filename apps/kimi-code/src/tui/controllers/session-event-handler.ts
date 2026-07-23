@@ -1155,7 +1155,8 @@ export class SessionEventHandler {
       info.status === 'failed' ||
       info.status === 'timed_out' ||
       info.status === 'killed' ||
-      info.status === 'lost';
+      info.status === 'lost' ||
+      info.status === 'expansion_denied';
 
     if (event.type === 'task.started' || event.type === 'background.task.started') {
       if (info.kind === 'agent') {
@@ -1229,7 +1230,11 @@ export class SessionEventHandler {
         info.status === 'failed' ||
         info.status === 'timed_out' ||
         info.status === 'killed' ||
-        info.status === 'lost'
+        info.status === 'lost' ||
+        // Terminal-by-decision, and awaiting-approval-but-not-executing:
+        // neither should count as a running background agent in the badge.
+        info.status === 'expansion_denied' ||
+        info.status === 'input_required'
       ) {
         continue;
       }

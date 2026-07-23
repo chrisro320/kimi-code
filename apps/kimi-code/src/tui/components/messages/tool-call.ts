@@ -116,7 +116,7 @@ export interface ToolCallReadSnapshot {
 }
 
 function backgroundFailureMessage(
-  status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost' | undefined,
+  status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost' | 'expansion_denied' | undefined,
 ): string | undefined {
   switch (status) {
     case 'lost':
@@ -125,6 +125,8 @@ function backgroundFailureMessage(
       return 'Background agent killed';
     case 'timed_out':
       return 'Background agent timed out';
+    case 'expansion_denied':
+      return 'Scope expansion denied; candidate discarded';
     case 'failed':
       return 'Background agent failed';
     case 'completed':
@@ -1196,7 +1198,7 @@ export class ToolCallComponent extends Container {
    * reclassifies a previously-running task as `lost`).
    */
   setBackgroundTaskTerminalStatus(
-    status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost',
+    status: 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost' | 'expansion_denied',
     options: { errorText?: string | undefined } = {},
   ): void {
     const phase: 'done' | 'failed' = status === 'completed' ? 'done' : 'failed';

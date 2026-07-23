@@ -314,7 +314,11 @@ export class BackgroundManager {
     if (!this.isDetached(entry)) return;
     const info = this.toInfo(entry);
     void this.notifyBackgroundTask(info).catch(() => { });
-    if (isBackgroundTaskTerminal(info.status)) this.emitTaskTerminated(info);
+    // input_required is not terminal, but the background execution has ended
+    // and consumers (badge, task map) must stop counting it as running.
+    if (isBackgroundTaskTerminal(info.status) || isBackgroundTaskAwaitingInput(info.status)) {
+      this.emitTaskTerminated(info);
+    }
   }
 
   private emitTaskStarted(info: BackgroundTaskInfo): void {
