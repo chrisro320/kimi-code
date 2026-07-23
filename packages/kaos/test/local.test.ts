@@ -1050,6 +1050,51 @@ describe('LocalProcess.kill safety', () => {
   );
 });
 
+describe('LocalKaos transactionalFiles.validateComponents', () => {
+  let kaos: LocalKaos;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    kaos = await LocalKaos.create();
+    tempDir = toPosix(await realpath(await mkdtemp(join(tmpdir(), 'kaos-txn-'))));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('accepts a child path inside the root', async () => {
+    const root = join(tempDir, 'proj');
+    await kaos.mkdir(root);
+    await kaos.writeText(join(root, 'a.txt'), 'hello');
+
+    const validated = await kaos.transactionalFiles.validateComponents(root, join(root, 'a.txt'));
+    expect(validated.leaf?.kind).toBe('regular');
+  });
+
+  it('rejects a sibling whose name shares the root as a bare prefix', async () => {
+    const root = join(tempDir, 'proj');
+    const evil = join(tempDir, 'proj-evil');
+    await kaos.mkdir(root);
+    await kaos.mkdir(evil);
+    await kaos.writeText(join(evil, 'x.txt'), 'escape');
+
+    await expect(
+      kaos.transactionalFiles.validateComponents(root, join(evil, 'x.txt')),
+    ).rejects.toThrow('escapes root');
+  });
+
+  it('rejects the root itself and dot-dot escapes', async () => {
+    const root = join(tempDir, 'proj');
+    await kaos.mkdir(root);
+
+    await expect(kaos.transactionalFiles.validateComponents(root, root)).rejects.toThrow('escapes root');
+    await expect(
+      kaos.transactionalFiles.validateComponents(root, join(root, '..', 'outside.txt')),
+    ).rejects.toThrow('escapes root');
+  });
+});
+
 async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {

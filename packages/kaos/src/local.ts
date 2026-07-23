@@ -251,7 +251,11 @@ export class LocalKaos implements Kaos {
     const validate = async (root: string, path: string, allowMissingLeaf = false): Promise<KaosValidatedPath> => {
       const rootPath = resolve(root);
       const targetPath = resolve(path);
-      const relative = targetPath.startsWith(rootPath) ? targetPath.slice(rootPath.length).replace(/^[/\\]+/, '') : '';
+      // Boundary check, not a raw prefix match: `/tmp/proj-evil/x` must not
+      // pass for root `/tmp/proj`. Slice at `rootPath + separator`; a target
+      // equal to the root itself still yields '' and is rejected below.
+      const rootPrefix = rootPath.endsWith('/') || rootPath.endsWith('\\') ? rootPath : `${rootPath}/`;
+      const relative = targetPath.startsWith(rootPrefix) ? targetPath.slice(rootPrefix.length).replace(/^[/\\]+/, '') : '';
       if (relative === '' || relative.startsWith('../') || relative.includes('/../')) throw new Error('Transactional path escapes root.');
       let cursor = rootPath;
       const parts = relative.split(/[\\/]+/).filter(Boolean);
