@@ -1216,6 +1216,33 @@ describe('SessionSubagentHost worktree isolation', () => {
     vi.mocked(acquireSubagentWorktree).mockReset().mockResolvedValue(null);
   });
 
+  it('refuses an enforced editing spawn before any agent is created when isolation fails', async () => {
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent();
+    child.configure();
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    // acquireSubagentWorktree resolves null (default mock): the refusal must
+    // happen before createAgent, so no resumable empty-shell ghost is left.
+    await expect(
+      host.spawn({
+        profileName: 'coder',
+        parentToolCallId: 'call_agent',
+        prompt: 'Implement the fix',
+        description: 'Fix bug',
+        runInBackground: false,
+        signal,
+        enforceDispatch: true,
+        dispatch: { scope: ['src/**'] },
+      }),
+    ).rejects.toThrow('dispatch was refused');
+    expect(session.createAgent).not.toHaveBeenCalled();
+    expect(session.metadata.agents).toEqual({});
+  });
+
   it('does not attempt isolation when the experimental flag is disabled (default)', async () => {
     const parent = testAgent();
     parent.configure();
@@ -2172,28 +2199,13 @@ describe('SessionSubagentHost route pools', () => {
     });
 
     // The route slot is still held: the first spawn's turn has not settled
-    // yet, so a second spawn attempt against the same maxConcurrency=1 route
-    // must be rejected as exhausted rather than silently double-booking it.
-    await expect(
-      host.spawn({
-        profileName: 'coder',
-        parentToolCallId: 'call_second_too_soon',
-        prompt: 'second',
-        description: 'second',
-        runInBackground: false,
-        signal,
-      }),
-    ).rejects.toThrow('exhausted');
-
-    await first.completion;
-
-    // Completion releases the slot, so a later spawn can reuse the same
-    // single-entry pool.
+    // yet, so a second spawn against the same maxConcurrency=1 route must
+    // queue behind it instead of double-booking the slot.
     child.mockNextResponse({
       type: 'text',
       text: `Second pooled spawn.${CONTINUATION_SAFE_SUMMARY_SUFFIX}`,
     });
-    const second = await host.spawn({
+    const secondPromise = host.spawn({
       profileName: 'coder',
       parentToolCallId: 'call_second',
       prompt: 'second',
@@ -2201,6 +2213,11 @@ describe('SessionSubagentHost route pools', () => {
       runInBackground: false,
       signal,
     });
+
+    await first.completion;
+
+    // Completion releases the slot, so the queued spawn resolves and runs.
+    const second = await secondPromise;
     await expect(second.completion).resolves.toMatchObject({});
   });
 

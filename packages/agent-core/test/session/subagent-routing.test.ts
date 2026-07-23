@@ -1,3 +1,8 @@
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type { KimiConfig, SubagentLauncher } from '../../src/config';
@@ -269,6 +274,63 @@ describe('SubagentRoutePool', () => {
     expect(() => pool.acquire()).toThrow('exhausted');
     second.release();
   });
+
+  it('queues acquireQueued behind a saturated pool and grants the slot on release', async () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    const first = pool.acquire();
+
+    let granted = false;
+    const pending = pool.acquireQueued().then((acquired) => {
+      granted = true;
+      return acquired;
+    });
+    await Promise.resolve();
+    expect(granted).toBe(false);
+
+    first.release();
+    const second = await pending;
+    expect(granted).toBe(true);
+    expect(second.route.backend).toBe('a');
+    second.release();
+  });
+
+  it('serves queued waiters in FIFO order', async () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    const first = pool.acquire();
+    const order: string[] = [];
+    const waiterA = pool.acquireQueued().then((acquired) => { order.push('a'); return acquired; });
+    const waiterB = pool.acquireQueued().then((acquired) => { order.push('b'); return acquired; });
+
+    first.release();
+    const secondA = await waiterA;
+    secondA.release();
+    const secondB = await waiterB;
+    secondB.release();
+    expect(order).toEqual(['a', 'b']);
+  });
+
+  it('rejects a queued acquireQueued when the abort signal fires', async () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    const first = pool.acquire();
+    const controller = new AbortController();
+    const pending = pool.acquireQueued(controller.signal);
+
+    controller.abort(new Error('user cancelled'));
+    await expect(pending).rejects.toThrow('user cancelled');
+
+    // The aborted waiter must not hold a slot: the next queued acquire gets it.
+    const next = pool.acquireQueued();
+    first.release();
+    (await next).release();
+  });
+
+  it('rejects acquireQueued immediately when the signal is already aborted', async () => {
+    const pool = new SubagentRoutePool([{ backend: 'a', maxConcurrency: 1 }]);
+    pool.acquire();
+    const controller = new AbortController();
+    controller.abort(new Error('already done'));
+    await expect(pool.acquireQueued(controller.signal)).rejects.toThrow('already done');
+  });
 });
 
 describe('runExternalSubagent', () => {
@@ -447,6 +509,50 @@ describe('runExternalSubagent', () => {
     } finally {
       clearTimeoutSpy.mockRestore();
     }
+  });
+
+  it('kills the whole process group on abort, including grandchildren', async (ctx) => {
+    if (process.platform === 'win32') ctx.skip();
+    const pidFile = join(await mkdtemp(join(tmpdir(), 'kimi-grandchild-')), 'grandchild.pid');
+    const controller = new AbortController();
+    const forking = {
+      ...nodeRoute,
+      backend: {
+        command: process.execPath,
+        args: [
+          '-e',
+          `const { spawn } = require('node:child_process');` +
+          `const fs = require('node:fs');` +
+          `const g = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });` +
+          `fs.writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));` +
+          `setInterval(() => {}, 1000);`,
+        ],
+      },
+    };
+    const running = runExternalSubagent(forking, process.cwd(), '', controller.signal, () => {});
+
+    let grandchildPid = '';
+    for (let attempt = 0; attempt < 100 && grandchildPid === ''; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      grandchildPid = existsSync(pidFile) ? await readFile(pidFile, 'utf8') : '';
+    }
+    expect(grandchildPid).not.toBe('');
+    const pid = Number(grandchildPid);
+
+    controller.abort(new Error('cancelled'));
+    await expect(running).rejects.toThrow('cancelled');
+
+    // The grandchild must be reaped with the group, not orphaned.
+    let alive = true;
+    for (let attempt = 0; attempt < 40 && alive; attempt += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
   });
 
   it('waits for close and rejects when a backend exits while stdin is still writing', async () => {

@@ -1357,7 +1357,7 @@ function buildBackgroundTaskNotificationBody(info: BackgroundTaskInfo): string {
     `To recover or continue this subagent, call Agent(resume="${agentId}", prompt="Pick up where you left off; redo the last tool call if its result was never observed.").`,
     `Use agent_id ("${agentId}"), NOT source_id / task_id ("${info.taskId}") — the two look alike but only agent_id is accepted by the resume parameter.`,
     'Add run_in_background=true to keep it backgrounded, or omit it to take the result inline in the current turn.',
-    'The subagent retains its full prior context across the restart, but any in-flight tool call lost its result and may need to be redone.',
+    'If the subagent had already started, it retains its full prior context across the restart (any in-flight tool call lost its result and may need to be redone); if it failed before its first turn ran, re-spawn with the original prompt instead.',
   ].join('\n');
 
   return `${baseLine}${recovery}`;

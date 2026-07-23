@@ -328,62 +328,73 @@ export class SessionSubagentHost {
     let releasePoolSlot: (() => void) | undefined;
     let resolved: { route: ResolvedSubagentRoute; releasePoolSlot?: () => void; circuitKey?: string };
     try {
-      resolved = this.resolveSpawnRoute(parent, profile, options);
+      resolved = await this.resolveSpawnRoute(parent, profile, options);
       const route = resolved.route;
       releasePoolSlot = resolved.releasePoolSlot;
       if (route.kind === 'external') {
-        handle = this.spawnExternal(parent, profile.name, route, runOptions, randomUUID(), false, undefined, enforceIsolation);
+        handle = await this.spawnExternal(parent, profile.name, route, runOptions, randomUUID(), false, undefined, enforceIsolation);
       } else {
-        const { id, agent } = await this.session.createAgent(
-          { type: 'sub', generate: parent.rawGenerate },
-          { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
+        // Acquire isolation BEFORE creating/exposing the child agent: when
+        // this throws, the caller gets an error with no agentId, so no
+        // resumable empty-shell ghost is left behind (the failure used to
+        // surface only inside the async completion, after the id was out).
+        const worktree = await this.acquireWorktreeIfNeeded(
+          parent,
+          profile,
+          runOptions.dispatch?.scope,
+          enforceIsolation,
+          runOptions.dispatch?.discardChanges === true,
         );
-        const completion = this.runWithActiveChild(id, runOptions, async (childRunOptions) => {
-          this.emitSubagentSpawned(parent, id, profile.name, childRunOptions);
-          const worktree = await this.acquireWorktreeIfNeeded(
-            parent,
-            profile,
-            childRunOptions.dispatch?.scope,
-            enforceIsolation,
-            childRunOptions.dispatch?.discardChanges === true,
+        try {
+          const { id, agent } = await this.session.createAgent(
+            { type: 'sub', generate: parent.rawGenerate },
+            { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
           );
-          try {
-            await this.configureChild(
-              parent,
-              agent,
-              profile,
-              route.modelAlias,
-              route.kind === 'internal' ? route.thinkingEffort : undefined,
-              worktree?.cwd,
-              childRunOptions,
-            );
-            const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
-            const finishResult = worktree
-              ? await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'))
-              : undefined;
-            const completion = this.completeWorktreeResult(
-              result,
-              finishResult,
-              id,
-              childRunOptions,
-            );
-            this.emitSubagentCompleted(parent, id, completion, agent.context.tokenCount);
-            this.triggerSubagentStop(parent, profile.name, result.result);
-            return completion;
-          } catch (error) {
-            if (worktree) {
-              await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'failure')).catch(() => {});
+          const completion = this.runWithActiveChild(id, runOptions, async (childRunOptions) => {
+            this.emitSubagentSpawned(parent, id, profile.name, childRunOptions);
+            try {
+              await this.configureChild(
+                parent,
+                agent,
+                profile,
+                route.modelAlias,
+                route.kind === 'internal' ? route.thinkingEffort : undefined,
+                worktree?.cwd,
+                childRunOptions,
+              );
+              const result = await this.runPromptTurn(parent, id, agent, profile.name, childRunOptions);
+              const finishResult = worktree
+                ? await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'success'))
+                : undefined;
+              const completion = this.completeWorktreeResult(
+                result,
+                finishResult,
+                id,
+                childRunOptions,
+              );
+              this.emitSubagentCompleted(parent, id, completion, agent.context.tokenCount);
+              this.triggerSubagentStop(parent, profile.name, result.result);
+              return completion;
+            } catch (error) {
+              if (worktree) {
+                await worktree.finish(analysisOnlyFinishOutcome(childRunOptions, 'failure')).catch(() => {});
+              }
+              this.emitSubagentFailed(parent, id, childRunOptions, error);
+              throw error;
             }
-            this.emitSubagentFailed(parent, id, childRunOptions, error);
-            throw error;
+          });
+          handle = {
+            agentId: id,
+            profileName: profile.name,
+            resumed: false,
+            completion,
+          };
+        } catch (error) {
+          if (worktree) {
+            await worktree.finish({ kind: 'discard', reason: 'spawn aborted before the child started' }).catch(() => {});
           }
-        });
-        handle = {
-          agentId: id,
-          profileName: profile.name,
-          resumed: false,
-          completion,
-        };
+          throw error;
+        }
       }
     } catch (error) {
       releasePoolSlot?.();
@@ -439,11 +450,11 @@ export class SessionSubagentHost {
    * configured pool always take path (3), unchanged from before pooling
    * existed.
    */
-  private resolveSpawnRoute(
+  private async resolveSpawnRoute(
     parent: Agent,
     profile: ResolvedAgentProfile,
     options: SpawnSubagentOptions,
-  ): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void; circuitKey?: string } {
+  ): Promise<{ route: ResolvedSubagentRoute; releasePoolSlot?: () => void; circuitKey?: string }> {
     const config = this.session.options.config ?? { providers: {} };
     if (options.dispatch?.internalOnly === true) {
       return { route: resolveRouteByNames(config, 'kimi', options.modelAlias) };
@@ -455,12 +466,12 @@ export class SessionSubagentHost {
     }
 
     const poolRoutes = profile.name === 'coder' ? config.subagent?.pools?.[profile.name] : undefined;
-    const resolveDefault = (): { route: ResolvedSubagentRoute; releasePoolSlot?: () => void } => {
+    const resolveDefault = async (): Promise<{ route: ResolvedSubagentRoute; releasePoolSlot?: () => void }> => {
       if (poolRoutes === undefined || poolRoutes.length === 0) {
         return { route: resolveSubagentRoute(config, profile.name, options.modelAlias) };
       }
       const pool = this.getRoutePool(profile.name, poolRoutes);
-      const acquired = pool.acquire();
+      const acquired = await pool.acquireQueued(options.signal);
       try {
         return {
           route: resolveRouteByNames(
@@ -484,7 +495,7 @@ export class SessionSubagentHost {
     // specific backend+model that already failed is skipped next time it
     // comes up, regardless of which unscoped call resolves it.
     const scopeKey = logicalScopeKeyOf(options.dispatch?.scope);
-    const resolved = resolveDefault();
+    const resolved = await resolveDefault();
     const resolvedIdentity = subagentRouteIdentity(resolved.route);
     const key = scopeKey ?? resolvedIdentity;
     if (!parent.dispatchController.isCircuitOpen(key, resolvedIdentity)) {
@@ -702,7 +713,7 @@ export class SessionSubagentHost {
     );
   }
 
-  private spawnExternal(
+  private async spawnExternal(
     parent: Agent,
     profileName: string,
     route: Extract<ResolvedSubagentRoute, { kind: 'external' }>,
@@ -711,91 +722,100 @@ export class SessionSubagentHost {
     resumed = false,
     existingAgentId?: string,
     enforceIsolation = false,
-  ): SubagentHandle {
+  ): Promise<SubagentHandle> {
     const readOnly = options.dispatch?.readOnly === true;
     const launcher = resolveExternalSubagentLauncher(route, readOnly);
     const id = existingAgentId ?? `${EXTERNAL_SUBAGENT_ID_PREFIX}${route.backendName}-${randomUUID()}`;
-    if (existingAgentId === undefined) {
-      this.session.metadata.agents[id] = {
-        type: 'sub',
-        parentAgentId: this.ownerAgentId,
-        swarmItem: options.swarmItem,
-        externalBackend: route.backendName,
-        externalProfile: profileName,
-        externalModelAlias: route.modelAlias,
-        externalSessionId: sessionId,
-        externalReadOnly: readOnly || undefined,
-      };
-      void this.session.writeMetadata();
-    }
-    const completion = this.runWithActiveChild(id, options, async (runOptions) => {
-      this.emitSubagentSpawned(parent, id, profileName, runOptions, route.backendName);
-      const worktree = await this.acquireExternalWorktreeIfNeeded(
-        parent,
-        profileName,
-        runOptions,
-        enforceIsolation,
-      );
-      try {
-        await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
-        runOptions.signal.throwIfAborted();
-        this.emitSubagentStarted(parent, id);
-        runOptions.onReady?.();
-        const { completion, sessionId: finalSessionId } = await this.withExternalRetry(
-          parent,
-          id,
-          route,
-          launcher,
-          worktree?.cwd ?? parent.config.cwd,
-          wrapExternalSubagentPrompt(profileName, runOptions.prompt),
-          (stderr) => {
-            this.session.log.warn('external subagent stderr', {
-              subagentId: id,
-              backend: route.backendName,
-              stderr: redactUntrustedRaw(stderr).redacted,
-            });
-          },
-          (usage) => {
-            parent.emitEvent({
-              type: 'subagent.progress',
-              subagentId: id,
-              usage,
-            });
-          },
-          resumed,
-          sessionId,
-          runOptions,
-        );
-        const finishResult = worktree
-          ? await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'))
-          : undefined;
-        const result = this.completeWorktreeResult(
-          completion,
-          finishResult,
-          id,
-          runOptions,
-          finalSessionId,
-        );
-        this.emitSubagentCompleted(parent, id, result);
-        this.triggerSubagentStop(parent, profileName, completion.result);
-        return result;
-      } catch (error) {
-        if (worktree) {
-          await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'failure')).catch(() => {});
-        }
-        if (!hasExternalRetryEmitted(error)) {
-          this.emitSubagentFailed(parent, id, runOptions, error);
-        }
-        throw error;
-      }
-    });
-    return {
-      agentId: id,
+    // Acquire isolation BEFORE writing metadata/exposing the id, for the same
+    // no-ghost reason as the internal path in `spawn`.
+    const worktree = await this.acquireExternalWorktreeIfNeeded(
+      parent,
       profileName,
-      resumed,
-      resumable: launcher.resumeArgs !== undefined,
-      completion,
-    };
+      options,
+      enforceIsolation,
+    );
+    try {
+      if (existingAgentId === undefined) {
+        this.session.metadata.agents[id] = {
+          type: 'sub',
+          parentAgentId: this.ownerAgentId,
+          swarmItem: options.swarmItem,
+          externalBackend: route.backendName,
+          externalProfile: profileName,
+          externalModelAlias: route.modelAlias,
+          externalSessionId: sessionId,
+          externalReadOnly: readOnly || undefined,
+        };
+        void this.session.writeMetadata();
+      }
+      const completion = this.runWithActiveChild(id, options, async (runOptions) => {
+        this.emitSubagentSpawned(parent, id, profileName, runOptions, route.backendName);
+        try {
+          await this.triggerSubagentStart(parent, profileName, runOptions.prompt, runOptions.signal);
+          runOptions.signal.throwIfAborted();
+          this.emitSubagentStarted(parent, id);
+          runOptions.onReady?.();
+          const { completion, sessionId: finalSessionId } = await this.withExternalRetry(
+            parent,
+            id,
+            route,
+            launcher,
+            worktree?.cwd ?? parent.config.cwd,
+            wrapExternalSubagentPrompt(profileName, runOptions.prompt),
+            (stderr) => {
+              this.session.log.warn('external subagent stderr', {
+                subagentId: id,
+                backend: route.backendName,
+                stderr: redactUntrustedRaw(stderr).redacted,
+              });
+            },
+            (usage) => {
+              parent.emitEvent({
+                type: 'subagent.progress',
+                subagentId: id,
+                usage,
+              });
+            },
+            resumed,
+            sessionId,
+            runOptions,
+          );
+          const finishResult = worktree
+            ? await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'success'))
+            : undefined;
+          const result = this.completeWorktreeResult(
+            completion,
+            finishResult,
+            id,
+            runOptions,
+            finalSessionId,
+          );
+          this.emitSubagentCompleted(parent, id, result);
+          this.triggerSubagentStop(parent, profileName, completion.result);
+          return result;
+        } catch (error) {
+          if (worktree) {
+            await worktree.finish(analysisOnlyFinishOutcome(runOptions, 'failure')).catch(() => {});
+          }
+          if (!hasExternalRetryEmitted(error)) {
+            this.emitSubagentFailed(parent, id, runOptions, error);
+          }
+          throw error;
+        }
+      });
+      return {
+        agentId: id,
+        profileName,
+        resumed,
+        resumable: launcher.resumeArgs !== undefined,
+        completion,
+      };
+    } catch (error) {
+      if (worktree) {
+        await worktree.finish({ kind: 'discard', reason: 'spawn aborted before the child started' }).catch(() => {});
+      }
+      throw error;
+    }
   }
 
   async resume(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
@@ -854,7 +874,7 @@ export class SessionSubagentHost {
         `External subagent backend "${route.backendName}" has no ${launcherPath}; this handle is non-resumable. Launch a fresh replacement instead.`,
       );
     }
-    return this.spawnExternal(
+    return await this.spawnExternal(
       parent,
       metadata.externalProfile,
       route,
@@ -1398,6 +1418,10 @@ export async function runExternalSubagent(
       shell: false,
       stdio: 'pipe',
       windowsHide: true,
+      // Become a process-group leader on POSIX so the kill path below can
+      // signal the whole group (`process.kill(-pid)`) instead of orphaning
+      // grandchildren the external CLI spawned. Matches session/hooks/runner.ts.
+      detached: process.platform !== 'win32',
     });
   } catch (error) {
     if (promptDirectory !== undefined) await rm(promptDirectory, { recursive: true, force: true });
