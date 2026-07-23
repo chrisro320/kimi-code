@@ -1535,9 +1535,27 @@ export class TUI extends Container {
 				this.previousHeight = height;
 				return;
 			}
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
-			return;
+			// Partial visibility: the changed range straddles the viewport top.
+			// When the buffer length is unchanged (pure in-place edit, e.g. a
+			// ticker or footer text update), prevViewportTop still accurately
+			// describes what's on screen, so everything above it is genuinely
+			// invisible: clamp the render start there and fall through to the
+			// incremental path below, which repaints only the visible tail and
+			// still syncs previousLines to the full newLines array. Avoids
+			// nuking scrollback for a change the user can only partly see.
+			// If the buffer length changed (lines inserted/removed), the old
+			// viewport top no longer reliably maps to visible content, so fall
+			// back to the safe full redraw.
+			if (newLines.length === this.previousLines.length) {
+				logRedraw(
+					`clamped: partial visibility, rendering from viewport top instead of full redraw (${firstChanged} -> ${prevViewportTop}, lastChanged=${lastChanged})`,
+				);
+				firstChanged = prevViewportTop;
+			} else {
+				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+				fullRender(true);
+				return;
+			}
 		}
 
 		// Render from first changed line to end

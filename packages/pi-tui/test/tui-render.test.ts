@@ -818,7 +818,7 @@ describe("TUI differential rendering", () => {
 		tui.stop();
 	});
 
-	it("still does a full redraw when the changed range extends into the viewport", async () => {
+	it("does a clamped partial redraw when the changed range extends into the viewport", async () => {
 		const terminal = new LoggingVirtualTerminal(20, 5);
 		const tui = new TUI(terminal);
 		const component = new TestComponent();
@@ -831,8 +831,10 @@ describe("TUI differential rendering", () => {
 
 		const initialRedraws = tui.fullRedraws;
 
-		// Line 2 is above the viewport (top=7) but line 8 is inside it, so this
-		// must still take the full-redraw path.
+		// Line 2 is above the viewport (top=7) but line 8 is inside it. The
+		// invisible part (line 2) doesn't need painting, so this should clamp
+		// the render start to the viewport top and only repaint line 8, instead
+		// of nuking scrollback for a change that's mostly invisible.
 		const lines = component.lines.slice();
 		lines[2] = "Line 2 (ticked)";
 		lines[8] = "CHANGED";
@@ -840,9 +842,19 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Change reaching into the viewport must still full-redraw");
-		assert.ok(terminal.getWrites().includes("\x1b[3J"), "Full redraw must still clear scrollback");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Partially visible change must not trigger a full redraw");
+		assert.ok(!terminal.getWrites().includes("\x1b[3J"), "Partially visible change must not clear scrollback");
 		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "CHANGED", "Line 9", "Line 10", "Line 11"]);
+
+		// A subsequent visible-region change must still diff correctly against
+		// the synced cache, proving the clamped redraw didn't desync state.
+		const linesVisible = component.lines.slice();
+		linesVisible[9] = "CHANGED AGAIN";
+		component.lines = linesVisible;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 7", "CHANGED", "CHANGED AGAIN", "Line 10", "Line 11"]);
 
 		tui.stop();
 	});
