@@ -1,6 +1,11 @@
 // Use U+25CF instead of U+23FA to avoid emoji/fallback rendering in terminals.
 export const STATUS_BULLET = '● ';
 
+// Thinking blocks get a hollow marker so they read distinctly from assistant
+// messages at a glance (both used to share STATUS_BULLET and differed only by
+// dim coloring). Same width family as STATUS_BULLET to keep wrapping stable.
+export const THINKING_BULLET = '○ ';
+
 // Shared transcript markers. Keep widths stable because message wrapping
 // assumes the marker occupies the leading cells.
 export const USER_MESSAGE_BULLET = '✨ ';

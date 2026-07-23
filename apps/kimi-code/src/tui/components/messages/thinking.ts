@@ -13,7 +13,7 @@ import {
   MESSAGE_INDENT,
   THINKING_PREVIEW_LINES,
 } from '#/tui/constant/rendering';
-import { STATUS_BULLET } from '#/tui/constant/symbols';
+import { THINKING_BULLET } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
 
@@ -117,7 +117,7 @@ export class ThinkingComponent implements Component {
     } else {
       const lines: string[] = [''];
       for (let i = 0; i < contentLines.length; i++) {
-        const p = i === 0 && this.showMarker ? currentTheme.fg('textDim', STATUS_BULLET) : MESSAGE_INDENT;
+        const p = i === 0 && this.showMarker ? currentTheme.fg('textDim', THINKING_BULLET) : MESSAGE_INDENT;
         lines.push(p + contentLines[i]);
       }
 
