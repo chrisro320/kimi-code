@@ -377,15 +377,25 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         ),
       };
     }
+    if (info?.status === 'input_required' && info.kind === 'agent' && info.candidate !== undefined) {
+      // Not an error: the work is durably preserved and actionable. Give the
+      // model the exact approval/denial path instead of a fake terminal
+      // failure that would trigger a wasteful re-spawn.
+      return {
+        output: formatForegroundInputRequired(taskId, handle, info.candidate),
+      };
+    }
     const timedOut = info?.status === 'timed_out';
     const message =
-      timedOut
-        ? `Agent timed out after ${formatSubagentTimeoutDescription(this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS)}.`
-        : info?.stopReason === 'Interrupted by user'
-          ? USER_INTERRUPTED_SUBAGENT_MESSAGE
-          : info?.stopReason !== undefined
-            ? info.stopReason
-            : 'The subagent was stopped before it finished.';
+      info?.status === 'expansion_denied'
+        ? 'The scope expansion was denied; the subagent work candidate was discarded. Re-dispatch with an explicitly wider dispatch.scope if the change is still wanted.'
+        : timedOut
+          ? `Agent timed out after ${formatSubagentTimeoutDescription(this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS)}.`
+          : info?.stopReason === 'Interrupted by user'
+            ? USER_INTERRUPTED_SUBAGENT_MESSAGE
+            : info?.stopReason !== undefined
+              ? info.stopReason
+              : 'The subagent was stopped before it finished.';
     return {
       output: formatForegroundAgentFailure(handle, message, timedOut),
       isError: true,
@@ -431,6 +441,27 @@ function formatForegroundAgentSuccess(handle: SubagentHandle, result: string): s
     '',
     '[summary]',
     result,
+  ].join('\n');
+}
+
+function formatForegroundInputRequired(
+  taskId: string,
+  handle: SubagentHandle,
+  candidate: { readonly hash: string; readonly requestedScope: readonly string[]; readonly paths: readonly string[] },
+): string {
+  return [
+    `agent_id: ${handle.agentId}`,
+    `actual_subagent_type: ${handle.profileName}`,
+    'status: input_required',
+    `task_id: ${taskId}`,
+    `candidate_hash: ${candidate.hash}`,
+    `requested_scope: ${JSON.stringify(candidate.requestedScope)}`,
+    '',
+    'The subagent finished but touched paths outside its declared scope:',
+    ...candidate.paths.map((path) => `- ${path}`),
+    '',
+    'Its work is preserved as a durable candidate and has NOT been applied.',
+    `Inspect it with TaskOutput(task_id="${taskId}"), then either apply it with TaskOutput(task_id="${taskId}", action="approve_scope_expansion", candidate_hash="${candidate.hash}", requested_scope=${JSON.stringify(candidate.requestedScope)}) or discard it with action="deny_scope_expansion".`,
   ].join('\n');
 }
 

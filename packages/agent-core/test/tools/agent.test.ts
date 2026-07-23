@@ -1,3 +1,7 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { ToolAccesses } from '../../src/loop';
@@ -10,7 +14,7 @@ import {
 } from '../../src/session/subagent-host';
 import { AgentTool, AgentToolInputSchema } from '../../src/tools/builtin/collaboration/agent';
 import { userCancellationReason } from '../../src/utils/abort';
-import { agentTask, createBackgroundManager } from '../agent/background/helpers';
+import { agentTask, createBackgroundManager, editingCandidateCompletion } from '../agent/background/helpers';
 import { executeTool } from './fixtures/execute-tool';
 
 const signal = new AbortController().signal;
@@ -473,6 +477,35 @@ describe('AgentTool', () => {
       description: 'Find cause',
       timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
     });
+  });
+
+  it('returns an actionable input_required handoff (not an error) when a foreground subagent needs scope expansion', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockResolvedValue({
+        agentId: 'agent-child',
+        profileName: 'coder',
+        resumed: false,
+        completion: Promise.resolve(editingCandidateCompletion()),
+      }),
+    });
+    const background = createBackgroundManager({
+      sessionDir: await mkdtemp(join(tmpdir(), 'kimi-agent-input-required-')),
+    }).manager;
+    const tool = new AgentTool(host, background);
+
+    const result = await executeTool(tool,
+      context({
+        prompt: 'Implement the feature',
+        description: 'Feature work',
+      }),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('status: input_required');
+    expect(result.output).toContain('candidate_hash: 960e0ff0617bdc2d4d4a524fbc4370ffcc6273adab91929c1bb271ea013dba85');
+    expect(result.output).toContain('test/widget.test.ts');
+    expect(result.output).toContain('approve_scope_expansion');
+    expect(result.output).toContain('deny_scope_expansion');
   });
 
   it('can detach a foreground subagent through the background manager', async () => {
