@@ -1,6 +1,8 @@
+import { resolve, sep } from 'node:path';
+
 import type { ExecutableToolResult } from '../../loop/types';
 
-import { canonicalTelemetryArgs } from './canonical-args';
+import { canonicalTelemetryArgs, isPlainRecord } from './canonical-args';
 
 export type DeterministicErrorCode = 'EISDIR' | 'ENOENT' | 'ENOTDIR';
 
@@ -60,6 +62,29 @@ function makeKey(toolName: string, args: unknown): string {
 interface RecordedFailure {
   readonly code: DeterministicErrorCode;
   readonly output: string;
+  /**
+   * Normalized absolute paths this failure depends on (e.g. the `path` arg).
+   * A successful mutation touching any of them (or their ancestors) makes the
+   * record stale. Empty when the args carry no usable path.
+   */
+  readonly paths: readonly string[];
+}
+
+/** Tools whose successful execution can create/move filesystem entries. */
+const PATH_MUTATING_TOOLS = new Set(['Write', 'Edit']);
+
+function extractPaths(args: unknown): readonly string[] {
+  if (!isPlainRecord(args)) return [];
+  const p = args['path'];
+  if (typeof p !== 'string' || p.length === 0) return [];
+  // Both record-time and invalidate-time paths go through the same base, so
+  // `./src/x` and `src/x` normalize to the same key even if the tool's real
+  // cwd differs from process.cwd().
+  return [resolve(p)];
+}
+
+function pathCovers(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 }
 
 /**
@@ -68,7 +93,10 @@ interface RecordedFailure {
  * filesystem shape at the given path. Complements `ToolCallDeduplicator`
  * (which only suppresses same-*step* identical re-execution but still lets
  * cross-step repeats really run); this blocks *before* execution, for the
- * lifetime of the owning Agent — not reset each turn or step.
+ * lifetime of the owning Agent — not reset each turn or step. Because a
+ * path-shape failure reflects filesystem state (which mutations can change),
+ * successful Write/Edit/Bash calls invalidate affected records via
+ * `invalidateOnSuccess`.
  */
 export class DeterministicFailureFingerprint {
   private readonly failures = new Map<string, RecordedFailure>();
@@ -98,6 +126,35 @@ export class DeterministicFailureFingerprint {
   recordIfDeterministic(toolName: string, args: unknown, result: ExecutableToolResult): void {
     const code = classifyDeterministicError(toolName, result);
     if (code === undefined) return;
-    this.failures.set(makeKey(toolName, args), { code, output: outputText(result) });
+    this.failures.set(makeKey(toolName, args), {
+      code,
+      output: outputText(result),
+      paths: extractPaths(args),
+    });
+  }
+
+  /**
+   * Called from `finalizeToolResult` on successful results. A path-shape
+   * failure is a function of the filesystem, not of (toolName, args): once a
+   * mutation succeeds, recorded failures depending on the affected paths may
+   * no longer hold and must be dropped so a later call really runs (e.g.
+   * Read ENOENT -> Write creates the file -> Read must not stay blocked).
+   * Bash can mutate arbitrarily (mkdir/touch/mv/chmod/git), so any successful
+   * Bash call invalidates everything.
+   */
+  invalidateOnSuccess(toolName: string, args: unknown): void {
+    if (this.failures.size === 0) return;
+    if (toolName === 'Bash') {
+      this.failures.clear();
+      return;
+    }
+    if (!PATH_MUTATING_TOOLS.has(toolName)) return;
+    const targets = extractPaths(args);
+    if (targets.length === 0) return;
+    for (const [key, failure] of this.failures) {
+      if (failure.paths.some((p) => targets.some((t) => pathCovers(p, t)))) {
+        this.failures.delete(key);
+      }
+    }
   }
 }

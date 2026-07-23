@@ -73,4 +73,71 @@ describe('DeterministicFailureFingerprint', () => {
     fingerprint.recordIfDeterministic('SomeOtherTool', args, eisdirResult('/a'));
     expect(fingerprint.checkFingerprint('SomeOtherTool', args)).toBeNull();
   });
+
+  it('unblocks a Read ENOENT after a successful Write creates the file', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const args = { path: '/missing.txt' };
+    fingerprint.recordIfDeterministic('Read', args, enoentResult('/missing.txt'));
+    expect(fingerprint.checkFingerprint('Read', args)).not.toBeNull();
+
+    fingerprint.invalidateOnSuccess('Write', { path: '/missing.txt' });
+    expect(fingerprint.checkFingerprint('Read', args)).toBeNull();
+  });
+
+  it('keeps blocking a repeated deterministic failure when no mutation happened', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const args = { path: '/missing.txt' };
+    fingerprint.recordIfDeterministic('Read', args, enoentResult('/missing.txt'));
+
+    fingerprint.invalidateOnSuccess('Read', { path: '/missing.txt' });
+    expect(fingerprint.checkFingerprint('Read', args)).not.toBeNull();
+  });
+
+  it('does not invalidate failures on unrelated paths', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const args = { path: '/b.txt' };
+    fingerprint.recordIfDeterministic('Read', args, enoentResult('/b.txt'));
+
+    fingerprint.invalidateOnSuccess('Write', { path: '/a.txt' });
+    expect(fingerprint.checkFingerprint('Read', args)).not.toBeNull();
+  });
+
+  it('clears all records after a successful Bash call', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const readArgs = { path: '/missing.txt' };
+    const editArgs = { path: '/dir-not-file' };
+    fingerprint.recordIfDeterministic('Read', readArgs, enoentResult('/missing.txt'));
+    fingerprint.recordIfDeterministic('Edit', editArgs, eisdirResult('/dir-not-file'));
+
+    fingerprint.invalidateOnSuccess('Bash', { command: 'mkdir -p /missing-dir' });
+    expect(fingerprint.checkFingerprint('Read', readArgs)).toBeNull();
+    expect(fingerprint.checkFingerprint('Edit', editArgs)).toBeNull();
+  });
+
+  it('normalizes ./-prefixed and plain relative paths to the same record', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const recorded = { path: './src/new.ts' };
+    fingerprint.recordIfDeterministic('Read', recorded, enoentResult('./src/new.ts'));
+
+    fingerprint.invalidateOnSuccess('Write', { path: 'src/new.ts' });
+    expect(fingerprint.checkFingerprint('Read', recorded)).toBeNull();
+  });
+
+  it('invalidates an ancestor-path failure when a mutation creates the missing directory', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const args = { path: '/a/b' };
+    fingerprint.recordIfDeterministic('Read', args, enoentResult('/a/b'));
+
+    fingerprint.invalidateOnSuccess('Write', { path: '/a/b/c.ts' });
+    expect(fingerprint.checkFingerprint('Read', args)).toBeNull();
+  });
+
+  it('invalidates a deeper-path failure when the mutation target is an ancestor of it', () => {
+    const fingerprint = new DeterministicFailureFingerprint();
+    const args = { path: '/a/b/c.ts' };
+    fingerprint.recordIfDeterministic('Read', args, enoentResult('/a/b/c.ts'));
+
+    fingerprint.invalidateOnSuccess('Write', { path: '/a/b' });
+    expect(fingerprint.checkFingerprint('Read', args)).toBeNull();
+  });
 });

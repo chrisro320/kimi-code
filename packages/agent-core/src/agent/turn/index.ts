@@ -965,6 +965,12 @@ export class TurnFlow {
                 ctx.args,
                 finalResult,
               );
+              if (finalResult.isError !== true) {
+                this.agent.deterministicFailures.invalidateOnSuccess(
+                  ctx.toolCall.name,
+                  ctx.args,
+                );
+              }
               const { isError, output } = finalResult;
               const event = isError === true ? 'PostToolUseFailure' : 'PostToolUse';
               void this.agent.hooks?.fireAndForgetTrigger(event, {
