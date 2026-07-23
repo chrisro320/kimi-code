@@ -117,6 +117,47 @@ describe("TUI Kitty image cleanup", () => {
 		}
 	});
 
+	it("falls back to full redraw when a multi-row Kitty image straddles the viewport top during a clamped partial redraw", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 5);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 2 },
+				{ widthPx: 20, heightPx: 20 },
+			);
+			const imageLines = image.render(40); // 2 reserved rows
+			// 7 lines in a 5-row terminal: viewport top lands on line 2, which is
+			// inside the image block (lines 1-2).
+			component.lines = ["t0", ...imageLines, "t3", "t4", "t5", "t6"];
+			tui.start();
+			await terminal.waitForRender();
+			const redrawsBeforeEdit = tui.fullRedraws;
+			terminal.clearWrites();
+
+			// Equal-length, in-place edit above the viewport: the old clamp path
+			// would repaint only from the viewport top and erase the image's
+			// visible lower half without replaying its placement.
+			component.lines = ["t0x", ...imageLines, "t3", "t4", "t5", "t6"];
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			assert.ok(tui.fullRedraws > redrawsBeforeEdit, "straddling Kitty image must force a full redraw");
+
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
 	it("falls back to full redraw when Kitty image pre-clear would scroll", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 10, heightPx: 10 });

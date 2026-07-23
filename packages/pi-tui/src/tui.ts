@@ -1171,6 +1171,27 @@ export class TUI extends Container {
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
+	/**
+	 * Whether a multi-row Kitty image block starts above `viewportTop` but its
+	 * reserved rows reach into the viewport. Clamped partial redraws must fall
+	 * back to a full redraw in that case: the image id lives on its (invisible)
+	 * start line, so repainting only the visible tail would erase the lower
+	 * half without replaying the placement.
+	 */
+	private hasStraddlingKittyImage(
+		lines: string[],
+		lineImageIds: ReadonlyArray<number>[],
+		viewportTop: number,
+	): boolean {
+		const scanEnd = Math.min(lines.length, viewportTop);
+		for (let i = 0; i < scanEnd; i++) {
+			if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
+			const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
+			if (blockEnd >= viewportTop) return true;
+		}
+		return false;
+	}
+
 	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
 
@@ -1546,11 +1567,20 @@ export class TUI extends Container {
 			// If the buffer length changed (lines inserted/removed), the old
 			// viewport top no longer reliably maps to visible content, so fall
 			// back to the safe full redraw.
-			if (newLines.length === this.previousLines.length) {
+			if (newLines.length === this.previousLines.length &&
+				!this.hasStraddlingKittyImage(newLines, lineImageIds, prevViewportTop) &&
+				!this.hasStraddlingKittyImage(this.previousLines, this.previousLineImageIds, prevViewportTop)) {
 				logRedraw(
 					`clamped: partial visibility, rendering from viewport top instead of full redraw (${firstChanged} -> ${prevViewportTop}, lastChanged=${lastChanged})`,
 				);
 				firstChanged = prevViewportTop;
+			} else if (newLines.length === this.previousLines.length) {
+				// A multi-row Kitty image straddles the viewport top: clamping
+				// would erase its visible lower half without replaying the
+				// placement (its id lives above the clamp), so redraw fully.
+				logRedraw(`kitty image straddles viewport top, full redraw`);
+				fullRender(true);
+				return;
 			} else {
 				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 				fullRender(true);
