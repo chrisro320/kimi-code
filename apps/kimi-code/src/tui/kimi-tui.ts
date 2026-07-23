@@ -2075,7 +2075,10 @@ export class KimiTUI {
     try {
       prepared = await prepareAgoraHandoff(handoffPath, this.state.appState.workDir, expected);
     } catch (error) {
-      this.setAppState({ agora: null });
+      // Keep appState.agora: the capability is still alive in this process, so
+      // /agora cancel (or a model re-materialize) must stay reachable. The
+      // durable lifecycle is still fresh_session_pending; clearing the UI
+      // here would orphan it with no local cancel path.
       this.showError(`Agora handoff validation failed; durable completion was not confirmed: ${formatErrorMessage(error)}.${recovery}`);
       return;
     }
@@ -2141,7 +2144,7 @@ export class KimiTUI {
         releaseAgoraLifecycleCapability(expected.runId);
       });
       if (session === undefined) {
-        this.setAppState({ agora: null });
+        // Keep appState.agora — see the validation-failure note above.
         this.showError(`Agora handoff did not create a fresh session; durable completion was not confirmed.${recovery}`);
         return;
       }
@@ -2175,7 +2178,7 @@ export class KimiTUI {
         }
       }
       if (!terminalResolved) {
-        this.setAppState({ agora: null });
+        // Keep appState.agora — see the validation-failure note above.
         this.showError(`Agora handoff failed; durable completion was not confirmed: ${formatErrorMessage(error)}.${recovery}`);
         return;
       }

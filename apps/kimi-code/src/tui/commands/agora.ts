@@ -332,6 +332,7 @@ function showRosterRoutePicker(
   host: SlashCommandHost,
   config: KimiConfig,
   context: AgoraMutationContext,
+  replacePeerId?: string,
 ): void {
   const options: ChoiceOption[] = [
     ...Object.keys(config.models ?? {}).toSorted().map((alias) => ({
@@ -374,6 +375,7 @@ function showRosterRoutePicker(
               displayName: config.models?.[choice.alias]?.displayName,
             },
             context,
+            replacePeerId,
           );
           return;
         }
@@ -383,9 +385,9 @@ function showRosterRoutePicker(
           return;
         }
         if ((backend.args ?? []).some((arg) => arg.includes('{model}'))) {
-          showRosterExternalModelPicker(host, config, choice.name, context);
+          showRosterExternalModelPicker(host, config, choice.name, context, replacePeerId);
         } else {
-          void saveRosterPeer(host, { id: choice.name, backend: choice.name }, context);
+          void saveRosterPeer(host, { id: choice.name, backend: choice.name }, context, replacePeerId);
         }
       },
       onCancel: () => host.restoreEditor(),
@@ -398,6 +400,7 @@ function showRosterExternalModelPicker(
   config: KimiConfig,
   backendName: string,
   context: AgoraMutationContext,
+  replacePeerId?: string,
 ): void {
   const aliases = Object.keys(config.models ?? {}).toSorted();
   if (aliases.length === 0) {
@@ -420,6 +423,7 @@ function showRosterExternalModelPicker(
           host,
           { id: model, backend: backendName, modelOverride: model },
           context,
+          replacePeerId,
         );
       },
       onCancel: () => host.restoreEditor(),
@@ -459,9 +463,13 @@ async function saveRosterPeer(
   host: SlashCommandHost,
   peer: { readonly id: string; readonly backend: string; readonly modelOverride?: string; readonly displayName?: string },
   context: AgoraMutationContext,
+  replacePeerId?: string,
 ): Promise<void> {
   if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
   try {
+    // Add the new peer BEFORE removing the replaced one: cancelling the
+    // picker mid-flow must never leave the roster without the old peer, and
+    // a failed save keeps the old peer intact.
     await host.harness.setConfig({
       agora: {
         peers: {
@@ -473,6 +481,9 @@ async function saveRosterPeer(
         },
       },
     });
+    if (replacePeerId !== undefined && replacePeerId !== peer.id) {
+      await host.harness.removeAgoraPeer(replacePeerId);
+    }
     if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
     const session = host.session;
     if (session !== undefined) {
@@ -493,18 +504,14 @@ async function saveRosterPeer(
 
 async function replaceRosterPeer(
   host: SlashCommandHost,
-  _config: KimiConfig,
+  config: KimiConfig,
   peerId: string,
   context: AgoraMutationContext,
 ): Promise<void> {
   if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
-  try {
-    const refreshed = await host.harness.removeAgoraPeer(peerId);
-    if (blockAgoraMutationDuringTerminalResolution(host, context)) return;
-    showRosterRoutePicker(host, refreshed, context);
-  } catch (error) {
-    host.showError(`Failed to remove peer "${peerId}": ${formatErrorMessage(error)}`);
-  }
+  // Pick the replacement first; the old peer is only removed once the new
+  // one has been saved (see saveRosterPeer), so Esc cancels cleanly.
+  showRosterRoutePicker(host, config, context, peerId);
 }
 
 async function removeRosterPeer(

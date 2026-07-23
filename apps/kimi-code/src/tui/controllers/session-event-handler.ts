@@ -131,6 +131,7 @@ export interface SessionEventHost {
 
 export class SessionEventHandler {
   readonly subAgentEventHandler: SubAgentEventHandler;
+  private readonly agoraHandoffInFlight = new Set<string>();
 
   constructor(private readonly host: SessionEventHost) {
     this.subAgentEventHandler = new SubAgentEventHandler(host, {
@@ -667,12 +668,19 @@ export class SessionEventHandler {
       && event.materializationHandoffPath !== undefined
       && event.materializationDigest !== undefined
     ) {
+      // materialize re-emits this phase on idempotent retries; without an
+      // in-flight guard two concurrent handoffs would race the bind and the
+      // terminal resolution (double fresh session, wrong binding).
+      if (this.agoraHandoffInFlight.has(event.runId)) return;
+      this.agoraHandoffInFlight.add(event.runId);
       void this.host.createAgoraHandoffSession(event.materializationHandoffPath, {
         runId: event.runId,
         sourceSessionId: event.sourceSessionId,
         targetTask: event.targetTask,
         digest: event.materializationDigest,
         insertedTask: event.insertedTask,
+      }).finally(() => {
+        this.agoraHandoffInFlight.delete(event.runId);
       });
       return;
     }
