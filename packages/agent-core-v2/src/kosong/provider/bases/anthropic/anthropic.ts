@@ -911,8 +911,12 @@ export class AnthropicChatProvider implements ChatProvider {
       // The keep context-management edit is overlaid by the base on top of
       // whatever thinking encoding happened — a trait never handles keep.
       if (thinking.keep !== undefined) {
-        kwargs = { ...kwargs, ...applyThinkingKeep(kwargs, thinking.keep) };
-        useBetaApi = true;
+        // Cache-preservation fix: applying the clear_thinking edit forces the beta
+        // Messages API (useBetaApi=true), which breaks prompt caching on
+        // Anthropic-compatible gateways (qwen token-plan). Passthrough is carried
+        // client-side via unsigned thinking blocks in history, so skip the edit and
+        // stay on the standard endpoint. (applyThinkingKeep intentionally not called.)
+        void applyThinkingKeep;
       }
     }
 

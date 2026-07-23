@@ -136,5 +136,13 @@ export function applyAnthropicThinkingKeep(
   if (!(provider instanceof AnthropicChatProvider)) return provider;
   const keep = resolveThinkingKeep(env, configKeep, thinkingEffort);
   if (keep === undefined) return provider;
-  return provider.withThinkingKeep(keep);
+  // Cache-preservation fix: withThinkingKeep() emits the clear_thinking_20251015
+  // edit AND forces _betaApi=true (beta Messages API). On Anthropic-compatible
+  // gateways (e.g. the qwen token-plan endpoint) that beta path breaks prompt
+  // caching (hit collapses; long-idle turns -> 0%). Preserved-thinking passthrough
+  // is already carried client-side via the unsigned thinking blocks convertMessage
+  // puts in history (shouldPreserveUnsignedThinking), so the edit is pure harm on
+  // this path. Returning the provider unchanged keeps it on the standard endpoint.
+  // The Kimi provider's passthrough is unaffected (applyKimiEnvThinkingKeep).
+  return provider;
 }
