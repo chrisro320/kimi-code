@@ -44,7 +44,7 @@ export const AgentSwarmToolInputSchema = z
       .min(1)
       .optional()
       .describe(
-        'Model alias used for item-based new spawns only. Resume entries ignore this parameter and align to the parent agent\'s current model when they continue.',
+        'Model alias used for item-based new spawns only. Resume entries ignore this parameter and keep the model each worker was originally spawned with.',
       ),
     prompt_template: z
       .string()

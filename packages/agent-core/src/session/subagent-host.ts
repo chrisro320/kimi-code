@@ -827,7 +827,10 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
-        child.config.update({ modelAlias: parent.config.modelAlias });
+        // Keep the child's spawn-time model: profile routing (subagent.routing)
+        // deliberately dispatches a profile to a different model than the
+        // parent, and resume must not silently drift off that route (matching
+        // resumeExternal, which reuses the spawn-time backend/model strictly).
         const result = await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
         this.emitSubagentCompleted(parent, agentId, result, child.context.tokenCount);
         this.triggerSubagentStop(parent, profileName, result.result);
@@ -896,7 +899,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       try {
         runOptions.signal.throwIfAborted();
-        child.config.update({ modelAlias: parent.config.modelAlias });
+        // Keep the child's spawn-time model on retry too — see resume() above.
         this.emitSubagentStarted(parent, agentId);
         const turnId = child.turn.retry('agent-host');
         if (turnId === null) {

@@ -1167,16 +1167,20 @@ describe('SessionSubagentHost', () => {
     expect(userTextMessages(histories[1] ?? [])).toEqual(['Implement the retry-safe change']);
   });
 
-  it('realigns a resumed subagent to the parent agent current model', async () => {
+  it('keeps a resumed subagent on its spawn-time model instead of drifting to the parent model', async () => {
     const parent = testAgent();
     parent.configure();
     parent.agent.permission.setMode('yolo');
 
     const child = testAgent();
-    child.configure({ tools: ['Read'] });
-    // The child was originally spawned with a model that no longer matches the
-    // parent agent's current model (as if the parent ran setModel afterwards).
-    child.agent.config.update({ modelAlias: 'stale-model-from-initial-spawn' });
+    // The child was spawned on a profile-routed model that differs from the
+    // parent agent's current model; resume must preserve that route rather
+    // than silently realigning to the parent (mirrors resumeExternal, which
+    // resolves strictly by the backend/model recorded at spawn time).
+    child.configure({
+      tools: ['Read'],
+      provider: { type: 'kimi', apiKey: 'test-key', model: 'routed-model' },
+    });
     child.agent.useProfile(
       profile({ name: 'explore', tools: ['Read'], systemPrompt: 'explore prompt' }),
     );
@@ -1204,10 +1208,8 @@ describe('SessionSubagentHost', () => {
     });
 
     await handle.completion;
-    // resume must realign the child to the parent agent's current model rather
-    // than leave it on the stale model from its initial spawn.
-    expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
-    expect(child.agent.config.modelAlias).not.toBe('stale-model-from-initial-spawn');
+    expect(child.agent.config.modelAlias).toBe('routed-model');
+    expect(child.agent.config.modelAlias).not.toBe(parent.agent.config.modelAlias);
   });
 });
 
