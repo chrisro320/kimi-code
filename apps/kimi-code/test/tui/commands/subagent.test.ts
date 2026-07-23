@@ -177,7 +177,7 @@ describe('handleSubagentCommand', () => {
           pools: {
             coder: [
               { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
-              { backend: 'kimi', model: 'strong', thinkingEffort: 'low', weight: 2, maxConcurrency: 1 },
+              { backend: 'kimi', model: 'strong', thinkingEffort: 'low', weight: 2, maxConcurrency: 4 },
             ],
           },
         },
@@ -208,7 +208,7 @@ describe('handleSubagentCommand', () => {
           pools: {
             coder: [
               { backend: 'kimi', model: 'fast', weight: 1, maxConcurrency: 1 },
-              { backend: 'grok', weight: 1, maxConcurrency: 1 },
+              { backend: 'grok', weight: 1, maxConcurrency: 4 },
             ],
           },
         },

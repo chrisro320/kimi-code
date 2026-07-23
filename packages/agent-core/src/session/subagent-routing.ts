@@ -328,6 +328,11 @@ export class SubagentRoutePool {
     currentWeight: number;
     active: number;
   }>;
+  private readonly waiters: Array<{
+    readonly resolve: (acquired: AcquiredSubagentRoute) => void;
+    readonly reject: (error: unknown) => void;
+    readonly cleanup: () => void;
+  }> = [];
 
   constructor(routes: readonly SubagentPoolRoute[]) {
     if (routes.length === 0) {
@@ -343,12 +348,47 @@ export class SubagentRoutePool {
    * failure, or abort) — never on every attempt, only the terminal one.
    */
   acquire(): AcquiredSubagentRoute {
+    const acquired = this.tryAcquire();
+    if (acquired === null) {
+      throw new Error('Subagent route pool is exhausted: every route is at its max_concurrency limit.');
+    }
+    return acquired;
+  }
+
+  /**
+   * Queuing variant of `acquire` for spawn paths: waits FIFO until a route
+   * frees up instead of throwing, so concurrent spawns behind a saturated
+   * pool line up rather than fail. Rejects with the abort reason when
+   * `signal` fires while queued.
+   */
+  acquireQueued(signal?: AbortSignal): Promise<AcquiredSubagentRoute> {
+    const immediate = this.tryAcquire();
+    if (immediate !== null) return Promise.resolve(immediate);
+    if (signal?.aborted === true) return Promise.reject(signal.reason as unknown);
+    return new Promise<AcquiredSubagentRoute>((resolvePromise, rejectPromise) => {
+      const waiter = {
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        cleanup: () => {},
+      };
+      if (signal !== undefined) {
+        const onAbort = () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          rejectPromise(signal.reason as unknown);
+        };
+        waiter.cleanup = () => signal.removeEventListener('abort', onAbort);
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+    });
+  }
+
+  private tryAcquire(): AcquiredSubagentRoute | null {
     const available = this.entries.filter(
       (entry) => entry.route.maxConcurrency === undefined || entry.active < entry.route.maxConcurrency,
     );
-    if (available.length === 0) {
-      throw new Error('Subagent route pool is exhausted: every route is at its max_concurrency limit.');
-    }
+    if (available.length === 0) return null;
 
     const totalWeight = available.reduce((sum, entry) => sum + (entry.route.weight ?? 1), 0);
     let picked = available[0]!;
@@ -366,7 +406,18 @@ export class SubagentRoutePool {
         if (released) return;
         released = true;
         picked.active -= 1;
+        this.drainWaiters();
       },
     };
+  }
+
+  private drainWaiters(): void {
+    while (this.waiters.length > 0) {
+      const acquired = this.tryAcquire();
+      if (acquired === null) return;
+      const waiter = this.waiters.shift()!;
+      waiter.cleanup();
+      waiter.resolve(acquired);
+    }
   }
 }

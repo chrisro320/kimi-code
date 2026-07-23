@@ -397,7 +397,7 @@ function showPoolNumericSetting(
           else routes[replaceIndex] = updated;
           void savePoolRoutes(host, config, routes);
         } else {
-          showPoolNumericSetting(host, config, updated, nextField, updated.maxConcurrency ?? 1, true, replaceIndex);
+          showPoolNumericSetting(host, config, updated, nextField, updated.maxConcurrency ?? 4, true, replaceIndex);
         }
       },
     }),

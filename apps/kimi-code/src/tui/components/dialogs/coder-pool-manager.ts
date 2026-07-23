@@ -82,7 +82,7 @@ export class CoderPoolManagerComponent extends Container implements Focusable {
     const rows = this.opts.routes.map((route, index) => {
       const selected = index === this.selectedIndex;
       const prefix = selected ? '› ' : '  ';
-      const line = `${prefix}${formatRoute(route)}  weight=${String(route.weight ?? 1)} concurrency=${String(route.maxConcurrency ?? 1)}`;
+      const line = `${prefix}${formatRoute(route)}  weight=${String(route.weight ?? 1)} concurrency=${route.maxConcurrency === undefined ? 'unlimited' : String(route.maxConcurrency)}`;
       return currentTheme.fg(selected ? 'text' : 'textDim', line);
     });
     const addSelected = this.selectedIndex === this.opts.routes.length;
