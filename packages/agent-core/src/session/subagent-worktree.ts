@@ -303,14 +303,17 @@ async function finishWithRecovery(
 }
 
 async function collectDeltas(kaos: Kaos, ctx: WorktreeContext): Promise<Delta[]> {
-  const workerUntracked = await listSafeUntracked(kaos, ctx.worktreeRoot);
-  const candidateInputs = [...ctx.candidates, ...workerUntracked];
+  const [workerUntracked, workerChanged] = await Promise.all([
+    listSafeUntracked(kaos, ctx.worktreeRoot),
+    gitDiffChangedPaths(kaos, ctx.worktreeRoot),
+  ]);
+  const candidateInputs = [...ctx.candidates, ...workerUntracked, ...workerChanged];
   const candidates = canonicalizePathSet(candidateInputs);
   await assertSafePathSet(kaos, ctx.worktreeRoot, candidates);
   const workerFinal = await snapshotPaths(kaos, ctx.worktreeRoot, candidates);
   const deltas: Delta[] = [];
   for (const relPath of candidates) {
-    const before = ctx.baseline.get(relPath) ?? { state: { kind: 'absent' } };
+    const before = ctx.baseline.get(relPath) ?? await captureHeadPath(kaos, ctx.worktreeRoot, relPath);
     const after = workerFinal.get(relPath)!;
     if (!snapshotsEqual(before, after)) deltas.push({ relPath, before, after });
   }
@@ -619,6 +622,33 @@ async function snapshotPaths(kaos: Kaos, root: string, paths: readonly string[])
   return snapshots;
 }
 
+/**
+ * Reconstructs the `before` state of a clean tracked path from its HEAD blob.
+ * Used at finish time for paths the worker changed but that were clean at
+ * acquire time (and therefore never snapshotted into the baseline). Returns
+ * `absent` for paths unknown to HEAD, `unreadable` for anything unsupported
+ * (e.g. submodule gitlinks) so callers fail closed.
+ */
+async function captureHeadPath(kaos: Kaos, cwd: string, relPath: string): Promise<PathSnapshot> {
+  const entry = await execGit(kaos, cwd, ['ls-files', '-s', '-z', 'HEAD', '--', relPath]);
+  if (!entry.ok) return { state: { kind: 'unreadable', error: `git ls-files: ${entry.stderr || 'failed'}` } };
+  const record = entry.stdout.split('\0').find((token) => token.length > 0);
+  if (record === undefined) return { state: { kind: 'absent' } };
+  const match = /^(\d{6}) [0-9a-f]{40} \d\t/.exec(record);
+  if (match === null) return { state: { kind: 'unreadable', error: `unparseable ls-files record for ${relPath}` } };
+  const gitMode = match[1]!;
+  if (gitMode === '160000') {
+    return { state: { kind: 'unreadable', error: `submodule gitlink is not supported: ${relPath}` } };
+  }
+  const blob = await execGitBytes(kaos, cwd, ['show', `HEAD:${relPath}`]);
+  if (!blob.ok) return { state: { kind: 'unreadable', error: `git show: ${blob.stderr || 'failed'}` } };
+  if (gitMode === '120000') {
+    return { state: { kind: 'symlink', mode: 0o120777, target: blob.stdout.toString('utf8') } };
+  }
+  const mode = gitMode === '100755' ? 0o100755 : 0o100644;
+  return { state: { kind: 'regular', mode, sha256: digest(blob.stdout) }, payload: blob.stdout };
+}
+
 async function capturePath(kaos: Kaos, path: string): Promise<PathSnapshot> {
   let stat;
   try {
@@ -649,7 +679,20 @@ async function capturePath(kaos: Kaos, path: string): Promise<PathSnapshot> {
 }
 
 function snapshotsEqual(left: PathSnapshot, right: PathSnapshot): boolean {
-  return JSON.stringify(left.state) === JSON.stringify(right.state);
+  const a = left.state;
+  const b = right.state;
+  // Git only tracks the owner-exec bit; other permission bits are umask noise
+  // that would falsely flag an untouched file as diverged when one side of the
+  // comparison comes from a HEAD blob (mode 644/755) and the other from lstat
+  // (e.g. 664 under umask 002).
+  if (a.kind === 'regular' && b.kind === 'regular') {
+    return a.sha256 === b.sha256 &&
+      (a.mode & 0o170000) === (b.mode & 0o170000) &&
+      (a.mode & 0o100) === (b.mode & 0o100);
+  }
+  // Symlink modes are not portable or reliably settable; the target is the state.
+  if (a.kind === 'symlink' && b.kind === 'symlink') return a.target === b.target;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function snapshotMapsEqual(left: ReadonlyMap<string, PathSnapshot>, right: ReadonlyMap<string, PathSnapshot>): boolean {
@@ -670,12 +713,17 @@ function assertReadableSnapshots(snapshots: ReadonlyMap<string, PathSnapshot>): 
 }
 
 async function acquisitionCandidates(kaos: Kaos, repoRoot: string): Promise<string[]> {
-  const [tracked, changed, untracked] = await Promise.all([
-    listTracked(kaos, repoRoot),
+  // Only uncommitted state needs seeding and baselining: `git worktree add`
+  // already populates clean tracked files from HEAD, so snapshotting the whole
+  // tree would pin the entire repo's bytes in memory for the subagent's
+  // lifetime (and OOM large repos). Worker edits to clean tracked files are
+  // discovered at finish time via `git diff HEAD` in the worktree, with their
+  // `before` state reconstructed from HEAD blobs (see captureHeadPath).
+  const [changed, untracked] = await Promise.all([
     gitDiffChangedPaths(kaos, repoRoot),
     listSafeUntracked(kaos, repoRoot),
   ]);
-  return canonicalizePathSet([...tracked, ...changed, ...untracked]);
+  return canonicalizePathSet([...changed, ...untracked]);
 }
 
 function canonicalizePathSet(rawPaths: readonly string[]): string[] {
@@ -925,7 +973,8 @@ async function runCommand(kaos: Kaos, args: readonly string[], throwOnFailure = 
     if (throwOnFailure) throw new Error(`${args[0]} failed: ${result.stderr}`);
     return result;
   }
-  const result = await collectProcess(proc, args.join(' '));
+  const bytesResult = await collectProcess(proc, args.join(' '));
+  const result: GitExecResult = { ...bytesResult, stdout: bytesResult.stdout.toString('utf8') };
   if (!result.ok && throwOnFailure) throw new Error(`${args[0]} failed: ${result.stderr}`);
   return result;
 }
@@ -935,19 +984,25 @@ async function gitStdout(kaos: Kaos, cwd: string, args: readonly string[]): Prom
   return result.ok ? result.stdout.trim() : null;
 }
 
-interface GitExecResult {
+async function execGit(kaos: Kaos, cwd: string, args: readonly string[], stdin?: string): Promise<GitExecResult> {
+  const result = await execGitBytes(kaos, cwd, args, stdin);
+  return { ...result, stdout: result.stdout.toString('utf8') };
+}
+
+interface GitExecBytesResult {
   readonly ok: boolean;
   readonly exitCode: number | null;
-  readonly stdout: string;
+  readonly stdout: Buffer;
   readonly stderr: string;
 }
 
-async function execGit(kaos: Kaos, cwd: string, args: readonly string[], stdin?: string): Promise<GitExecResult> {
+/** Binary-safe variant of execGit for blob payloads (e.g. `git show HEAD:path`). */
+async function execGitBytes(kaos: Kaos, cwd: string, args: readonly string[], stdin?: string): Promise<GitExecBytesResult> {
   let proc: KaosProcess;
   try {
     proc = await kaos.exec('git', '-C', cwd, ...args);
   } catch (error) {
-    return { ok: false, exitCode: null, stdout: '', stderr: errorMessage(error) };
+    return { ok: false, exitCode: null, stdout: Buffer.alloc(0), stderr: errorMessage(error) };
   }
   proc.stdin.on('error', () => {});
   try {
@@ -959,7 +1014,14 @@ async function execGit(kaos: Kaos, cwd: string, args: readonly string[], stdin?:
   return collectProcess(proc, `git ${args.join(' ')}`);
 }
 
-async function collectProcess(proc: KaosProcess, description: string): Promise<GitExecResult> {
+interface GitExecResult {
+  readonly ok: boolean;
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+async function collectProcess(proc: KaosProcess, description: string): Promise<GitExecBytesResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const work = Promise.all([collectStream(proc.stdout), collectStream(proc.stderr), proc.wait()]);
   work.catch(() => {});
@@ -968,21 +1030,21 @@ async function collectProcess(proc: KaosProcess, description: string): Promise<G
       timer = setTimeout(() => reject(new Error(`${description} timed out`)), GIT_TIMEOUT_MS);
     });
     const [stdout, stderr, exitCode] = await Promise.race([work, timeout]);
-    return { ok: exitCode === 0, exitCode, stdout, stderr };
+    return { ok: exitCode === 0, exitCode, stdout, stderr: stderr.toString('utf8') };
   } catch (error) {
     try { await proc.kill('SIGKILL'); } catch { /* process is already gone */ }
     await work.catch(() => {});
-    return { ok: false, exitCode: null, stdout: '', stderr: errorMessage(error) };
+    return { ok: false, exitCode: null, stdout: Buffer.alloc(0), stderr: errorMessage(error) };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     try { await proc.dispose(); } catch { /* best effort */ }
   }
 }
 
-async function collectStream(stream: Readable): Promise<string> {
+async function collectStream(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 function digest(value: Buffer): string {

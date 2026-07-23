@@ -572,4 +572,45 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/filesystem repository lock is held/);
     expect(await readFile(join(lockDir, 'owner.json'), 'utf8')).toBe('{"owner":"external"}\n');
   });
+
+  it('applies a worker edit to a clean tracked binary file (HEAD blob reconstructed byte-exactly)', async () => {
+    await writeFile(join(repoDir, 'binary.bin'), Buffer.from([0, 1, 2, 255, 254, 128]));
+    git(repoDir, ['add', 'binary.bin']);
+    git(repoDir, ['commit', '-q', '-m', 'add binary']);
+
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['binary.bin'] });
+    expect(handle).not.toBeNull();
+    await writeFile(join(handle!.cwd, 'binary.bin'), Buffer.from([255, 254, 128, 2, 1, 0]));
+    await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
+    expect(await readFile(join(repoDir, 'binary.bin'))).toEqual(Buffer.from([255, 254, 128, 2, 1, 0]));
+  });
+
+  it('ignores umask-permission noise on a clean tracked file when the worker edits it', async () => {
+    // Git only tracks the exec bit; a group-writable working-tree file is not
+    // a divergence from its HEAD blob and must not fail the baseline check.
+    await chmod(join(repoDir, 'a.txt'), 0o664);
+    expect(git(repoDir, ['status', '--porcelain'])).toBe('');
+
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    expect(handle).not.toBeNull();
+    await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
+    await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('worker edit\n');
+  });
+
+  it('applies a worker delta while a human concurrently edits an unrelated clean tracked file', async () => {
+    await writeFile(join(repoDir, 'b.txt'), 'b original\n');
+    git(repoDir, ['add', 'b.txt']);
+    git(repoDir, ['commit', '-q', '-m', 'add b']);
+
+    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    expect(handle).not.toBeNull();
+    await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
+    // Concurrent human edit to a path the worker never touched.
+    await writeFile(join(repoDir, 'b.txt'), 'b human edit\n');
+
+    await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
+    expect(await readFile(join(repoDir, 'a.txt'), 'utf8')).toBe('worker edit\n');
+    expect(await readFile(join(repoDir, 'b.txt'), 'utf8')).toBe('b human edit\n');
+  });
 });
