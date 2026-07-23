@@ -521,6 +521,20 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await expect(guarded!.finish({ kind: 'success' })).rejects.toThrow(/unsafe non-directory ancestor/);
   });
 
+  it('rejects worker-planted symlinks with absolute or escaping targets', async () => {
+    const absolute = await acquireSubagentWorktree(kaos, repoDir, { scope: ['**/*'] });
+    expect(absolute).not.toBeNull();
+    await symlink('/etc/passwd', join(absolute!.cwd, 'escape-abs.txt'));
+    await expect(absolute!.finish({ kind: 'success' })).rejects.toThrow(/unsafe symlink target/);
+    await expect(stat(join(repoDir, 'escape-abs.txt'))).rejects.toThrow();
+
+    const escaping = await acquireSubagentWorktree(kaos, repoDir, { scope: ['**/*'] });
+    expect(escaping).not.toBeNull();
+    await symlink('../../outside.txt', join(escaping!.cwd, 'escape-rel.txt'));
+    await expect(escaping!.finish({ kind: 'success' })).rejects.toThrow(/unsafe symlink target/);
+    await expect(stat(join(repoDir, 'escape-rel.txt'))).rejects.toThrow();
+  });
+
   it('stores dirty-overlap before and after candidate payloads plus binary and deletion states', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nbaseline\n');
     await writeFile(join(repoDir, 'binary.bin'), Buffer.from([0, 1, 2, 255]));

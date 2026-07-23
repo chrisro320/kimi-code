@@ -453,6 +453,7 @@ async function applyDeltaPlan(kaos: Kaos, repoRoot: string, deltas: readonly Del
         operation += 1;
         if (testApplyFailureAt === operation) throw new Error(`test-injected apply failure at operation ${operation}`);
         await assertSafeExistingAncestors(kaos, repoRoot, delta.relPath);
+        if (delta.after.state.kind === 'symlink') assertSafeSymlinkTarget(repoRoot, delta.relPath, delta.after.state.target);
         const current = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
         if (!snapshotsEqual(current, delta.before)) throw new Error(`worker delta path(s) diverged: ${delta.relPath}`);
         await materializeState(kaos, repoRoot, delta.relPath, delta.after, staged.get(delta.relPath));
@@ -481,8 +482,24 @@ async function applyDeltaPlan(kaos: Kaos, repoRoot: string, deltas: readonly Del
   }
 }
 
-async function guardedRollback(kaos: Kaos, repoRoot: string, delta: Delta): Promise<void> {
-  await assertSafeAncestors(kaos, repoRoot, delta.relPath);
+/**
+ * Worker-planted symlinks are a read-path escape: applied into the real
+ * workspace, a later Read following the link leaves the repo (and the
+ * declared scope). Only relative targets that resolve back inside the repo
+ * are applied; absolute or escaping targets fail closed.
+ */
+function assertSafeSymlinkTarget(repoRoot: string, relPath: string, target: string): void {
+  if (pathe.isAbsolute(target) || /^[a-zA-Z]:[\\/]/.test(target)) {
+    throw new Error(`unsafe symlink target at ${relPath}: absolute targets are not applied`);
+  }
+  const resolved = pathe.normalize(pathe.join(pathe.dirname(pathe.join(repoRoot, relPath)), target));
+  const rootPrefix = repoRoot.endsWith('/') ? repoRoot : `${repoRoot}/`;
+  if (resolved !== repoRoot && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`unsafe symlink target at ${relPath}: escapes the repository`);
+  }
+}
+
+async function guardedRollback(kaos: Kaos, repoRoot: string, delta: Delta): Promise<void> {  await assertSafeAncestors(kaos, repoRoot, delta.relPath);
   const current = await capturePath(kaos, pathe.join(repoRoot, delta.relPath));
   if (!snapshotsEqual(current, delta.after)) {
     throw new Error('refusing to overwrite an entry changed after this transaction');
