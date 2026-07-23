@@ -2555,6 +2555,19 @@ export class KimiTUI {
     return entry.turnId === undefined || entry.turnId.startsWith('replay:');
   }
 
+  /**
+   * Fold-only turn boundary: cron-fired messages also start a new fold window.
+   * Cron turns never produce a UserMessageComponent, so without this each
+   * completed cron turn re-applies the completed-turn assistant cap to
+   * everything since the last user message and folds away earlier substantive
+   * replies (a long answer followed by two keepalive pings collapsed to just
+   * the pings). Deliberately NOT used by trimTranscriptWindow, where counting
+   * cron fires as turns would accelerate trimming of real conversation.
+   */
+  private isFoldBoundaryComponent(child: Component): boolean {
+    return this.isTurnBoundaryComponent(child) || child instanceof CronMessageComponent;
+  }
+
   private trimTranscriptWindow(): boolean {
     if (!TRANSCRIPT_WINDOW_ENABLED || TRANSCRIPT_MAX_TURNS <= 0) return false;
     // Session replay already caps history to its own turn limit; trimming during
@@ -2655,10 +2668,11 @@ export class KimiTUI {
     if (keepSteps <= 0 && keepAssistants <= 0) return false;
     const children = this.state.transcriptContainer.children;
 
-    // Find the start of the current turn (last turn-starting user message).
+    // Find the start of the current turn (last turn-starting user message, or
+    // the last cron-fired message — cron turns are their own fold windows).
     let turnStart = -1;
     for (let i = children.length - 1; i >= 0; i--) {
-      if (this.isTurnBoundaryComponent(children[i]!)) {
+      if (this.isFoldBoundaryComponent(children[i]!)) {
         turnStart = i;
         break;
       }

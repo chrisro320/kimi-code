@@ -250,10 +250,7 @@ function formatActiveAgentStatus(agent: ActiveBackgroundAgentStatus, colors: Col
 
 function formatAgoraStatusline(agora: AgoraStatus, statusRow: string): string {
   const peerSummary = agora.peers
-    .map((peer) => {
-      const route = [peer.backend, peer.model].filter((part): part is string => part !== undefined).join('/');
-      return `${peer.name}${route.length === 0 ? '' : `/${route}`}${peer.status ? `:${peer.status}` : ''}`;
-    })
+    .map((peer, index) => `agora#${index + 1}${peer.status ? `:${peer.status}` : ''}`)
     .join(', ');
   const roles = [
     `${agora.hostRoute}${agora.hostModel === undefined ? '' : `/${agora.hostModel}`}`,

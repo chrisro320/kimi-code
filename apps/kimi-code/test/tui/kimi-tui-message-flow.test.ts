@@ -4383,6 +4383,38 @@ command = "vim"
     ]);
   });
 
+  it('refreshes Agora statusline from the typed lifecycle snapshot on tool result', async () => {
+    const session = makeSession({
+      getAgoraReview: vi.fn(async (runId: string) => ({
+        runId,
+        phase: 'packet_confirmation',
+        terminalState: 'holding',
+      })),
+    });
+    const { driver } = await makeDriver(session);
+    driver.state.appState.agora = {
+      runId: 'run-1',
+      phase: 'peer_review',
+      hostRoute: 'coder',
+      peers: [{ id: 'a', name: 'A', status: 'reviewing' }],
+    };
+    driver.sessionEventHandler.handleEvent({
+      type: 'tool.call.started', agentId: 'main', sessionId: 'ses-1', turnId: 1,
+      toolCallId: 'call_agora_done', name: 'Agora',
+      args: { run_id: 'run-1' },
+    } as Event, vi.fn());
+    driver.sessionEventHandler.handleEvent({
+      type: 'tool.result', agentId: 'main', sessionId: 'ses-1', turnId: 1,
+      toolCallId: 'call_agora_done', output: '{}',
+    } as Event, vi.fn());
+
+    await vi.waitFor(() => {
+      expect(driver.state.appState.agora?.phase).toBe('packet_confirmation');
+    });
+    expect(driver.state.appState.agora?.terminalState).toBe('holding');
+    expect(driver.state.appState.agora?.peers[0]?.status).toBe('done');
+  });
+
   it('shows ExitPlanMode plan only in the current-plan card during approval', async () => {
     const planContent = '# No Duplicate Plan\n\n- Do the non-duplicated plan work';
     const session = makeSession({
@@ -6715,5 +6747,78 @@ describe('transcript step and assistant folding', () => {
     // The conclusion stays mounted.
     const lastAssistant = assistants.at(-1)!;
     expect(stripSgr(lastAssistant.render(120).join('\n'))).toContain(`msg-${cycles - 1}`);
+  });
+
+  it('does not fold a substantive reply when later cron turns complete', async () => {
+    const { driver } = await makeDriver();
+    driver.handleUserInput('give me the conclusion');
+    driveSteps(driver, 3);
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'assistant.delta',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        delta: 'THE-LONG-CONCLUSION',
+      } as Event,
+      vi.fn(),
+    );
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.ended',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        reason: 'completed',
+      } as Event,
+      vi.fn(),
+    );
+
+    // Two cron-fired keepalive turns follow without any user message: each cron
+    // fire is its own fold window, so neither may reach back and fold the
+    // substantive reply from the user's turn.
+    for (let turnId = 2; turnId <= 3; turnId++) {
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'cron.fired',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          origin: {
+            kind: 'cron_job',
+            jobId: 'deadbeef',
+            cron: '* * * * *',
+            recurring: true,
+            coalescedCount: 1,
+            stale: false,
+          },
+          prompt: 'keepalive',
+        } as Event,
+        vi.fn(),
+      );
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'assistant.delta',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId,
+          delta: 'keepalive ping',
+        } as Event,
+        vi.fn(),
+      );
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'turn.ended',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId,
+          reason: 'completed',
+        } as Event,
+        vi.fn(),
+      );
+    }
+
+    const transcript = stripSgr(driver.state.transcriptContainer.render(120).join('\n'));
+    expect(transcript).toContain('THE-LONG-CONCLUSION');
+    expect(transcript).toContain('keepalive ping');
   });
 });

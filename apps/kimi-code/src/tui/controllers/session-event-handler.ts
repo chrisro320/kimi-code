@@ -564,10 +564,7 @@ export class SessionEventHandler {
             model: typeof peer.model_override === 'string' ? peer.model_override : undefined,
             status: typeof peer.role === 'string' && peer.role.trim().length > 0 ? `reviewing:${peer.role}` : 'reviewing',
           }))
-        : [
-            { id: 'claude', name: 'Claude', backend: 'claude-code', model: 'Opus 4.8', status: 'reviewing' },
-            { id: 'grok', name: 'Grok', backend: 'kimi', model: 'kimicode-grok-4.5', status: 'reviewing' },
-          ];
+        : (currentAgora?.peers ?? []).map((peer) => ({ ...peer, status: 'reviewing' as const }));
       this.host.setAppState({
         agora: {
           ...currentAgora,
@@ -649,6 +646,32 @@ export class SessionEventHandler {
           )
           .map((t) => ({ title: t.title, status: t.status }));
         streamingUI.setTodoList(sanitized);
+      }
+    }
+    if (matchedCall !== undefined && matchedCall.name === 'Agora') {
+      // Peer dispatch is done; the statusline must not stay at the optimistic
+      // peer_review/reviewing set on tool.call.started. Tool output itself is
+      // untrusted (may be model-influenced), so refresh from the typed
+      // lifecycle RPC snapshot instead of parsing the result.
+      const runId = (matchedCall.args as { run_id?: unknown }).run_id;
+      const session = this.host.session;
+      if (typeof runId === 'string' && session !== undefined) {
+        void session
+          .getAgoraReview(runId)
+          .then((snapshot) => {
+            if (snapshot === undefined) return;
+            const active = this.host.state.appState.agora;
+            if (active === null || active === undefined || active.runId !== runId) return;
+            this.host.setAppState({
+              agora: {
+                ...active,
+                phase: snapshot.phase,
+                terminalState: snapshot.terminalState,
+                peers: active.peers.map((peer) => ({ ...peer, status: 'done' })),
+              },
+            });
+          })
+          .catch(() => undefined);
       }
     }
     this.host.patchLivePane({ mode: 'waiting' });
