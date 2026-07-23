@@ -260,16 +260,33 @@ describe('DispatchController circuit breaker (R-A2)', () => {
     expect(controller.isCircuitOpen('scope-b', 'kimi::fast')).toBe(false);
   });
 
-  it('overwrites the recorded failure when the same key opens again for a different route', () => {
+  it('remembers every failed route under the same key instead of overwriting earlier ones', () => {
     const controller = new DispatchController();
     controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
     controller.openCircuit('scope-a', 'kimi::fallback-1', 'model.not_configured');
 
-    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(false);
+    // The fallback's failure must not erase the primary's: a scoped fallback
+    // chain would otherwise retry the dead primary on the next spawn.
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(true);
     expect(controller.isCircuitOpen('scope-a', 'kimi::fallback-1')).toBe(true);
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fallback-2')).toBe(false);
     expect(controller.circuitFailure('scope-a')).toEqual({
       failedRoute: 'kimi::fallback-1',
       errorCode: 'model.not_configured',
+    });
+  });
+
+  it('refreshes the recorded error when the same route fails again under a key', () => {
+    const controller = new DispatchController();
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.auth_error');
+    controller.openCircuit('scope-a', 'kimi::fallback-1', 'model.not_configured');
+    controller.openCircuit('scope-a', 'kimi::fast', 'provider.rate_limit');
+
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fast')).toBe(true);
+    expect(controller.isCircuitOpen('scope-a', 'kimi::fallback-1')).toBe(true);
+    expect(controller.circuitFailure('scope-a')).toEqual({
+      failedRoute: 'kimi::fast',
+      errorCode: 'provider.rate_limit',
     });
   });
 });

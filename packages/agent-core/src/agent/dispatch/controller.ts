@@ -115,17 +115,17 @@ export class DispatchController {
     { escalations: number; reviewerRepairs: number }
   >();
   /**
-   * R-A2 (Case 8): per-key record of the last non-retryable provider/model/
-   * route failure. Independent of `reservations`/`scopeCycles` — a circuit
-   * can be open with no in-flight reservation, and outlives any single
-   * dispatch. `route` is an opaque caller-defined identity string (e.g.
-   * `backend::model`); the entry only tracks the *last* failed route per
-   * key, so `isCircuitOpen` answers "did this exact route already fail under
-   * this key", not "is any route under this key currently broken".
+   * R-A2 (Case 8): per-key record of non-retryable provider/model/route
+   * failures. Independent of `reservations`/`scopeCycles` — a circuit can be
+   * open with no in-flight reservation, and outlives any single dispatch.
+   * `route` is an opaque caller-defined identity string (e.g. `backend::model`).
+   * Each key tracks *every* failed route (not just the last one), so a scoped
+   * fallback chain cannot overwrite the primary's entry and trick the next
+   * spawn into retrying a route that already failed deterministically.
    */
   private readonly circuitState = new Map<
     string,
-    { readonly openSince: number; readonly failedRoute: string; readonly errorCode: KimiErrorCode }
+    Map<string, { readonly openSince: number; readonly errorCode: KimiErrorCode }>
   >();
 
   /** Reset the per-turn spawn budget at a parent turn boundary; active reservations persist. */
@@ -422,20 +422,33 @@ export class DispatchController {
 
   /** Record a non-retryable provider/model/route failure so future callers can skip straight to a fallback. */
   openCircuit(key: string, route: string, errorCode: KimiErrorCode): void {
-    this.circuitState.set(key, { openSince: Date.now(), failedRoute: route, errorCode });
+    let routes = this.circuitState.get(key);
+    if (routes === undefined) {
+      routes = new Map();
+      this.circuitState.set(key, routes);
+    }
+    // Delete-then-set moves a re-recorded route to the end so iteration order
+    // reflects recency (Date.now() alone ties within the same millisecond).
+    routes.delete(route);
+    routes.set(route, { openSince: Date.now(), errorCode });
   }
 
   /** Whether `route` already failed deterministically under `key` and should not be retried as-is. */
   isCircuitOpen(key: string, route: string): boolean {
-    return this.circuitState.get(key)?.failedRoute === route;
+    return this.circuitState.get(key)?.has(route) ?? false;
   }
 
-  /** The recorded failure for `key`, if its circuit is open — used to report a full fallback-chain failure history. */
+  /** The most recently recorded failure for `key`, if any — used to report a full fallback-chain failure history. */
   circuitFailure(
     key: string,
   ): { readonly failedRoute: string; readonly errorCode: KimiErrorCode } | undefined {
-    const entry = this.circuitState.get(key);
-    return entry === undefined ? undefined : { failedRoute: entry.failedRoute, errorCode: entry.errorCode };
+    const routes = this.circuitState.get(key);
+    if (routes === undefined || routes.size === 0) return undefined;
+    let latest: { readonly failedRoute: string; readonly errorCode: KimiErrorCode } | undefined;
+    for (const [failedRoute, entry] of routes) {
+      latest = { failedRoute, errorCode: entry.errorCode };
+    }
+    return latest;
   }
 }
 
