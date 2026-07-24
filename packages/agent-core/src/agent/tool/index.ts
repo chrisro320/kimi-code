@@ -19,6 +19,7 @@ import { extendWorkspaceWithSkillRoots } from '../../skill';
 import { fingerprint } from '../llm-request-logger';
 import * as b from '../../tools/builtin';
 import type { ToolStore, ToolStoreData, ToolStoreKey } from '../../tools/store';
+import { isDeferredBuiltinToolName } from './deferred-builtins';
 import type {
   BuiltinTool,
   McpServerRegistrationResult,
@@ -28,6 +29,7 @@ import type {
 } from './types';
 
 export * from './types';
+export { DEFERRED_BUILTIN_TOOL_NAMES, isDeferredBuiltinToolName } from './deferred-builtins';
 
 /** Foreground timeout (seconds) for a user-initiated `!` shell command. */
 const SHELL_FOREGROUND_TIMEOUT_S = 2 * 60;
@@ -541,9 +543,9 @@ export class ToolManager {
   }
 
   /**
-   * Whether MCP tools are disclosed progressively: kept out of the top-level
-   * `tools[]` and loaded on demand via select_tools. Reads the agent's single
-   * three-gate decision point.
+   * Whether progressive disclosure is active: deferred tools (MCP + selected
+   * low-frequency builtins) stay out of the top-level `tools[]` and load on
+   * demand via select_tools. Reads the agent's single three-gate decision point.
    */
   private get progressiveDisclosure(): boolean {
     return this.agent.toolSelectEnabled;
@@ -551,14 +553,16 @@ export class ToolManager {
 
   /**
    * Names the model may select right now: registered MCP tools that pass the
-   * profile's `mcp__*` access patterns, sorted for byte-stable announcements.
-   * In disclosure mode the patterns keep their permission-filter role but stop
-   * feeding the top-level `tools[]`.
+   * profile's `mcp__*` access patterns, plus active deferred builtins, sorted
+   * for byte-stable announcements. In disclosure mode the patterns keep their
+   * permission-filter role but stop feeding the top-level `tools[]`.
    */
   loadableDynamicToolNames(): string[] {
-    return [...this.mcpTools.keys()]
-      .filter((name) => this.isMcpToolEnabled(name))
-      .toSorted((a, b) => a.localeCompare(b));
+    const mcp = [...this.mcpTools.keys()].filter((name) => this.isMcpToolEnabled(name));
+    const deferredBuiltins = [...this.enabledTools].filter(
+      (name) => isDeferredBuiltinToolName(name) && this.builtinTools.has(name),
+    );
+    return [...mcp, ...deferredBuiltins].toSorted((a, b) => a.localeCompare(b));
   }
 
   /**
@@ -603,29 +607,44 @@ export class ToolManager {
   }
 
   /**
-   * Plain schema snapshot of a registered MCP tool, read from the live
-   * registry (never from history) at injection time.
+   * Plain schema snapshot of a loadable deferred tool (MCP or deferred
+   * builtin), read from the live registry (never from history) at injection
+   * time.
    */
   getMcpToolSchema(name: string): Tool | undefined {
-    const entry = this.mcpTools.get(name);
-    if (entry === undefined) return undefined;
+    const mcp = this.mcpTools.get(name);
+    if (mcp !== undefined) {
+      return {
+        name: mcp.tool.name,
+        description: mcp.tool.description,
+        parameters: mcp.tool.parameters,
+      };
+    }
+    if (!isDeferredBuiltinToolName(name)) return undefined;
+    const builtin = this.builtinTools.get(name);
+    if (builtin === undefined) return undefined;
     return {
-      name: entry.tool.name,
-      description: entry.tool.description,
-      parameters: entry.tool.parameters,
+      name: builtin.name,
+      description: builtin.description,
+      parameters: builtin.parameters,
     };
   }
 
   /**
-   * Disclosure-mode wording for a tool-call preflight miss. A loaded tool
+   * Disclosure-mode wording for a tool-call preflight miss. A loaded MCP tool
    * whose server dropped is a different situation from a never-announced name;
    * telling them apart stops the model from re-selecting a disconnected tool
    * in a loop or treating a transient disconnect as a permanent removal.
+   * Deferred builtins use the same not-loaded guidance when still announced.
    */
   missingToolMessage(name: string): string | undefined {
     if (!this.progressiveDisclosure) return undefined;
-    if (!isMcpToolName(name)) return undefined;
-    const registered = this.mcpTools.has(name) && this.isMcpToolEnabled(name);
+    const isMcp = isMcpToolName(name);
+    const isDeferredBuiltin = isDeferredBuiltinToolName(name);
+    if (!isMcp && !isDeferredBuiltin) return undefined;
+    const registered = isMcp
+      ? this.mcpTools.has(name) && this.isMcpToolEnabled(name)
+      : this.enabledTools.has(name) && this.builtinTools.has(name);
     const loaded = this.loadedDynamicToolNames().has(name);
     if (registered && !loaded) {
       return (
@@ -633,7 +652,7 @@ export class ToolManager {
         `Call select_tools with ["${name}"] first, then call the tool.`
       );
     }
-    if (!registered && loaded) {
+    if (isMcp && !registered && loaded) {
       return (
         `Tool "${name}" was loaded but its MCP server is currently disconnected. ` +
         'It may become available again when the server reconnects; do not retry immediately.'
@@ -887,17 +906,23 @@ export class ToolManager {
     );
     // Progressive disclosure splits "the model can see this tool" from "the
     // core can execute it": the top-level request view stays the immutable
-    // core set + select_tools, while loaded MCP tools join the executable
-    // table as deferred extras — dispatchable, but stripped from the outbound
-    // top-level tools[] by kosong generate(). With disclosure off this is the
-    // inline behavior, byte for byte.
+    // core set + select_tools, while loaded deferred tools (MCP + selected
+    // builtins) join the executable table as deferred extras — dispatchable,
+    // but stripped from the outbound top-level tools[] by kosong generate().
+    // With disclosure off this is the inline behavior, byte for byte.
     const loadedSet = disclosure ? this.loadedDynamicToolNames() : undefined;
     const mcpNames =
       loadedSet === undefined
         ? enabledMcpNames
         : enabledMcpNames.filter((name) => loadedSet.has(name));
+    const coreNames =
+      loadedSet === undefined
+        ? [...this.enabledTools]
+        : [...this.enabledTools].filter(
+            (name) => !isDeferredBuiltinToolName(name) || loadedSet.has(name),
+          );
     const selectToolsName = disclosure ? [b.SELECT_TOOLS_TOOL_NAME] : [];
-    return uniq([...this.enabledTools, ...selectToolsName, ...mcpNames])
+    return uniq([...coreNames, ...selectToolsName, ...mcpNames])
       .toSorted((a, b) => a.localeCompare(b))
       // select_tools is exposed exclusively through the disclosure gate — a
       // profile or setActiveTools listing the name explicitly must not
@@ -910,10 +935,24 @@ export class ToolManager {
           this.mcpTools.get(name)?.tool ??
           this.builtinTools.get(name);
         if (tool === undefined) return undefined;
-        // MCP entries are plain object literals, so the spread keeps the
-        // execution closure intact while adding the wire-strip marker.
-        return disclosure && this.mcpTools.has(name) ? { ...tool, deferred: true as const } : tool;
+        // Mark deferred loadables for the wire strip. Object.create keeps
+        // class-instance methods on the prototype chain (builtins) while
+        // still working for plain MCP object literals.
+        if (
+          disclosure &&
+          (this.mcpTools.has(name) || isDeferredBuiltinToolName(name))
+        ) {
+          return markDeferred(tool);
+        }
+        return tool;
       })
       .filter((tool) => !!tool);
   }
+}
+
+/** Attach the wire-strip `deferred` marker without losing prototype methods. */
+function markDeferred(tool: ExecutableTool): ExecutableTool {
+  return Object.create(tool, {
+    deferred: { value: true as const, enumerable: true },
+  }) as ExecutableTool;
 }

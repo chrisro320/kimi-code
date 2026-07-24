@@ -518,7 +518,7 @@ describe('AgentToolSelectService view shaping (gate open)', () => {
     flagEnabled = true;
   });
 
-  it('hides unloaded MCP tools, marks loaded MCP tools deferred, keeps builtins and select_tools', () => {
+  it('hides unloaded MCP tools, marks loaded MCP tools deferred, keeps non-deferred builtins and select_tools', () => {
     const h = createHarness();
     registerBuiltin(h, new EchoTool());
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
@@ -533,6 +533,26 @@ describe('AgentToolSelectService view shaping (gate open)', () => {
     expect(byName.get(MCP_ALPHA)?.deferred).toBe(true);
     expect(byName.get('Echo')?.deferred).toBeUndefined();
     expect(byName.get(SELECT_TOOLS_TOOL_NAME)?.deferred).toBeUndefined();
+  });
+
+  it('hides unloaded deferred builtins and marks loaded ones deferred', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool());
+    registerBuiltin(h, new EchoTool('EnterPlanMode'));
+    registerBuiltin(h, new EchoTool('CronList'));
+    const selectTools = h.ix.createInstance(SelectToolsTool);
+    disposables.add(h.registry.register(selectTools, { source: 'builtin' }));
+    h.contextMemory.history.push(schemaMessage('EnterPlanMode'));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+    expect(shaped.map((entry) => entry.name)).toEqual([
+      'Echo',
+      'EnterPlanMode',
+      SELECT_TOOLS_TOOL_NAME,
+    ]);
+    expect(shaped.find((entry) => entry.name === 'EnterPlanMode')?.deferred).toBe(true);
+    expect(shaped.find((entry) => entry.name === 'Echo')?.deferred).toBeUndefined();
+    expect(shaped.map((entry) => entry.name)).not.toContain('CronList');
   });
 
   it('keeps select_tools visible when the profile omits it while hiding inactive tools', () => {
@@ -608,6 +628,27 @@ describe('AgentToolSelectService.load', () => {
     expect(appended.role).toBe('system');
     expect(appended.tools?.map((tool) => tool.name)).toEqual([MCP_BETA]);
     expect(appended.origin).toEqual({ kind: 'injection', variant: DYNAMIC_TOOL_SCHEMA_VARIANT });
+  });
+
+  it('loads deferred builtins the same way as MCP tools', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('EnterPlanMode'));
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.contextMemory.history.push(schemaMessage('EnterPlanMode'));
+
+    const result = h.sut.load(['CronList', 'EnterPlanMode', 'NotATool']);
+    expect(result.toLoad).toEqual(['CronList']);
+    expect(result.alreadyAvailable).toEqual(['EnterPlanMode']);
+    expect(result.unknown).toEqual(['NotATool']);
+    expect(h.contextMemory.appended[0]!.tools?.map((tool) => tool.name)).toEqual(['CronList']);
+  });
+
+  it('does not treat non-deferred builtins as loadable', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool());
+    const result = h.sut.load(['Echo']);
+    expect(result.toLoad).toEqual([]);
+    expect(result.unknown).toEqual(['Echo']);
   });
 
   it('sorts the injected schemas by name', () => {
@@ -791,7 +832,7 @@ describe('AgentToolSelectService executor interception', () => {
     expect(alpha.calls).toBe(0);
   });
 
-  it('the executor runs non-MCP tools without loading', async () => {
+  it('the executor runs non-deferred builtins without loading', async () => {
     const h = createExecutorHarness();
     const echo = new EchoTool();
     registerBuiltin(h, echo);
@@ -800,6 +841,30 @@ describe('AgentToolSelectService executor interception', () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.result.output).toBe('echo ok');
     expect(echo.calls).toBe(1);
+  });
+
+  it('the executor intercepts unloaded deferred builtins', async () => {
+    const h = createExecutorHarness();
+    const plan = new EchoTool('EnterPlanMode');
+    registerBuiltin(h, plan);
+
+    const results = await execute(h, toolCall('call-1', 'EnterPlanMode'));
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBe(true);
+    expect(results[0]!.result.output).toContain('is available but not loaded');
+    expect(plan.calls).toBe(0);
+  });
+
+  it('the executor runs a deferred builtin once its schema is loaded', async () => {
+    const h = createExecutorHarness();
+    const plan = new EchoTool('EnterPlanMode');
+    registerBuiltin(h, plan);
+    h.contextMemory.history.push(schemaMessage('EnterPlanMode'));
+
+    const results = await execute(h, toolCall('call-1', 'EnterPlanMode'));
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.output).toBe('echo ok');
+    expect(plan.calls).toBe(1);
   });
 });
 
@@ -843,6 +908,19 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
     expect(first).not.toContain('<tools_removed>');
 
     expect(await announce(h, 2)).toBeUndefined();
+  });
+
+  it('announces deferred builtins alongside MCP tools', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('EnterPlanMode'));
+    registerBuiltin(h, new EchoTool());
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const first = await announce(h);
+    expect(first).toContain('EnterPlanMode');
+    expect(first).toContain(MCP_ALPHA);
+    expect(first).not.toContain('\nEcho\n');
+    expect(first).not.toContain('<tools_added>\nEcho\n');
   });
 
   it('waits until the next boundary before announcing registry diffs', async () => {

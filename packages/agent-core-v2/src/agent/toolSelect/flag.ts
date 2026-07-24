@@ -9,6 +9,9 @@
  * `KIMI_CODE_EXPERIMENTAL_FLAG`, or the `[experimental]` config section.
  * Imported for its side effect (registers the definition) from the package
  * barrel.
+ *
+ * Implementation note: the runtime also defers a conservative builtin
+ * allowlist (see deferredBuiltins.ts) through the same select_tools path.
  */
 
 import { type FlagDefinitionInput, registerFlagDefinition } from '#/app/flag/flagRegistry';

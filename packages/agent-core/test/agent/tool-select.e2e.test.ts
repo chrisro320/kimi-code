@@ -453,19 +453,93 @@ describe('disclosure mode — model switch projection', () => {
 });
 
 describe('disclosure mode — executable table freshness', () => {
-  it('keeps goal tools visible without waiting for goal state changes', async () => {
+  it('keeps goal tools loadable without waiting for goal state changes', async () => {
     const ctx = await disclosureAgent();
     ctx.configure({
       tools: ['Read', 'UpdateGoal', 'SetGoalBudget', 'mcp__*'],
       provider: DISCLOSURE_PROVIDER,
       modelCapabilities: DISCLOSURE_CAPABILITIES,
     });
-    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('UpdateGoal');
-    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('SetGoalBudget');
+    // Deferred builtins stay out of the top-level table until selected, but
+    // remain announced/loadable even before a goal exists.
+    expect(ctx.agent.tools.loadableDynamicToolNames()).toContain('UpdateGoal');
+    expect(ctx.agent.tools.loadableDynamicToolNames()).toContain('SetGoalBudget');
+    expect(ctx.agent.tools.loopTools.map((t) => t.name)).not.toContain('UpdateGoal');
+    expect(ctx.agent.tools.loopTools.map((t) => t.name)).not.toContain('SetGoalBudget');
 
     await ctx.agent.goal.createGoal({ objective: 'ship the feature' });
-    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('UpdateGoal');
-    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('SetGoalBudget');
+    expect(ctx.agent.tools.loadableDynamicToolNames()).toContain('UpdateGoal');
+    expect(ctx.agent.tools.loadableDynamicToolNames()).toContain('SetGoalBudget');
+  });
+
+  it('defers selected builtins: announce, select_tools load, then dispatch', async () => {
+    const ctx = await disclosureAgent();
+    ctx.configure({
+      tools: ['Read', 'EnterPlanMode', 'ExitPlanMode', 'mcp__*'],
+      provider: DISCLOSURE_PROVIDER,
+      modelCapabilities: DISCLOSURE_CAPABILITIES,
+    });
+    await ctx.rpc.setPermission({ mode: 'yolo' });
+
+    expect(ctx.agent.tools.loadableDynamicToolNames()).toContain('EnterPlanMode');
+    expect(ctx.agent.tools.loopTools.map((t) => t.name)).not.toContain('EnterPlanMode');
+    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('Read');
+    expect(ctx.agent.tools.loopTools.map((t) => t.name)).toContain('select_tools');
+
+    ctx.mockNextResponse({ type: 'text', text: 'hello' });
+    await runTurn(ctx, 'hi');
+    expect(historyText(ctx)).toContain('EnterPlanMode');
+    expect(ctx.llmCalls[0]!.tools.map((t) => t.name)).not.toContain('EnterPlanMode');
+
+    ctx.mockNextResponse(
+      { type: 'text', text: 'loading' },
+      selectCall('call-1', ['EnterPlanMode']),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'ok' });
+    await runTurn(ctx, 'load plan mode');
+
+    expect(toolResultTexts(ctx)).toContainEqual('Loaded: EnterPlanMode');
+    const schemas = schemaMessages(ctx);
+    expect(schemas.some((m) => m.tools?.some((t) => t.name === 'EnterPlanMode'))).toBe(true);
+    const planTool = ctx.agent.tools.loopTools.find((t) => t.name === 'EnterPlanMode');
+    expect(planTool).toBeDefined();
+    expect(planTool?.deferred).toBe(true);
+
+    // Re-select reports already available; schema is not re-injected.
+    const schemaCount = schemaMessages(ctx).length;
+    ctx.mockNextResponse(
+      { type: 'text', text: 'again' },
+      selectCall('call-2', ['EnterPlanMode']),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'ok' });
+    await runTurn(ctx, 'load again');
+    expect(toolResultTexts(ctx)).toContainEqual('Already available: EnterPlanMode');
+    expect(schemaMessages(ctx)).toHaveLength(schemaCount);
+  });
+
+  it('intercepts unloaded deferred builtins with select_tools guidance', async () => {
+    const ctx = await disclosureAgent();
+    ctx.configure({
+      tools: ['Read', 'EnterPlanMode', 'mcp__*'],
+      provider: DISCLOSURE_PROVIDER,
+      modelCapabilities: DISCLOSURE_CAPABILITIES,
+    });
+    await ctx.rpc.setPermission({ mode: 'yolo' });
+
+    ctx.mockNextResponse(
+      { type: 'text', text: 'call' },
+      {
+        type: 'function',
+        id: 'call-1',
+        name: 'EnterPlanMode',
+        arguments: '{}',
+      },
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'ok' });
+    await runTurn(ctx, 'enter plan mode');
+    expect(toolResultTexts(ctx).join('\n')).toContain(
+      'Tool "EnterPlanMode" is available but not loaded.',
+    );
   });
 
   it('rebuilds the ledger from a replayed history with no in-memory state (resume path)', () => {

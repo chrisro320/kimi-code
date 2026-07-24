@@ -2,11 +2,11 @@
  * `toolSelect` domain (L4) — `IAgentToolSelectService` implementation.
  *
  * Shapes the provider-visible tool and history views for progressive tool
- * disclosure, loads MCP schemas into `contextMemory`, and exposes
- * loadable-tools announcement text. Reads live tools from `toolRegistry`,
- * active-tool and capability state from `profile`, gates through `flag`,
- * hooks into `toolExecutor`, and listens to context lifecycle events through
- * `event`. Bound at Agent scope.
+ * disclosure, loads deferred schemas (MCP + selected low-frequency builtins)
+ * into `contextMemory`, and exposes loadable-tools announcement text. Reads
+ * live tools from `toolRegistry`, active-tool and capability state from
+ * `profile`, gates through `flag`, hooks into `toolExecutor`, and listens to
+ * context lifecycle events through `event`. Bound at Agent scope.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -23,6 +23,7 @@ import type { ToolInfo } from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
+import { isDeferredBuiltinToolName } from './deferredBuiltins';
 import {
   collectLoadedDynamicToolNames,
   DYNAMIC_TOOL_SCHEMA_VARIANT,
@@ -94,7 +95,7 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
         shaped.push(entry);
         continue;
       }
-      if (entry.source !== 'mcp') {
+      if (!isDeferredLoadable(entry)) {
         shaped.push(entry);
         continue;
       }
@@ -156,8 +157,8 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
 
   private shouldIntercept(name: string): boolean {
     if (!this.enabled()) return false;
-    const source = this.toolRegistry.list().find((info) => info.name === name)?.source;
-    if (source !== 'mcp') return false;
+    const entry = this.toolRegistry.list().find((info) => info.name === name);
+    if (entry === undefined || !isDeferredLoadable(entry)) return false;
     if (!this.loadableToolNames().includes(name)) return false;
     return !this.activeLoadedToolNames().has(name);
   }
@@ -172,6 +173,8 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     if (!this.enabled()) return undefined;
     if (this.toolRegistry.resolve(name) !== undefined) return undefined;
     if (!this.loadedToolNames().has(name)) return undefined;
+    // Only MCP tools disappear from the registry while still "loaded" (server
+    // disconnect). Deferred builtins stay registered for the session.
     return (
       `Tool "${name}" was loaded but its MCP server is currently disconnected. ` +
       'It may become available again when the server reconnects; do not retry immediately.'
@@ -181,7 +184,9 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
   private loadableToolNames(): string[] {
     return this.toolRegistry
       .list()
-      .filter((info) => info.source === 'mcp' && this.toolPolicy.isToolActive(info.name, info.source))
+      .filter(
+        (info) => isDeferredLoadable(info) && this.toolPolicy.isToolActive(info.name, info.source),
+      )
       .map((info) => info.name)
       .toSorted((a, b) => a.localeCompare(b));
   }
@@ -206,7 +211,9 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
   }
 
   private isLoadedToolActive(name: string): boolean {
-    return this.toolPolicy.isToolActive(name, 'mcp');
+    const entry = this.toolRegistry.list().find((info) => info.name === name);
+    // Unregistered names are the MCP-disconnect case; policy still keys on mcp.
+    return this.toolPolicy.isToolActive(name, entry?.source ?? 'mcp');
   }
 
   private shapeActiveHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
@@ -274,6 +281,10 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     }
     return filtered ?? entries;
   }
+}
+
+function isDeferredLoadable(entry: Pick<ToolInfo, 'name' | 'source'>): boolean {
+  return entry.source === 'mcp' || (entry.source === 'builtin' && isDeferredBuiltinToolName(entry.name));
 }
 
 function notLoadedToolOutput(name: string): string {
