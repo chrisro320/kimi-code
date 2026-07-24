@@ -49,15 +49,10 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			return process.stdin;
 		}) as typeof process.stdin.on;
 
-		(
-			terminal as unknown as {
-				inputHandler?: (data: string) => void;
-				queryAndEnableKittyProtocol(): void;
-			}
-		).inputHandler = (data) => {
+		(terminal as unknown as { inputHandler?: (data: string) => void }).inputHandler = (data) => {
 			input = data;
 		};
-		(terminal as unknown as { queryAndEnableKittyProtocol(): void }).queryAndEnableKittyProtocol();
+		(terminal as unknown as { setupKeyboardProtocolPipeline(): void }).setupKeyboardProtocolPipeline();
 
 		return {
 			terminal,
@@ -81,17 +76,6 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			},
 		};
 	}
-
-	it("queries Kitty mode before enabling modifyOtherKeys fallback", () => {
-		const harness = setupNegotiation();
-		try {
-			assert.equal(harness.writes[0], "\x1b[>7u\x1b[?u\x1b[c");
-			assert.equal(harness.writes.includes("\x1b[>4;2m"), false);
-			assert.equal(harness.terminal.kittyProtocolActive, false);
-		} finally {
-			harness.cleanup();
-		}
-	});
 
 	it("activates Kitty mode for non-zero negotiated flags", () => {
 		const harness = setupNegotiation();
@@ -186,6 +170,85 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		} finally {
 			harness.cleanup();
 			mock.timers.reset();
+		}
+	});
+
+	it("drops capability-probe replies (DECRPM / OSC 11) before they reach the editor", () => {
+		const harness = setupNegotiation();
+		try {
+			// DECRPM private-mode report (DECRQM ?2026 synchronized output reply).
+			harness.send("\x1b[?2026;2$y");
+			assert.equal(harness.getInput(), undefined);
+
+			// OSC 11 background-color reply, BEL-terminated.
+			harness.send("\x1b]11;rgb:1e1e/1e1e/2e2e\x07");
+			assert.equal(harness.getInput(), undefined);
+
+			// OSC 11 background-color reply, ST-terminated.
+			harness.send("\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\");
+			assert.equal(harness.getInput(), undefined);
+
+			// A normal keypress must still be delivered.
+			harness.send("a");
+			assert.equal(harness.getInput(), "a");
+		} finally {
+			harness.cleanup();
+		}
+	});
+});
+
+describe("ProcessTerminal start", () => {
+	it("pushes Kitty keyboard protocol flags on the TTY path", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdinOn = process.stdin.on;
+		const previousResume = process.stdin.resume;
+		const previousSetRawMode = process.stdin.setRawMode;
+		const previousKill = process.kill;
+		const previousIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+
+		const restore = (): void => {
+			process.stdout.write = previousWrite;
+			process.stdout.on = previousStdoutOn;
+			process.stdin.on = previousStdinOn;
+			process.stdin.resume = previousResume;
+			process.stdin.setRawMode = previousSetRawMode;
+			process.kill = previousKill;
+			if (previousIsTTYDescriptor) {
+				Object.defineProperty(process.stdout, "isTTY", previousIsTTYDescriptor);
+			} else {
+				Reflect.deleteProperty(process.stdout, "isTTY");
+			}
+			setKittyProtocolActive(false);
+		};
+
+		try {
+			process.stdout.write = ((chunk: string | Uint8Array) => {
+				writes.push(String(chunk));
+				return true;
+			}) as typeof process.stdout.write;
+			process.stdout.on = (() => process.stdout) as typeof process.stdout.on;
+			process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+			process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+			process.stdin.setRawMode = (() => process.stdin) as typeof process.stdin.setRawMode;
+			process.kill = (() => true) as typeof process.kill;
+			Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+			// Stub the probe so start() performs only the synchronous Kitty push.
+			(terminal as unknown as { runCapabilityProbe(): void }).runCapabilityProbe = () => {};
+
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			assert.equal(writes.includes("\x1b[>7u"), true);
+		} finally {
+			try {
+				terminal.stop();
+			} finally {
+				restore();
+			}
 		}
 	});
 });

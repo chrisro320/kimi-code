@@ -30,7 +30,10 @@
 	],
 	"type": "module",
 	"imports": {
-		"#/*": "./src/*.ts"
+		"#/*": [
+			"./src/*.ts",
+			"./src/*/index.ts"
+		]
 	},
 	"exports": {
 		".": {

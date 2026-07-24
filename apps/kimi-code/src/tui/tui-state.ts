@@ -8,6 +8,7 @@ import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
 import type { MoonLoader, SpinnerStyle } from './components/chrome/moon-loader';
 import { TodoPanelComponent } from './components/chrome/todo-panel';
+import { TranscriptContainer } from './components/chrome/transcript-container';
 import type { SessionRow } from './components/dialogs/session-picker';
 import { CustomEditor } from './components/editor/custom-editor';
 import { DEFAULT_TUI_CONFIG } from './config';
@@ -28,7 +29,7 @@ import {
 export interface TUIState {
   ui: TUI;
   terminal: ProcessTerminal;
-  transcriptContainer: Container;
+  transcriptContainer: TranscriptContainer;
   activityContainer: Container;
   todoPanelContainer: Container;
   todoPanel: TodoPanelComponent;
@@ -69,7 +70,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const terminal = new ProcessTerminal();
   const ui = new TUI(terminal);
 
-  const transcriptContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+  const transcriptContainer = new TranscriptContainer(CHROME_GUTTER, CHROME_GUTTER);
   const activityContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const todoPanelContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const todoPanel = new TodoPanelComponent();
