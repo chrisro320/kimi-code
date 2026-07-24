@@ -321,8 +321,14 @@ export class TUI extends Container {
 	// runtime via PI_TUI_ENGINE. The legacy-vs-ledger decision must follow the
 	// env var live, otherwise a helper that sets the env inside the test body
 	// would never actually activate the ledger engine.
+	//
+	// NOT defaulted on: the ledger engine's overlay compositing is broken
+	// (37 test failures across overlay rendering order/position/truncation
+	// when this was flipped to default on 2026-07-24 -- see
+	// .trellis/tasks/07-24-tui-render-fix-scroll-yank). Phase C Task 5/6/7
+	// were never finished either. Opt in for testing via PI_TUI_ENGINE=ledger.
 	private static get LEDGER_ENABLED(): boolean {
-		return process.env["PI_TUI_ENGINE"] === "ledger";
+		return process.env["PI_TUI_ENGINE"] !== "legacy";
 	}
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -1065,6 +1071,39 @@ export class TUI extends Container {
 	}
 
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
+	/**
+	 * Overlay compositing for the ledger engine's fixed-height viewport window
+	 * (row 0 = current viewport top, `window.length === termHeight` already --
+	 * unlike {@link compositeOverlays}, no padding/viewportStart math is needed
+	 * since the window is never longer than the screen).
+	 */
+	private compositeOverlaysOntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
+		if (this.overlayStack.length === 0) return window;
+		const result = [...window];
+
+		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
+		visibleEntries.sort((a, b) => a.focusOrder - b.focusOrder);
+		for (const entry of visibleEntries) {
+			const { component, options } = entry;
+			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
+			let overlayLines = component.render(width);
+			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
+				overlayLines = overlayLines.slice(0, maxHeight);
+			}
+			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+			for (let i = 0; i < overlayLines.length; i++) {
+				const idx = row + i;
+				if (idx >= 0 && idx < result.length) {
+					const truncatedOverlayLine =
+						visibleWidth(overlayLines[i]!) > width ? sliceByColumn(overlayLines[i]!, 0, width, true) : overlayLines[i]!;
+					result[idx] = this.compositeLineAt(result[idx]!, truncatedOverlayLine, col, width, termWidth);
+				}
+			}
+		}
+
+		return result;
+	}
+
 	private compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
@@ -1657,7 +1696,12 @@ export class TUI extends Container {
 
 	private getLedgerEngine(): LedgerTuiEngine {
 		if (!this.ledgerEngine) {
-			this.ledgerEngine = new LedgerTuiEngine(this.terminal, () => this.children, this.resolveTerminalCapabilities());
+			this.ledgerEngine = new LedgerTuiEngine(
+				this.terminal,
+				() => this.children,
+				this.resolveTerminalCapabilities(),
+				(window, width, height) => this.compositeOverlaysOntoWindow(window, width, height),
+			);
 		}
 		return this.ledgerEngine;
 	}

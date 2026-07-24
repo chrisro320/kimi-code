@@ -77,11 +77,22 @@ export class LedgerTuiEngine {
 	// children injected by the host TUI (it owns the Container children list)
 	private readonly terminal: Terminal;
 	private readonly getChildren: () => Component[];
+	// Composites the host's overlay stack (dialogs/menus) onto a viewport-sized
+	// window (row 0 = window top, length === screen height). Optional so
+	// standalone engine instances (tests, tools with no overlay stack) can omit
+	// it; defaults to a no-op identity pass-through.
+	private readonly compositeOverlays: (window: string[], width: number, height: number) => string[];
 	readonly #caps: TerminalCapabilities;
 
-	constructor(terminal: Terminal, getChildren: () => Component[], caps: TerminalCapabilities) {
+	constructor(
+		terminal: Terminal,
+		getChildren: () => Component[],
+		caps: TerminalCapabilities,
+		compositeOverlays?: (window: string[], width: number, height: number) => string[],
+	) {
 		this.terminal = terminal;
 		this.getChildren = getChildren;
+		this.compositeOverlays = compositeOverlays ?? ((window) => window);
 		this.#caps = caps;
 		this.#syncEnabled = caps.syncEnabled;
 		this.#paintBeginSequence = this.#syncEnabled
@@ -642,8 +653,9 @@ export class LedgerTuiEngine {
 			}
 		}
 		const frame = this.#prepareFrame(rawFrame, width);
-		const window: string[] = new Array(height);
-		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		const rawWindow: string[] = new Array(height);
+		for (let r = 0; r < height; r++) rawWindow[r] = frame[windowTop + r] ?? "";
+		const window = this.compositeOverlays(rawWindow, width, height);
 
 		const intent: RenderIntent = fullPaint
 			? { kind: "fullPaint", clearScrollback: replaceRequested || geometryRebuild ? !isMultiplexerSession() : false }
@@ -724,10 +736,13 @@ export class LedgerTuiEngine {
 		const rawFrame = this.#composeFrame(width);
 		const frame = this.#prepareFrame(rawFrame, width);
 		const start = Math.max(0, frame.length - height);
+		const rawWindow: string[] = new Array(height);
+		for (let r = 0; r < height; r++) rawWindow[r] = frame[start + r] ?? "";
+		const window = this.compositeOverlays(rawWindow, width, height);
 		let buffer = this.#paintBeginSequence + "\x1b[H";
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
-			buffer += "\x1b[2K" + this.#terminalLine(frame[start + r] ?? "");
+			buffer += "\x1b[2K" + this.#terminalLine(window[r] ?? "");
 		}
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);

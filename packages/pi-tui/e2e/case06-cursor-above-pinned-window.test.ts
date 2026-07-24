@@ -23,7 +23,7 @@ import { countInBuffer, createHarness } from "./harness.ts";
 // stays on the real cursor row.
 
 describe("e2e case06: pinned repaint must keep cursor bookkeeping in sync", () => {
-	it("places the next differential update on the correct screen row", { skip: "Known trade-off since 23daf0f3c (2026-07-04 revert): destructive full-redraw loses scroll position / scrollback on above-viewport collapse, accepted for now. See .trellis/spec/tui/rendering.md and .trellis/tasks/07-24-tui-render-instability-root-cause." }, async () => {
+	it("places the next differential update on the correct screen row", async () => {
 		// 60 lines at height 10 -> anchor 50; cursor marker at the bottom.
 		const h = await createHarness(
 			[...Array.from({ length: 59 }, (_, i) => `old-${i}`), `[INPUT]${CURSOR_MARKER}`],
@@ -31,20 +31,28 @@ describe("e2e case06: pinned repaint must keep cursor bookkeeping in sync", () =
 		);
 
 		// Shrink 60 -> 56 with everything shifted (change above the
-		// viewport): the viewport stays pinned at 50, painting rows 50..55.
-		// The cursor marker sits at row 48 — inside the bottom-10 scan
-		// window (46..55) but above the painted window.
+		// viewport). Under the legacy engine this pinned the window at the
+		// stale anchor (row 50), which is what triggered the original #1353
+		// cursor-bookkeeping desync (a cursor marker landing between the
+		// scan window and the pinned window). The ledger engine recomputes
+		// windowTop = max(committedRows, frameLength - height) fresh every
+		// frame instead of pinning to a stale anchor, so it doesn't have
+		// that class of desync -- windowTop lands at 56 - 10 = 46 here, not
+		// 50. Assert against the engine's actual window rather than
+		// hardcoding the legacy pinned-window offset.
 		const pinned = Array.from({ length: 56 }, (_, i) => (i === 48 ? `new-48${CURSOR_MARKER}` : `new-${i}`));
 		await h.frame(pinned);
+		const windowTop = 56 - 10;
+		const changedScreenRow = 55 - windowTop;
 
-		// Next frame changes row 55 (screen row 5 of the pinned window).
+		// Next frame changes row 55.
 		const next = pinned.map((line, i) => (i === 55 ? "new-55 CHANGED" : line));
 		await h.frame(next);
 
 		const viewport = h.terminal.getViewport();
 		assert.ok(
-			viewport[5]!.includes("new-55 CHANGED"),
-			`row 55 must render on screen row 5, got: ${JSON.stringify(viewport)}`,
+			viewport[changedScreenRow]!.includes("new-55 CHANGED"),
+			`row 55 must render on screen row ${changedScreenRow}, got: ${JSON.stringify(viewport)}`,
 		);
 		assert.strictEqual(
 			countInBuffer(viewport, "new-55"),

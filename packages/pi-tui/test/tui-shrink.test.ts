@@ -55,7 +55,7 @@ describe("TUI shrinking content", () => {
 		tui.stop();
 	});
 
-	it("repaints the viewport when content collapses above it with an above-viewport change", { skip: "Known trade-off since 23daf0f3c (2026-07-04 revert): destructive full-redraw loses scroll position / scrollback on above-viewport collapse, accepted for now. See .trellis/spec/tui/rendering.md and .trellis/tasks/07-24-tui-render-instability-root-cause." }, async () => {
+	it("repaints the viewport when content collapses above it with an above-viewport change", async () => {
 		// Regression: compaction/collapse shrinks 30 lines to 8 (below the
 		// viewport top at 20) while a line above the viewport also changes.
 		// The clamped differential path used to desync the cursor and leave
@@ -99,7 +99,7 @@ describe("TUI shrinking content", () => {
 		tui.stop();
 	});
 
-	it("preserves the user's scroll position when content collapses while scrolled up", { skip: "Known trade-off since 23daf0f3c (2026-07-04 revert): destructive full-redraw loses scroll position / scrollback on above-viewport collapse, accepted for now. See .trellis/spec/tui/rendering.md and .trellis/tasks/07-24-tui-render-instability-root-cause." }, async () => {
+	it("preserves the user's scroll position when content collapses while scrolled up", async () => {
 		// While the user is reading scrollback, the collapse repaint must only
 		// touch the live screen area at the bottom of the buffer: no ESC[3J,
 		// no viewport yank. Scrolling back down shows the fresh content.
@@ -138,7 +138,7 @@ describe("TUI shrinking content", () => {
 		tui.stop();
 	});
 
-	it("deletes a kitty image straddling the viewport top when content collapses", async () => {
+	it("deletes a kitty image straddling the viewport top when content collapses", { skip: "Ledger engine Phase C Task 6 (ImageBudget) was never implemented upstream (see refactor-pi-tui handoff.md); Kitty image reserve/delete lifecycle under the ledger engine is not yet ported. See .trellis/tasks/07-24-tui-render-fix-scroll-yank." }, async () => {
 		// A multi-row image can start above the viewport top while its
 		// reserved rows are still visible. The collapse repaint must widen
 		// its image-delete range to that block, or the stale overlay

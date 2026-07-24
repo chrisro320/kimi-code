@@ -15,7 +15,7 @@ import { createHarness, type WriteCapturingTerminal } from "./harness.ts";
 // alone.
 
 describe("e2e case02: collapse must not yank the user's scroll position", () => {
-	it("preserves scroll position and never emits ESC[3J during a collapse", { skip: "Known trade-off since 23daf0f3c (2026-07-04 revert): destructive full-redraw loses scroll position / scrollback on above-viewport collapse, accepted for now. See .trellis/spec/tui/rendering.md and .trellis/tasks/07-24-tui-render-instability-root-cause." }, async () => {
+	it("preserves scroll position and never emits ESC[3J during a collapse", async () => {
 		const h = await createHarness([...Array.from({ length: 59 }, (_, i) => `old-${i}`), "[INPUT-BOX]"], {
 			rows: 10,
 			capture: true,
