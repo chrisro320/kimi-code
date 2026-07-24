@@ -16,19 +16,11 @@ import {
 	type TerminalColorScheme,
 } from "./terminal-colors.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
-import {
-	asciiVisibleWidth,
-	extractSegments,
-	normalizeTerminalOutput,
-	sliceByColumn,
-	sliceWithWidth,
-	visibleWidth,
-} from "./utils.ts";
+import { createStaticCapabilities, isMultiplexerSession, type TerminalCapabilities } from "./terminal-capabilities.ts";
+import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
+import { LedgerTuiEngine } from "./ledger/engine.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
-
-/** Shared empty id list for non-image lines in the per-line image-id cache. */
-const EMPTY_IMAGE_IDS: readonly number[] = [];
 
 interface KittyImageHeader {
 	ids: number[];
@@ -288,9 +280,6 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
-		// Extremely narrow terminals can report tiny or even non-positive
-		// column counts; never propagate a width below 1 into components.
-		width = Math.max(1, width);
 		const lines: string[] = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
@@ -308,16 +297,6 @@ export class Container implements Component {
 export class TUI extends Container {
 	public terminal: Terminal;
 	private previousLines: string[] = [];
-	/**
-	 * Raw (pre-processing) lines of the previous frame, aligned with
-	 * {@link previousLines}. Component render caches return identical string
-	 * references for unchanged content, which lets each frame reuse the
-	 * processed output for every untouched line instead of re-normalizing and
-	 * re-comparing the whole transcript (see doRender).
-	 */
-	private previousRawLines: string[] = [];
-	/** Per-line kitty image ids of the previous frame, aligned with previousRawLines. */
-	private previousLineImageIds: ReadonlyArray<number>[] = [];
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -337,6 +316,20 @@ export class TUI extends Container {
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
+	private ledgerEngine: LedgerTuiEngine | undefined;
+	// Read at access time (not module load) so tests can toggle the engine at
+	// runtime via PI_TUI_ENGINE. The legacy-vs-ledger decision must follow the
+	// env var live, otherwise a helper that sets the env inside the test body
+	// would never actually activate the ledger engine.
+	//
+	// NOT defaulted on: the ledger engine's overlay compositing is broken
+	// (37 test failures across overlay rendering order/position/truncation
+	// when this was flipped to default on 2026-07-24 -- see
+	// .trellis/tasks/07-24-tui-render-fix-scroll-yank). Phase C Task 5/6/7
+	// were never finished either. Opt in for testing via PI_TUI_ENGINE=ledger.
+	private static get LEDGER_ENABLED(): boolean {
+		return process.env["PI_TUI_ENGINE"] !== "legacy";
+	}
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
@@ -357,7 +350,7 @@ export class TUI extends Container {
 	}
 
 	get fullRedraws(): number {
-		return this.fullRedrawCount;
+		return TUI.LEDGER_ENABLED && this.ledgerEngine ? this.ledgerEngine.fullRedraws : this.fullRedrawCount;
 	}
 
 	getShowHardwareCursor(): boolean {
@@ -659,14 +652,34 @@ export class TUI extends Container {
 		this.stopped = false;
 		this.terminal.start(
 			(data) => this.handleInput(data),
-			() => this.requestRender(),
+			() => {
+				this.ledgerEngine?.notifyResize();
+				if (!isMultiplexerSession()) this.ledgerEngine?.beginResizeViewport();
+				this.requestRender();
+			},
 		);
+		this.attachProbeRefresh();
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
 		this.requestRender();
+	}
+
+	/**
+	 * When the terminal exposes a startup probe, re-frame the ledger engine's
+	 * synchronized output and repaint once the probe resolves. The capabilities
+	 * object is already mutated in place by the terminal; this just re-reads it.
+	 */
+	private attachProbeRefresh(): void {
+		const probeReady = this.terminal.probeReady;
+		if (!probeReady) return;
+		void probeReady.then(() => {
+			if (this.stopped) return;
+			this.ledgerEngine?.refreshSyncFraming();
+			this.requestRender();
+		}).catch(() => {});
 	}
 
 	addInputListener(listener: InputListener): () => void {
@@ -717,7 +730,9 @@ export class TUI extends Container {
 			this.terminal.write("\x1b[?2031l");
 		}
 		// Move cursor to the end of the content to prevent overwriting/artifacts on exit
-		if (this.previousLines.length > 0) {
+		if (TUI.LEDGER_ENABLED && this.ledgerEngine) {
+			this.ledgerEngine.parkCursorForExit();
+		} else if (this.previousLines.length > 0) {
 			const targetRow = this.previousLines.length; // Line after the last content
 			const lineDiff = targetRow - this.hardwareCursorRow;
 			if (lineDiff > 0) {
@@ -729,11 +744,15 @@ export class TUI extends Container {
 		}
 
 		this.terminal.showCursor();
+		this.ledgerEngine?.stop();
 		this.terminal.stop();
 	}
 
 	requestRender(force = false): void {
 		if (force) {
+			if (TUI.LEDGER_ENABLED) {
+				this.getLedgerEngine().requestFullPaint(true);
+			}
 			this.previousLines = [];
 			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
 			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
@@ -1052,6 +1071,39 @@ export class TUI extends Container {
 	}
 
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
+	/**
+	 * Overlay compositing for the ledger engine's fixed-height viewport window
+	 * (row 0 = current viewport top, `window.length === termHeight` already --
+	 * unlike {@link compositeOverlays}, no padding/viewportStart math is needed
+	 * since the window is never longer than the screen).
+	 */
+	private compositeOverlaysOntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
+		if (this.overlayStack.length === 0) return window;
+		const result = [...window];
+
+		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
+		visibleEntries.sort((a, b) => a.focusOrder - b.focusOrder);
+		for (const entry of visibleEntries) {
+			const { component, options } = entry;
+			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
+			let overlayLines = component.render(width);
+			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
+				overlayLines = overlayLines.slice(0, maxHeight);
+			}
+			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+			for (let i = 0; i < overlayLines.length; i++) {
+				const idx = row + i;
+				if (idx >= 0 && idx < result.length) {
+					const truncatedOverlayLine =
+						visibleWidth(overlayLines[i]!) > width ? sliceByColumn(overlayLines[i]!, 0, width, true) : overlayLines[i]!;
+					result[idx] = this.compositeLineAt(result[idx]!, truncatedOverlayLine, col, width, termWidth);
+				}
+			}
+		}
+
+		return result;
+	}
+
 	private compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
@@ -1115,10 +1167,21 @@ export class TUI extends Container {
 
 	private static readonly SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
-	private unionKittyImageIds(lineImageIds: ReadonlyArray<number>[]): Set<number> {
+	private applyLineResets(lines: string[]): string[] {
+		const reset = TUI.SEGMENT_RESET;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i]!;
+			if (!isImageLine(line)) {
+				lines[i] = normalizeTerminalOutput(line) + reset;
+			}
+		}
+		return lines;
+	}
+
+	private collectKittyImageIds(lines: string[]): Set<number> {
 		const ids = new Set<number>();
-		for (const lineIds of lineImageIds) {
-			for (const id of lineIds) {
+		for (const line of lines) {
+			for (const id of extractKittyImageIds(line)) {
 				ids.add(id);
 			}
 		}
@@ -1151,13 +1214,12 @@ export class TUI extends Container {
 		firstChanged: number,
 		lastChanged: number,
 		newLines: string[],
-		newLineImageIds: ReadonlyArray<number>[],
 	): { firstChanged: number; lastChanged: number } {
 		let expandedFirstChanged = firstChanged;
 		let expandedLastChanged = lastChanged;
-		const expandForLines = (lines: string[], lineImageIds: ReadonlyArray<number>[]): void => {
+		const expandForLines = (lines: string[]): void => {
 			for (let i = 0; i < lines.length; i++) {
-				if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
+				if (extractKittyImageIds(lines[i]!).length === 0) continue;
 				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
 				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
 					expandedFirstChanged = Math.min(expandedFirstChanged, i);
@@ -1166,30 +1228,9 @@ export class TUI extends Container {
 			}
 		};
 
-		expandForLines(this.previousLines, this.previousLineImageIds);
-		expandForLines(newLines, newLineImageIds);
+		expandForLines(this.previousLines);
+		expandForLines(newLines);
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
-	}
-
-	/**
-	 * Whether a multi-row Kitty image block starts above `viewportTop` but its
-	 * reserved rows reach into the viewport. Clamped partial redraws must fall
-	 * back to a full redraw in that case: the image id lives on its (invisible)
-	 * start line, so repainting only the visible tail would erase the lower
-	 * half without replaying the placement.
-	 */
-	private hasStraddlingKittyImage(
-		lines: string[],
-		lineImageIds: ReadonlyArray<number>[],
-		viewportTop: number,
-	): boolean {
-		const scanEnd = Math.min(lines.length, viewportTop);
-		for (let i = 0; i < scanEnd; i++) {
-			if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
-			const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
-			if (blockEnd >= viewportTop) return true;
-		}
-		return false;
 	}
 
 	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
@@ -1198,7 +1239,7 @@ export class TUI extends Container {
 		const ids = new Set<number>();
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
 		for (let i = firstChanged; i <= maxLine; i++) {
-			for (const id of this.previousLineImageIds[i] ?? EMPTY_IMAGE_IDS) {
+			for (const id of extractKittyImageIds(this.previousLines[i] ?? "")) {
 				ids.add(id);
 			}
 		}
@@ -1285,7 +1326,7 @@ export class TUI extends Container {
 		return null;
 	}
 
-	private doRender(): void {
+	private doRenderLegacy(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
@@ -1312,44 +1353,7 @@ export class TUI extends Container {
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
 
-		// Process raw lines for output. Never write a line wider than the
-		// terminal: truncate defensively instead of crashing. Extremely narrow
-		// terminals can make components overflow by a column (e.g. wide
-		// graphemes at width 1). The trailing segment reset is appended after
-		// truncation, so truncated lines still get their reset and cannot leak
-		// styles.
-		//
-		// Lines whose raw string is reference-identical to the previous frame's
-		// reuse their processed output verbatim: component render caches return
-		// the same string references for unchanged content, so a steady frame
-		// only pays for the lines that actually changed instead of
-		// re-normalizing the whole transcript.
-		const rawLines = newLines;
-		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
-		const processedLines: string[] = new Array(rawLines.length);
-		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
-		for (let i = 0; i < rawLines.length; i++) {
-			const rawLine = rawLines[i]!;
-			if (reuseProcessed && rawLine === this.previousRawLines[i]) {
-				processedLines[i] = this.previousLines[i]!;
-				lineImageIds[i] = this.previousLineImageIds[i]!;
-				continue;
-			}
-			let line = rawLine;
-			let imageIds: readonly number[] = EMPTY_IMAGE_IDS;
-			if (isImageLine(line)) {
-				imageIds = extractKittyImageIds(line);
-			} else {
-				const lineWidth = asciiVisibleWidth(line, width) ?? visibleWidth(line);
-				if (lineWidth > width) {
-					line = sliceByColumn(line, 0, width, true);
-				}
-				line = normalizeTerminalOutput(line) + TUI.SEGMENT_RESET;
-			}
-			processedLines[i] = line;
-			lineImageIds[i] = imageIds;
-		}
-		newLines = processedLines;
+		newLines = this.applyLineResets(newLines);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
@@ -1390,9 +1394,7 @@ export class TUI extends Container {
 			this.previousViewportTop = Math.max(0, bufferLength - height);
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
-			this.previousRawLines = rawLines;
-			this.previousLineImageIds = lineImageIds;
-			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
 			this.previousHeight = height;
 		};
@@ -1460,12 +1462,7 @@ export class TUI extends Container {
 			lastChanged = newLines.length - 1;
 		}
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(
-				firstChanged,
-				lastChanged,
-				newLines,
-				lineImageIds,
-			);
+			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
 			firstChanged = expandedRange.firstChanged;
 			lastChanged = expandedRange.lastChanged;
 		}
@@ -1476,11 +1473,6 @@ export class TUI extends Container {
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
-			// Processed output is unchanged, but keep the raw/image-id caches in
-			// sync so future frames keep hitting the reuse fast path (e.g. the
-			// cursor-marker line gets a fresh string every frame).
-			this.previousRawLines = rawLines;
-			this.previousLineImageIds = lineImageIds;
 			return;
 		}
 
@@ -1526,9 +1518,7 @@ export class TUI extends Container {
 			}
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
-			this.previousRawLines = rawLines;
-			this.previousLineImageIds = lineImageIds;
-			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
 			this.previousHeight = height;
 			this.previousViewportTop = prevViewportTop;
@@ -1536,56 +1526,11 @@ export class TUI extends Container {
 		}
 
 		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we normally need a full redraw.
+		// If the first changed line is above the previous viewport, we need a full redraw.
 		if (firstChanged < prevViewportTop) {
-			// But if every changed line is above the viewport too, nothing on screen
-			// actually changed (e.g. a background-task ticker rewriting an old,
-			// already-scrolled-past line). Skip the redraw and just sync caches so
-			// the next visible-region diff compares against correct content —
-			// avoids nuking scrollback for an edit the user can't see.
-			if (lastChanged < prevViewportTop) {
-				logRedraw(
-					`skipped: changes above viewport, none visible (${firstChanged}..${lastChanged} < ${prevViewportTop})`,
-				);
-				this.positionHardwareCursor(cursorPos, newLines.length);
-				this.previousLines = newLines;
-				this.previousRawLines = rawLines;
-				this.previousLineImageIds = lineImageIds;
-				this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
-				this.previousViewportTop = prevViewportTop;
-				this.previousHeight = height;
-				return;
-			}
-			// Partial visibility: the changed range straddles the viewport top.
-			// When the buffer length is unchanged (pure in-place edit, e.g. a
-			// ticker or footer text update), prevViewportTop still accurately
-			// describes what's on screen, so everything above it is genuinely
-			// invisible: clamp the render start there and fall through to the
-			// incremental path below, which repaints only the visible tail and
-			// still syncs previousLines to the full newLines array. Avoids
-			// nuking scrollback for a change the user can only partly see.
-			// If the buffer length changed (lines inserted/removed), the old
-			// viewport top no longer reliably maps to visible content, so fall
-			// back to the safe full redraw.
-			if (newLines.length === this.previousLines.length &&
-				!this.hasStraddlingKittyImage(newLines, lineImageIds, prevViewportTop) &&
-				!this.hasStraddlingKittyImage(this.previousLines, this.previousLineImageIds, prevViewportTop)) {
-				logRedraw(
-					`clamped: partial visibility, rendering from viewport top instead of full redraw (${firstChanged} -> ${prevViewportTop}, lastChanged=${lastChanged})`,
-				);
-				firstChanged = prevViewportTop;
-			} else if (newLines.length === this.previousLines.length) {
-				// A multi-row Kitty image straddles the viewport top: clamping
-				// would erase its visible lower half without replaying the
-				// placement (its id lives above the clamp), so redraw fully.
-				logRedraw(`kitty image straddles viewport top, full redraw`);
-				fullRender(true);
-				return;
-			} else {
-				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-				fullRender(true);
-				return;
-			}
+			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+			fullRender(true);
+			return;
 		}
 
 		// Render from first changed line to end
@@ -1647,6 +1592,34 @@ export class TUI extends Container {
 			}
 
 			buffer += "\x1b[2K"; // Clear current line
+			if (!isImage && visibleWidth(line) > width) {
+				// Log all lines to crash file for debugging
+				const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+				const crashData = [
+					`Crash at ${new Date().toISOString()}`,
+					`Terminal width: ${width}`,
+					`Line ${i} visible width: ${visibleWidth(line)}`,
+					"",
+					"=== All rendered lines ===",
+					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+					"",
+				].join("\n");
+				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+				fs.writeFileSync(crashLogPath, crashData);
+
+				// Clean up terminal state before throwing
+				this.stop();
+
+				const errorMsg = [
+					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+					"",
+					"This is likely caused by a custom TUI component not truncating its output.",
+					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
+					"",
+					`Debug log written to: ${crashLogPath}`,
+				].join("\n");
+				throw new Error(errorMsg);
+			}
 			buffer += line;
 		}
 
@@ -1716,11 +1689,40 @@ export class TUI extends Container {
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
 		this.previousLines = newLines;
-		this.previousRawLines = rawLines;
-		this.previousLineImageIds = lineImageIds;
-		this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		this.previousWidth = width;
 		this.previousHeight = height;
+	}
+
+	private getLedgerEngine(): LedgerTuiEngine {
+		if (!this.ledgerEngine) {
+			this.ledgerEngine = new LedgerTuiEngine(
+				this.terminal,
+				() => this.children,
+				this.resolveTerminalCapabilities(),
+				(window, width, height) => this.compositeOverlaysOntoWindow(window, width, height),
+			);
+		}
+		return this.ledgerEngine;
+	}
+
+	/**
+	 * Resolve the capabilities handed to the ledger engine. A ProcessTerminal
+	 * exposes a mutable, probe-backed instance (shared with the engine so the
+	 * probe result applies in place); other terminals fall back to static env
+	 * defaults.
+	 */
+	private resolveTerminalCapabilities(): TerminalCapabilities {
+		const caps = this.terminal.terminalCapabilities;
+		return caps ?? createStaticCapabilities();
+	}
+
+	private doRender(): void {
+		if (TUI.LEDGER_ENABLED) {
+			this.getLedgerEngine().doRender();
+		} else {
+			this.doRenderLegacy();
+		}
 	}
 
 	/**

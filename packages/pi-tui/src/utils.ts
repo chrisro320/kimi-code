@@ -271,6 +271,15 @@ export function visibleWidth(str: string): number {
 }
 
 /**
+ * Normalize text for terminal output without changing logical editor content.
+ * Some terminals render precomposed Thai/Lao AM vowels inconsistently during
+ * differential repaint. Their compatibility decompositions have the same cell
+ * width but avoid stale-cell artifacts in terminal renderers.
+ */
+const THAI_LAO_AM_REGEX = /[\u0e33\u0eb3]/;
+const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
+
+/**
  * Fast visible-width scan for lines whose printable content is plain ASCII,
  * skipping over ANSI escape sequences. Returns the visible width, or
  * `undefined` when the line contains control characters or non-ASCII
@@ -295,15 +304,6 @@ export function asciiVisibleWidth(line: string, limit: number): number | undefin
 	}
 	return width;
 }
-
-/**
- * Normalize text for terminal output without changing logical editor content.
- * Some terminals render precomposed Thai/Lao AM vowels inconsistently during
- * differential repaint. Their compatibility decompositions have the same cell
- * width but avoid stale-cell artifacts in terminal renderers.
- */
-const THAI_LAO_AM_REGEX = /[\u0e33\u0eb3]/;
-const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
 
 export function normalizeTerminalOutput(str: string): string {
 	if (!THAI_LAO_AM_REGEX.test(str)) return str;
