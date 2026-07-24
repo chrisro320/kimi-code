@@ -1,15 +1,15 @@
 Launch multiple subagents from one prompt template, existing agent resumes, or both.
 
-Use AgentSwarm when many subagents should run the same kind of task over different inputs. The placeholder is exactly `{{item}}`. For example, with `prompt_template` set to `Review {{item}} for likely regressions.` and `items` set to `["src/a.ts", "src/b.ts"]`, AgentSwarm launches two new subagents with those two concrete prompts. For a few differently-shaped tasks, make separate `Agent` calls in one message instead.
+Use AgentSwarm when many subagents run the same kind of task over different inputs. The placeholder is exactly `{{item}}`: `prompt_template` `Review {{item}} for likely regressions.` with `items` `["src/a.ts", "src/b.ts"]` launches two subagents with those concrete prompts. For a few differently-shaped tasks, make separate `Agent` calls in one message instead.
 
-Use `resume_agent_ids` to continue subagents that already exist from earlier work, such as ones that failed or timed out: map each agent id to the prompt for that resumed subagent (usually `continue` if no extra information is needed). You may combine `resume_agent_ids` with `items` in the same call to resume existing subagents and launch new ones. Do not duplicate resumed work in `items`.
+`resume_agent_ids` continues existing subagents (e.g. failed or timed out): map each agent id to its resume prompt (usually `continue`). You may combine `resume_agent_ids` with `items`; do not duplicate resumed work in `items`.
 
-Use the optional `model` alias to route every item-based new spawn in this call to one configured model. It does not affect entries from `resume_agent_ids`; a resumed worker keeps the model it was originally spawned with.
+Optional `model` alias routes every item-based new spawn to one configured model; resumed workers keep their original model.
 
-Each of these is enforced — a violation is rejected before any subagent starts: provide at least 2 `items` unless you pass `resume_agent_ids`; whenever `items` are present, `prompt_template` is required and must contain `{{item}}`; and the filled-in prompts must be distinct (two items that expand to the same prompt are rejected).
+Enforced — violations are rejected before any subagent starts: at least 2 `items` unless `resume_agent_ids` is passed; `items` requires `prompt_template` containing `{{item}}`; the filled-in prompts must be distinct.
 
-Use enough subagents to keep the work focused and parallel. AgentSwarm supports up to 128 subagents, and launches are queued automatically, so it is safe to split large tasks into many clear, independent items.
+Use enough subagents to keep work focused and parallel — up to 128 subagents, queued automatically; safe to split large tasks into many clear, independent items.
 
 If `AgentSwarm` is called, that call must be the only tool call in the response.
 
-Optional `item_dispatch` carries per-item dispatch metadata keyed by the exact item value: `rationale` explains that item's delegation, and `scope` lists the workspace-relative files/directories/globs it may change. Every new item on an editing subagent_type needs a distinct, non-overlapping scope; the runtime rejects the launch before any subagent starts if two items would touch the same files.
+Optional `item_dispatch` carries per-item metadata keyed by the exact item value: `rationale`, and `scope` (workspace-relative files/directories/globs it may change). Every new item on an editing subagent_type needs a distinct, non-overlapping scope; the runtime rejects the launch up front if two items would touch the same files.
