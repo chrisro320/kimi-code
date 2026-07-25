@@ -40,6 +40,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { TaskOutputInputSchema } from '../../../../agent-core/src/tools/background/task-output';
+import { toInputJsonSchema } from '../../../../agent-core/src/tools/support/input-schema';
 import { isUnknownCapability, UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { APIConnectionError } from '#/kosong/contract/errors';
 import type { Message } from '#/kosong/contract/message';
@@ -349,6 +351,87 @@ describe('createChatProvider', () => {
   });
 });
 
+describe('DeepSeek Anthropic tool schema compatibility', () => {
+  const rootObjectUnionTool = {
+    name: 'TaskOutput',
+    description: 'Inspect a background task.',
+    parameters: toInputJsonSchema(TaskOutputInputSchema),
+  };
+
+  it.each(['deepseek-v4-pro', 'deepseek/v4-pro'])(
+    'flattens the real TaskOutput root union for model %s',
+    async (modelName) => {
+      expect(rootObjectUnionTool.parameters).toHaveProperty('anyOf');
+      const provider = registry.createChatProvider({
+        protocol: 'anthropic',
+        providerType: 'anthropic',
+        modelName,
+        apiKey: 'sk-probe',
+      });
+
+      const { params } = await captureAnthropicBody(provider, undefined, [rootObjectUnionTool]);
+      const tools = params['tools'] as Array<Record<string, unknown>>;
+      const schema = tools[0]?.['input_schema'] as Record<string, unknown>;
+      const properties = schema['properties'] as Record<string, unknown>;
+
+      expect(schema['type']).toBe('object');
+      expect(schema).not.toHaveProperty('anyOf');
+      expect(schema['required']).toEqual(['task_id']);
+      expect(properties).toHaveProperty('action');
+      expect(properties).toHaveProperty('candidate_hash');
+      expect(properties).toHaveProperty('timeout');
+    },
+  );
+
+  it.each(['compatible-model', 'deepseek'])(
+    'leaves model %s tool schemas unchanged',
+    async (modelName) => {
+      const provider = registry.createChatProvider({
+        protocol: 'anthropic',
+        providerType: 'anthropic',
+        modelName,
+        apiKey: 'sk-probe',
+      });
+
+      const { params } = await captureAnthropicBody(provider, undefined, [rootObjectUnionTool]);
+      const tools = params['tools'] as Array<Record<string, unknown>>;
+
+      expect(tools[0]?.['input_schema']).toEqual(rootObjectUnionTool.parameters);
+    },
+  );
+
+  it.each([
+    [
+      'mixed branch types',
+      { oneOf: [{ type: 'object', properties: {} }, { type: 'string' }] },
+    ],
+    [
+      'simultaneous anyOf and oneOf',
+      {
+        anyOf: [{ type: 'object', properties: { first: { type: 'string' } } }],
+        oneOf: [{ type: 'object', properties: { second: { type: 'string' } } }],
+      },
+    ],
+  ])('leaves unsafe DeepSeek schema with %s unchanged', async (_case, parameters) => {
+    const unsupportedUnionTool = {
+      name: 'mixed',
+      description: 'Unsupported root union.',
+      parameters,
+    };
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      providerType: 'anthropic',
+      modelName: 'deepseek-v4-pro',
+      apiKey: 'sk-probe',
+    });
+
+    const { params } = await captureAnthropicBody(provider, undefined, [unsupportedUnionTool]);
+    const tools = params['tools'] as Array<Record<string, unknown>>;
+
+    expect(tools[0]?.['input_schema']).toEqual(parameters);
+  });
+});
+
 describe('google-genai vertex mode (providerOptions)', () => {
   it('forwards vertexai + project + location from providerOptions to the base', () => {
     const provider = registry.createChatProvider({
@@ -597,6 +680,7 @@ async function captureOpenAIBody(
 async function captureAnthropicBody(
   provider: ChatProvider,
   options?: GenerateOptions,
+  tools: Parameters<ChatProvider['generate']>[1] = [],
 ): Promise<{
   readonly params: Record<string, unknown>;
   readonly requestOptions: Record<string, unknown> | undefined;
@@ -620,7 +704,7 @@ async function captureAnthropicBody(
     });
   client.messages.create = create('standard');
   client.beta.messages.create = create('beta');
-  await drain(await provider.generate('', [], PROBE_HISTORY, options));
+  await drain(await provider.generate('', tools, PROBE_HISTORY, options));
   if (capturedParams === undefined || via === undefined) {
     throw new Error('expected messages.create to be called');
   }

@@ -12,6 +12,20 @@ import type { GenerateOptions } from '#/provider';
 import type { Tool } from '#/tool';
 import { describe, it, expect, vi } from 'vitest';
 
+async function loadTaskOutputParameters(): Promise<Record<string, unknown>> {
+  const schemaModulePath = new URL(
+    '../../agent-core/src/tools/background/task-output.ts',
+    import.meta.url,
+  ).href;
+  const rendererModulePath = new URL(
+    '../../agent-core/src/tools/support/input-schema.ts',
+    import.meta.url,
+  ).href;
+  const schemaModule = await import(schemaModulePath);
+  const rendererModule = await import(rendererModulePath);
+  return rendererModule.toInputJsonSchema(schemaModule.TaskOutputInputSchema);
+}
+
 function makeAnthropicResponse(model: string = 'k25') {
   return {
     id: 'msg_test_123',
@@ -1072,6 +1086,64 @@ describe('AnthropicChatProvider', () => {
           cache_control: { type: 'ephemeral' },
         },
       ]);
+    });
+
+    it('flattens the real TaskOutput root union only for DeepSeek models', async () => {
+      const taskOutputParameters = await loadTaskOutputParameters();
+      expect(taskOutputParameters).toHaveProperty('anyOf');
+      const taskOutputTool = {
+        name: 'TaskOutput',
+        description: 'Retrieve or resolve a background task snapshot.',
+        parameters: taskOutputParameters,
+      };
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Inspect the task' }], toolCalls: [] },
+      ];
+
+      for (const model of ['deepseek-v4-pro', 'deepseek/v4-pro']) {
+        const deepSeekBody = await captureRequestBody(
+          createProvider(model),
+          '',
+          [taskOutputTool],
+          history,
+        );
+        const deepSeekSchema = (deepSeekBody['tools'] as Array<Record<string, unknown>>)[0]?.[
+          'input_schema'
+        ] as Record<string, unknown>;
+        expect(deepSeekSchema['type']).toBe('object');
+        expect(deepSeekSchema).not.toHaveProperty('anyOf');
+        expect(deepSeekSchema['properties']).toHaveProperty('candidate_hash');
+        expect(deepSeekSchema['properties']).toHaveProperty('timeout');
+      }
+
+      for (const model of ['claude-sonnet-4-5-20250929', 'deepseek']) {
+        const anthropicBody = await captureRequestBody(
+          createProvider(model),
+          '',
+          [taskOutputTool],
+          history,
+        );
+        const anthropicSchema = (anthropicBody['tools'] as Array<Record<string, unknown>>)[0]?.[
+          'input_schema'
+        ];
+        expect(anthropicSchema).toEqual(taskOutputParameters);
+      }
+    });
+
+    it('preserves simultaneous anyOf and oneOf for DeepSeek models', async () => {
+      const parameters = {
+        anyOf: [{ type: 'object', properties: { first: { type: 'string' } } }],
+        oneOf: [{ type: 'object', properties: { second: { type: 'string' } } }],
+      };
+      const body = await captureRequestBody(
+        createProvider('deepseek-v4-pro'),
+        '',
+        [{ name: 'dual', description: 'Dual combinator schema.', parameters }],
+        [{ role: 'user', content: [{ type: 'text', text: 'Inspect' }], toolCalls: [] }],
+      );
+      const schema = (body['tools'] as Array<Record<string, unknown>>)[0]?.['input_schema'];
+
+      expect(schema).toEqual(parameters);
     });
 
     it('tool call and tool result (Anthropic wire format)', async () => {

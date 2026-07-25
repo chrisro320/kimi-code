@@ -120,13 +120,13 @@ interface AnthropicContextManagement {
 }
 
 /**
- * The base-internal hook set: the L1 `withThinking` hook with the context
- * already bound away. It receives a defensive COPY of the seeded kwargs, so a
- * hook can never mutate base state — and a construction-headers synthetic
- * trait can never shadow a real dialect hook (the compositor picks the last
- * declarer).
+ * The base-internal hook set with L1 trait contexts already bound away. The
+ * compositor selects the last declarer for each single-value hook and gives
+ * `withThinking` a defensive kwargs copy, so dialect hooks cannot mutate base
+ * state and construction-only synthetic traits cannot shadow them.
  */
 export interface AnthropicHooks {
+  convertTool?(tool: Tool): AnthropicToolParam | undefined;
   withThinking?(
     effort: ThinkingEffort,
     options: { readonly keep?: string },
@@ -972,7 +972,9 @@ export class AnthropicChatProvider implements ChatProvider {
       extraHeaders['anthropic-beta'] = betas.join(',');
     }
 
-    const anthropicTools: AnthropicToolParam[] = tools.map((t) => convertTool(t));
+    const anthropicTools: AnthropicToolParam[] = tools.map(
+      (tool) => this._hooks?.convertTool?.(tool) ?? convertTool(tool),
+    );
     if (anthropicTools.length > 0) {
       const lastTool = anthropicTools.at(-1);
       if (lastTool !== undefined) {

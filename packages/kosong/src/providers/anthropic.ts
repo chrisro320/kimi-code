@@ -50,6 +50,7 @@ import {
   type AnthropicModelProfile,
   type AnthropicModelVersion,
 } from './anthropic-profile';
+import { normalizeDeepSeekToolSchema } from './deepseek-schema';
 import { mergeConsecutiveUserMessages } from './merge-user-messages';
 import { mergeRequestHeaders, resolveAuthBackedClient } from './request-auth';
 import {
@@ -452,11 +453,14 @@ interface AnthropicToolParam extends AnthropicTool {
   cache_control?: { type: 'ephemeral' } | null;
 }
 
-function convertTool(tool: Tool): AnthropicToolParam {
+function convertTool(tool: Tool, model: string): AnthropicToolParam {
+  const inputSchema = /^deepseek(?:-|\/)/i.test(model)
+    ? normalizeDeepSeekToolSchema(tool.parameters)
+    : tool.parameters;
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: tool.parameters as AnthropicTool['input_schema'],
+    input_schema: inputSchema as AnthropicTool['input_schema'],
   };
 }
 function toolResultToBlock(toolCallId: string, content: ContentPart[]): ToolResultBlockParam {
@@ -1044,7 +1048,9 @@ export class AnthropicChatProvider implements ChatProvider {
     }
 
     // Convert tools
-    const anthropicTools: AnthropicToolParam[] = tools.map((t) => convertTool(t));
+    const anthropicTools: AnthropicToolParam[] = tools.map((tool) =>
+      convertTool(tool, this._model),
+    );
     if (anthropicTools.length > 0) {
       const lastTool = anthropicTools.at(-1);
       if (lastTool !== undefined) {

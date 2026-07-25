@@ -1,45 +1,33 @@
 /**
- * ⚠ PHASE 4 GAP PATCH — additive lower-layer fill-in, clearly marked.
+ * `kosong/provider` domain (L2) — side-effect module for the four canonical
+ * protocol-provider definitions and their endpoint environment fallbacks.
  *
- * `kosong/provider` domain (L2) — side-effect module: endpoint-only provider
- * definitions for the four canonical vendors.
+ * The Anthropic definition also carries one narrow compatibility trait:
+ * DeepSeek models served over the Anthropic wire require a flat object at the
+ * root of every tool schema. The runtime provider identity is the configured
+ * protocol type (`anthropic`), not the provider-table alias (`deepseek`), so
+ * the trait gates on the wire model name and returns `undefined` for every
+ * other Anthropic-compatible model.
  *
- * Phase 3 registered only the Kimi vendor definition, so
- * `resolveProviderEndpoint(providerType, env)` answered for `kimi` alone and
- * the legacy config-env-bag fallbacks (`[providers.x.env] OPENAI_API_KEY=…`
- * etc.) had no registry home. Phase 4's `kosong/model` (modelAuth, catalog
- * assembly, env overlay, catalog credential state) resolves every endpoint
- * through the definition registry — hardcoded per-protocol env tables are
- * abolished — so the four canonical vendors each need a definition that
- * declares their env chain. These declarations change nothing else: each
- * vendor's `baseProtocol` equals its protocol id and (Google GenAI aside, see
- * below) the trait list is empty, so adapter identity, hook composition, and
- * capability resolution are exactly as they were for an unregistered vendor.
- *
- * No `defaultBaseUrl` is declared: construction-time defaults stay where they
- * always were (inside the bases / their SDKs), matching the legacy env-only
- * fallback semantics precisely. Kimi's endpoint (with its
- * `api.moonshot.ai/v1` default) is declared by its own traits in
- * `providers/kimi/`, not here.
- *
- * Google GenAI is the one definition with non-empty traits: Vertex AI is a
- * `providerOptions` mode of the `google-genai` base rather than a vendor of
- * its own, and two one-line endpoint traits keep the legacy vertex chain
- * precedence — `VERTEXAI_API_KEY` / `GOOGLE_VERTEX_BASE_URL` first,
- * `GOOGLE_API_KEY` / `GOOGLE_GEMINI_BASE_URL` as fallback — while plain
- * Gemini users without the vertex envs see exactly the old behavior.
- *
- * Like every contrib, this module is imported for effect only — production
- * gets it from the `src/index.ts` side-effect block; tests import it on
- * demand.
+ * Google GenAI's endpoint traits preserve the Vertex-to-Gemini environment
+ * fallback order. No definition declares a default base URL; construction
+ * defaults remain owned by the protocol bases.
  */
 
+import { convertDeepSeekTool } from './deepseek/deepseek-schema';
 import { registerProviderDefinition } from '../providerDefinition';
 
 registerProviderDefinition({
   id: 'anthropic',
   baseProtocol: 'anthropic',
-  traits: [],
+  traits: [
+    {
+      convertTool: (tool, context) =>
+        /^deepseek(?:-|\/)/i.test(context.config.modelName)
+          ? convertDeepSeekTool(tool)
+          : undefined,
+    },
+  ],
   endpoint: { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
 });
 
