@@ -100,6 +100,13 @@ type ResponseOutputItemView =
     }
   | {
       type: 'other';
+      /**
+       * The wire `type` we did not recognize. Preserved so a dropped output
+       * item can be named in diagnostics instead of vanishing silently — the
+       * Responses API is extensible, so an unrecognized item means model
+       * output we failed to decode, not model output that does not exist.
+       */
+      rawType: string;
     };
 
 function asRawObject(value: unknown): RawObject | null {
@@ -198,7 +205,7 @@ function readResponseOutputItem(
     };
   }
 
-  return { type: 'other' };
+  return { type: 'other', rawType: type };
 }
 
 function responseStreamIndex(
@@ -673,6 +680,7 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   private _usage: TokenUsage | null = null;
   private _finishReason: FinishReason | null = null;
   private _rawFinishReason: string | null = null;
+  private readonly _droppedOutputItemTypes = new Set<string>();
   private readonly _iter: AsyncGenerator<StreamedMessagePart>;
 
   constructor(response: unknown, isStream: boolean) {
@@ -697,6 +705,11 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
 
   get rawFinishReason(): string | null {
     return this._rawFinishReason;
+  }
+
+  /** See {@link StreamedMessage.droppedOutputItemTypes}. */
+  get droppedOutputItemTypes(): readonly string[] {
+    return [...this._droppedOutputItemTypes];
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
@@ -779,6 +792,8 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           }
           yield thinkPart;
         }
+      } else {
+        this._droppedOutputItemTypes.add(outputItem.rawType);
       }
     }
   }
@@ -938,6 +953,13 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               yield* yieldFinalArgumentsSuffix(streamIndex, item.arguments, type);
+            } else if (item.type === 'other') {
+              // Text arrives via `response.output_text.delta`, so a `message`
+              // item needs nothing here. Anything else is an output item this
+              // decoder cannot turn into content: record the type so callers
+              // can report what was lost rather than reporting an empty model
+              // response.
+              this._droppedOutputItemTypes.add(item.rawType);
             }
             break;
           }

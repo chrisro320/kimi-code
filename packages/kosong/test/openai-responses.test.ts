@@ -1526,6 +1526,37 @@ describe('OpenAIResponsesChatProvider', () => {
       });
     });
 
+    it('records output item types it cannot decode instead of dropping them silently', async () => {
+      // The Responses API is extensible: an output item type this decoder does
+      // not know yields no part, so the response looks like the model emitted
+      // nothing but reasoning. Recording the type is what lets callers report
+      // the real cause instead of blaming the provider for an empty response.
+      const events = [
+        {
+          type: 'response.output_item.done',
+          item: { id: 'rs_1', type: 'reasoning', summary: [] },
+        },
+        {
+          type: 'response.output_item.done',
+          item: { id: 'shell_1', type: 'local_shell_call', call_id: 'call_1' },
+        },
+        {
+          type: 'response.completed',
+          response: { id: 'resp_drop', status: 'completed' },
+        },
+      ];
+
+      const stream = new OpenAIResponsesStreamedMessage(makeAsyncIterable(events), true);
+
+      const parts: StreamedMessagePart[] = [];
+      for await (const part of stream) {
+        parts.push(part);
+      }
+
+      expect(parts).toEqual([{ type: 'think', think: '' }]);
+      expect(stream.droppedOutputItemTypes).toEqual(['local_shell_call']);
+    });
+
     it('streams tool call with arguments delta', async () => {
       const events = [
         {

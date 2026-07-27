@@ -12,6 +12,7 @@ function createMockStream(
     usage?: TokenUsage;
     finishReason?: StreamedMessage['finishReason'];
     rawFinishReason?: string | null;
+    droppedOutputItemTypes?: readonly string[];
   },
 ): StreamedMessage {
   return {
@@ -23,6 +24,7 @@ function createMockStream(
     },
     finishReason: opts?.finishReason ?? null,
     rawFinishReason: opts?.rawFinishReason ?? null,
+    droppedOutputItemTypes: opts?.droppedOutputItemTypes ?? [],
     async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
       for (const part of parts) {
         yield part;
@@ -242,6 +244,29 @@ describe('generate()', () => {
     expect(err.message).toContain('finishReason=filtered');
     expect(err.message).toContain('rawFinishReason=content_filter');
     expect(err.message).toContain('provider filtered the response');
+  });
+
+  it('names undecodable output items on think-only APIEmptyResponseError', async () => {
+    // The provider decoded the response fine and reported a clean finish, but
+    // some of the output arrived in a shape this client cannot turn into
+    // content. Without naming it the message blames the provider for sending
+    // nothing, which points every investigation the wrong way.
+    const stream = createMockStream([{ type: 'think', think: 'Planning the edit...' }], {
+      finishReason: 'completed',
+      rawFinishReason: 'completed',
+      droppedOutputItemTypes: ['local_shell_call'],
+    });
+    const provider = createMockProvider(stream);
+
+    let caught: unknown;
+    try {
+      await generate(provider, '', [], []);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(APIEmptyResponseError);
+    expect((caught as Error).message).toContain('local_shell_call');
   });
 
   it('throws APIEmptyResponseError for think + empty/whitespace text', async () => {

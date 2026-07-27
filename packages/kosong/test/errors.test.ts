@@ -136,6 +136,19 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIConnectionError('conn'))).toBe(true);
     expect(isRetryableGenerateError(new APITimeoutError('timeout'))).toBe(true);
     expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'truncated' })),
+    ).toBe(true);
+  });
+
+  it('does not retry an empty response the provider reported as completed', () => {
+    // `completed` means the provider finished successfully and stands by the
+    // response: nothing was cut short, so emptiness is a property of this
+    // request. Retries resend a byte-identical body, so every attempt
+    // reproduces it and the whole budget burns before failing anyway.
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'completed' })),
+    ).toBe(false);
   });
 
   it.each([408, 409, 429, 500, 502, 503, 504, 529])('treats HTTP %i as retryable', (statusCode) => {

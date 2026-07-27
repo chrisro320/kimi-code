@@ -215,6 +215,7 @@ export async function generate(
   if (message.content.length === 0 && message.toolCalls.length === 0) {
     throw new APIEmptyResponseError(
       'The API returned an empty response (no content, no tool calls).' +
+        formatDroppedOutputItemsHint(stream) +
         formatFinishReasonHint(stream) +
         ` Provider: ${provider.name}, model: ${provider.modelName}`,
       {
@@ -235,6 +236,7 @@ export async function generate(
         'without any text or tool calls. This usually indicates the ' +
         'stream was interrupted or the output token budget was exhausted ' +
         'during reasoning.' +
+        formatDroppedOutputItemsHint(stream) +
         formatFinishReasonHint(stream) +
         ` Provider: ${provider.name}, model: ${provider.modelName}`,
       {
@@ -339,6 +341,22 @@ function flushPart(
     }
   }
   // ToolCallPart: orphaned delta — silently ignore.
+}
+
+/**
+ * Name the output items the provider decoder had to drop, if any. Without
+ * this the two failure messages above blame the provider for sending nothing
+ * when the real cause is on this side: the response carried output in a shape
+ * this decoder does not understand, so it never became message content.
+ */
+function formatDroppedOutputItemsHint(stream: StreamedMessage): string {
+  const dropped = stream.droppedOutputItemTypes;
+  if (dropped === undefined || dropped.length === 0) return '';
+
+  return (
+    ` The response also carried output items this client could not decode` +
+    ` (type: ${dropped.join(', ')}), so their content was dropped before this check.`
+  );
 }
 
 function formatFinishReasonHint(stream: StreamedMessage): string {
