@@ -844,6 +844,37 @@ describe('tool-result outbound compaction', () => {
     expect(compacted).toMatchObject({ role: 'tool', toolCallId: 'call_micro_1' });
   });
 
+  it('does not let an oversized provider measurement trigger compaction on its own', () => {
+    const ctx = testAgent({
+      experimentalFlags: compactingFlags(true),
+      microCompaction: { keepRecentMessages: 2, minContentTokens: 1, minContextUsageRatio: 0.5 },
+    });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: caps });
+    appendMicroToolExchange(ctx, 1, { output: 'one' });
+    appendMicroToolExchange(ctx, 2, { output: 'two' });
+
+    const canonical = ctx.agent.context.history;
+    expect(estimateTokensForMessages(canonical)).toBeLessThan(
+      caps.max_context_tokens * 0.5,
+    );
+
+    // `tokenCountWithPending` carries the provider's measurement of the PREVIOUS
+    // request, which may have been an uncompacted projection. Letting that number
+    // alone arm compaction closes a feedback loop with no hysteresis: it compacts,
+    // the next measurement comes back small, compaction switches off, the full
+    // history goes out, the measurement is large again, and the projection flips
+    // step after step — voiding the prompt cache from the first replaced tool
+    // result onward on every flip. Canonical history is the only stable input.
+    const measured = vi
+      .spyOn(ctx.agent.context, 'tokenCountWithPending', 'get')
+      .mockReturnValue(caps.max_context_tokens * 10);
+    try {
+      expect(toolTexts(ctx.agent.context.project(canonical))).not.toContain(MARKER);
+    } finally {
+      measured.mockRestore();
+    }
+  });
+
   it('does not compact a sliced suffix and reports only actual projection reduction once', () => {
     const records: TelemetryRecord[] = [];
     const ctx = testAgent({

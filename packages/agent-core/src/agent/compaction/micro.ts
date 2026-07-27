@@ -62,10 +62,14 @@ export class MicroCompaction {
 
     const maxContextTokens = this.agent.config.modelCapabilities.max_context_tokens;
     if (maxContextTokens <= 0) return messages;
-    // Provider usage can describe a previously compacted projection. Canonical
-    // history remains raw, so never let that smaller number turn compaction off.
-    const estimatedCanonicalTokens = estimateTokensForMessages(canonicalHistory);
-    const contextTokens = Math.max(this.agent.context.tokenCountWithPending, estimatedCanonicalTokens);
+    // Judge from canonical history alone. Provider-measured usage describes the
+    // previously compacted projection, so feeding it back here closes a loop with
+    // no hysteresis: a compacted step measures small, which turns compaction off,
+    // which measures large, which turns it back on. The old Math.max guard was
+    // meant to stop that, but the estimator undercounts, so on alternating steps
+    // the max still fell back to the stale small measurement. Every flip voids
+    // the prompt cache from the first replaced tool result onward.
+    const contextTokens = estimateTokensForMessages(canonicalHistory);
     const contextUsageRatio = contextTokens / maxContextTokens;
     if (contextUsageRatio < this.config.minContextUsageRatio) return messages;
 
