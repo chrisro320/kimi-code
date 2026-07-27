@@ -225,7 +225,7 @@ function formatHitRatio(value: number | null | undefined): string {
 }
 
 /** Statusline TTL countdown window (ms) — resets on each assistant reply. */
-const STATUSLINE_TTL_MS = 300_000;
+const STATUSLINE_TTL_MS = 1_800_000;
 
 /**
  * Idle estimate of when the prompt cache goes cold. The window resets on each
