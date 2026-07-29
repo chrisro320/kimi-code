@@ -2791,6 +2791,32 @@ describe('remote compaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({ source: 'manual', implementation: 'remote' }),
     });
+    // The checkpoint is persisted with the record, so a resumed session
+    // rebuilds the exact same folded context.
+    await ctx.expectResumeMatches();
+  });
+
+  it('falls back to a readable summary when the endpoint returns no text', async () => {
+    const ctx = testAgent();
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    const { text: _dropped, ...textless } = CHECKPOINT;
+    stubCompactConversation(ctx, () =>
+      Promise.resolve({
+        messages: [{ role: 'assistant', content: [textless], toolCalls: [] }],
+        usage: null,
+      }),
+    );
+
+    const applied = new Promise<string>((resolve) => {
+      ctx.emitter.once('context.apply_compaction', (entry: { args: { summary: string } }) => {
+        resolve(entry.args.summary);
+      });
+    });
+    await ctx.rpc.beginCompaction({});
+
+    expect(await applied).toContain('compacted by the model provider');
   });
 
   it('leaves compaction untouched when the model did not opt in', async () => {

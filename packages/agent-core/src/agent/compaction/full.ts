@@ -61,6 +61,11 @@ const DEFAULT_COMPACTION_MAX_COMPLETION_TOKENS = 128 * 1024;
 const OVERFLOW_CONTEXT_SAFETY_RATIO = 0.85;
 const OVERFLOW_STATUS_RECOVERY_RATIO = 0.5;
 
+/** Stand-in summary when a compaction endpoint returns no readable text. */
+const REMOTE_CHECKPOINT_SUMMARY_FALLBACK =
+  'The conversation so far was compacted by the model provider. The details are ' +
+  'preserved in a provider-side checkpoint rather than in text.';
+
 class CompactionTruncatedError extends Error {
   constructor() {
     super('Compaction response was truncated before producing a complete summary.');
@@ -464,7 +469,10 @@ export class FullCompaction {
       if (remote !== undefined) {
         checkpoint = remote.checkpoint;
         usage = remote.usage;
-        summary = checkpoint.text ?? '';
+        // The endpoint normally returns a readable summary alongside the
+        // opaque item. When it does not, records and the transcript would
+        // otherwise show an empty fold marker.
+        summary = checkpoint.text ?? REMOTE_CHECKPOINT_SUMMARY_FALLBACK;
       }
       // Skipped entirely when the remote pass already produced a summary.
       while (summary === undefined) {
