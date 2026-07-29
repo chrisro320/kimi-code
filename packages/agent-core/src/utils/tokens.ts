@@ -110,6 +110,13 @@ export function estimateTokensForContentPart(part: ContentPart): number {
     case 'audio_url':
     case 'video_url':
       return MEDIA_TOKEN_ESTIMATE;
+    case 'compaction':
+      // A checkpoint's rendered cost is provider-side state, unrelated to the
+      // opaque payload's length. The real figure arrives with the next
+      // round-trip's usage; until then bill the recorded compact usage, and
+      // fall back to the media estimate when it is missing so a checkpoint is
+      // never counted as free.
+      return part.replayTokens ?? MEDIA_TOKEN_ESTIMATE;
     default: {
       // Exhaustiveness guard: a new ContentPart kind must declare its estimate
       // here rather than silently counting as 0 (the CMP-03 defect).

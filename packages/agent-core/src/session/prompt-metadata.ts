@@ -54,6 +54,9 @@ function promptPartText(part: ContentPart): string | undefined {
       return '[video]';
     case 'think':
       return undefined;
+    case 'compaction':
+      // Machine-generated checkpoint, never something the user typed.
+      return undefined;
   }
 }
 

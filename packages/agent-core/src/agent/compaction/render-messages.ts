@@ -45,6 +45,11 @@ function renderContentPartToText(part: Message['content'][number]): string {
       return renderMediaPart('audio_url', part.audioUrl.url, part.audioUrl.id);
     case 'video_url':
       return renderMediaPart('video_url', part.videoUrl.url, part.videoUrl.id);
+    case 'compaction':
+      // Render only the readable summary. The checkpoint payload is opaque
+      // provider state: dumping it here would push a large encrypted blob
+      // straight into the summarizer prompt.
+      return renderBlock('compaction', part.text ?? '[compacted context checkpoint]');
     default:
       return renderBlock('content', stringifyJsonish(part));
   }

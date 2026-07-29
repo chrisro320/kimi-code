@@ -278,6 +278,10 @@ function messageToGoogleGenAI(message: Message): GoogleContent {
       case 'video_url':
         parts.push(convertMediaUrl(part.videoUrl.url, 'video/mp4'));
         break;
+      case 'compaction':
+        // Opaque OpenAI Responses checkpoint state — not replayable here, and
+        // must not be routed into `thoughtSignature`. Drop it.
+        break;
     }
   }
 
@@ -355,6 +359,9 @@ function toolMessageToFunctionResponseParts(
         break;
       case 'think':
         // Skip — handled separately via reasoning channel.
+        break;
+      case 'compaction':
+        // Opaque OpenAI Responses checkpoint state — not replayable here.
         break;
     }
   }

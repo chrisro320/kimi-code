@@ -38,6 +38,11 @@ export function convertContentPart(part: ContentPart): OpenAIContentPart | null 
     case 'think':
       // Think parts are handled separately as reasoning_content — skip them here.
       return null;
+    case 'compaction':
+      // A remote compaction checkpoint is opaque state owned by the Responses
+      // endpoint that produced it. Chat-Completions-shaped providers cannot
+      // replay it, so it is dropped rather than serialized as garbage content.
+      return null;
     case 'image_url':
       return {
         type: 'image_url',

@@ -1970,3 +1970,33 @@ describe('messagesToGoogleGenAIContents - extra branches', () => {
     });
   });
 });
+
+describe('remote compaction checkpoints', () => {
+  it('drops a foreign checkpoint instead of sending it as a thoughtSignature', async () => {
+    const provider = createProvider();
+    const history: Message[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+              type: 'compaction',
+              encrypted: 'openai-checkpoint-payload',
+              itemType: 'compaction_summary',
+              lineage: {
+                provider: 'openai-responses',
+                model: 'gpt-5.6-sol',
+                baseUrl: 'http://localhost:43565/v1',
+              },
+            },
+        ],
+        toolCalls: [],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'next turn' }], toolCalls: [] },
+    ];
+
+    const body = await captureRequestBody(provider, '', [], history);
+
+    expect(JSON.stringify(body)).not.toContain('openai-checkpoint-payload');
+    expect(JSON.stringify(body)).not.toContain('thoughtSignature');
+  });
+});
