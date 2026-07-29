@@ -467,13 +467,15 @@ export class FullCompaction {
       const remote = await this.tryRemoteCompaction(signal, historyForModel, data);
       if (remote !== undefined) {
         checkpoint = remote.checkpoint;
-        usage = remote.usage;
-        // The endpoint normally returns a readable summary alongside the
-        // opaque item. When it does not, records and the transcript would
-        // otherwise show an empty fold marker.
-        summary = checkpoint.text ?? REMOTE_CHECKPOINT_SUMMARY_FALLBACK;
+        if (remote.usage !== null) {
+          this.agent.usage.record(model, remote.usage);
+        }
       }
-      // Skipped entirely when the remote pass already produced a summary.
+      // The summarizer runs either way. On the remote path its output is not
+      // what the model reads — the checkpoint is — but it is the only portable
+      // record of the fold: the endpoint returns no prose, so without this
+      // there would be nothing to show the user, and nothing to fall back on
+      // when the checkpoint reaches a model that cannot replay it.
       while (summary === undefined) {
         // A request-building projection: close still-open calls in the sliced
         // prefix (synthesizeMissing) and drop stray results with no call anywhere
@@ -624,6 +626,14 @@ export class FullCompaction {
 
       const rawSummary = this.postProcessSummary(summary ?? '');
       const contextSummary = buildCompactionSummaryText(rawSummary);
+      if (checkpoint !== undefined) {
+        // Carry the portable summary on the checkpoint so a provider that
+        // cannot replay it still has something faithful to show and to send.
+        checkpoint = {
+          ...checkpoint,
+          text: rawSummary.length > 0 ? rawSummary : REMOTE_CHECKPOINT_SUMMARY_FALLBACK,
+        };
+      }
       const result = this.agent.context.applyCompaction({
         summary: rawSummary,
         contextSummary,

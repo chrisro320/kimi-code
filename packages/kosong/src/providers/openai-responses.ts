@@ -1137,6 +1137,12 @@ function compactionMessageText(content: RawObject[]): string {
  * Dropped: `developer`/`system` prefixes (the caller re-sends its own
  * instructions), and reasoning / tool traffic, which the endpoint has already
  * folded into the checkpoint.
+ *
+ * The endpoint returns no prose summary: its message items are the retained
+ * turns echoed back verbatim, and the checkpoint item carries only
+ * `encrypted_content`. So no readable text is attached to the checkpoint here —
+ * treating an echoed turn as a summary would misreport it to the user and, worse,
+ * would stand in for the whole folded history when the checkpoint is degraded.
  */
 function compactionOutputToMessages(
   response: RawObject,
@@ -1145,7 +1151,6 @@ function compactionOutputToMessages(
 ): Message[] {
   const output = readObjectArrayField(response, 'output') ?? [];
   const messages: Message[] = [];
-  let checkpointText: string | undefined;
 
   for (const [index, value] of output.entries()) {
     const item = readResponseOutputItem(value, `response.output[${String(index)}]`);
@@ -1154,7 +1159,6 @@ function compactionOutputToMessages(
       if (role !== 'user' && role !== 'assistant') continue;
       const text = compactionMessageText(item.content);
       if (text.length === 0) continue;
-      checkpointText = text;
       messages.push({ role, content: [{ type: 'text', text }], toolCalls: [] });
       continue;
     }
@@ -1167,7 +1171,6 @@ function compactionOutputToMessages(
         lineage,
       };
       if (item.itemId !== undefined) part.itemId = item.itemId;
-      if (checkpointText !== undefined) part.text = checkpointText;
       // The opaque payload's own replay cost is unknowable locally; bill it
       // with what the compaction pass produced until a real round-trip
       // reports the measured figure.

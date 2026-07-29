@@ -2774,17 +2774,22 @@ describe('remote compaction', () => {
       }),
     );
 
+    ctx.mockNextResponse({ type: 'text', text: 'Portable summary.' });
     await runManualCompaction(ctx);
 
     expect(spy).toHaveBeenCalledTimes(1);
-    // No summarizer round-trip: the endpoint replaced it.
-    expect(ctx.llmCalls).toHaveLength(0);
+    // The summarizer still runs: its output is the portable record of the fold.
+    expect(ctx.llmCalls).toHaveLength(1);
 
     const history = ctx.agent.context.history;
     const fold = history.at(-1)!;
     expect(fold.origin).toEqual({ kind: 'compaction_summary' });
-    expect(fold.content).toEqual([CHECKPOINT]);
-    // The readable summary rides along for display; the payload never becomes text.
+    const part = fold.content[0]!;
+    expect(part.type).toBe('compaction');
+    expect((part as CompactionPart).encrypted).toBe(CHECKPOINT.encrypted);
+    // The portable summary rides along for display and for degradation.
+    expect((part as CompactionPart).text).toContain('Portable summary.');
+    // The opaque payload never becomes readable text.
     expect(ctx.compactHistory().at(-1)?.text).toBe('');
 
     expect(records).toContainEqual({
@@ -2796,11 +2801,13 @@ describe('remote compaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('falls back to a readable summary when the endpoint returns no text', async () => {
+  it('records the portable summary even though the endpoint returns none', async () => {
     const ctx = testAgent();
     ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
     ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
 
+    // The real endpoint answers with the retained turns plus an opaque item and
+    // no prose, so the checkpoint arrives without text.
     const { text: _dropped, ...textless } = CHECKPOINT;
     stubCompactConversation(ctx, () =>
       Promise.resolve({
@@ -2814,9 +2821,13 @@ describe('remote compaction', () => {
         resolve(entry.args.summary);
       });
     });
+    ctx.mockNextResponse({ type: 'text', text: 'Portable summary.' });
     await ctx.rpc.beginCompaction({});
 
-    expect(await applied).toContain('compacted by the model provider');
+    expect(await applied).toContain('Portable summary.');
+    const part = ctx.agent.context.history.at(-1)!.content[0] as CompactionPart;
+    expect(part.type).toBe('compaction');
+    expect(part.text).toContain('Portable summary.');
   });
 
   it('leaves compaction untouched when the model did not opt in', async () => {

@@ -2314,6 +2314,11 @@ describe('OpenAI Responses remote compaction', () => {
       });
       // Replay cost cannot be derived from the payload; it comes from usage.
       expect(checkpoint.replayTokens).toBe(97);
+      // The endpoint returns no prose summary — its message items are the
+      // retained turns echoed back. Attaching one as `text` would misreport it
+      // as a summary and, once the checkpoint is degraded, would stand in for
+      // the entire folded history.
+      expect(checkpoint.text).toBeUndefined();
     },
   );
 
