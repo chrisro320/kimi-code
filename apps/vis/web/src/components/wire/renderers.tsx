@@ -42,6 +42,35 @@ export interface WireRenderer<K extends RecordType> {
  *  over the full `RecordType` union, so TypeScript forces an entry per kind. */
 type RendererMap = { [K in RecordType]: WireRenderer<K> };
 
+/** Terminal / durable-state string -> severity tone. Shared by the Agora,
+ *  reference-audit, and asset-pipeline records below, which all carry a
+ *  small closed set of outcome strings rather than a boolean. */
+function stateTone(state: string | undefined): PillTone {
+  switch (state) {
+    case undefined:
+      return 'neutral';
+    case 'completed':
+    case 'confirmed':
+    case 'complete':
+    case 'approved':
+      return 'success';
+    case 'skipped':
+    case 'consumed':
+    case 'not-required':
+      return 'neutral';
+    case 'fallback_required':
+    case 'aborted':
+    case 'blocked':
+    case 'audit-risk-accepted':
+    case 'unavailable':
+      return 'warning';
+    case 'failed':
+      return 'error';
+    default:
+      return 'info';
+  }
+}
+
 export const WIRE_RENDERERS: RendererMap = {
   metadata: {
     tone: 'meta',
@@ -559,6 +588,21 @@ export const WIRE_RENDERERS: RendererMap = {
     headline: () => ({ main: <Dim>swarm mode exited</Dim> }),
   },
 
+  'dispatch_mode.set': {
+    tone: 'config',
+    label: 'dispatch',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2">
+          <Pill tone={r.mode === 'off' ? 'warning' : 'config'} variant="soft">
+            {r.mode}
+          </Pill>
+          <Dim>subagent dispatch mode</Dim>
+        </span>
+      ),
+    }),
+  },
+
   'goal.create': {
     tone: 'lifecycle',
     label: 'goal+',
@@ -744,6 +788,404 @@ export const WIRE_RENDERERS: RendererMap = {
           <Mono>#{r.hash.slice(0, 8)}</Mono>
         ),
     }),
+  },
+
+  // Agora / reference-audit / asset-pipeline records. The first two are durable
+  // authorization state (replayed); the `*.run` ones are observability only.
+
+  'agora.lifecycle': {
+    tone: 'lifecycle',
+    label: 'agora↻',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone={stateTone(r.terminalState)} variant="soft">
+            {r.phase}
+          </Pill>
+          <Mono>{r.runId.slice(0, 8)}</Mono>
+          {r.insertedTask !== undefined ? <Dim className="truncate">{r.insertedTask}</Dim> : null}
+        </span>
+      ),
+      right: r.terminalState !== undefined ? <Mono>{r.terminalState}</Mono> : undefined,
+    }),
+    detail: (r) => (
+      <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+        <FieldRow label="runId">
+          <Mono>{r.runId}</Mono>
+        </FieldRow>
+        <FieldRow label="transitionId">
+          <Mono>{r.transitionId}</Mono>
+        </FieldRow>
+        <FieldRow label="phase">
+          <Mono>{r.phase}</Mono>
+        </FieldRow>
+        <FieldRow label="sourceSessionId">
+          <Mono>{r.sourceSessionId}</Mono>
+        </FieldRow>
+        <FieldRow label="capabilityEpoch">
+          <Mono>{r.capabilityEpoch}</Mono>
+        </FieldRow>
+        <FieldRow label="capabilityHash" wide>
+          <Mono className="break-all">{r.capabilityHash}</Mono>
+        </FieldRow>
+        {r.envelopeRevision !== undefined ? (
+          <FieldRow label="envelopeRevision">
+            <span className="text-[var(--color-sev-info)]">{r.envelopeRevision}</span>
+          </FieldRow>
+        ) : null}
+        {r.originTask !== undefined ? (
+          <FieldRow label="originTask" wide>
+            <Mono className="break-all">{r.originTask}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.insertedTask !== undefined ? (
+          <FieldRow label="insertedTask" wide>
+            <Mono className="break-all">{r.insertedTask}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.targetTask !== undefined ? (
+          <FieldRow label="targetTask" wide>
+            <Mono className="break-all">{r.targetTask}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.materializationTransitionId !== undefined ? (
+          <FieldRow label="materialization" wide>
+            <Mono className="break-all">{r.materializationTransitionId}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.materializationHandoffPath !== undefined ? (
+          <FieldRow label="handoffPath" wide>
+            <Mono className="break-all">{r.materializationHandoffPath}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.materializationDigest !== undefined ? (
+          <FieldRow label="digest" wide>
+            <Mono className="break-all">{r.materializationDigest}</Mono>
+          </FieldRow>
+        ) : null}
+      </div>
+    ),
+  },
+
+  'agora.materialization_confirmation': {
+    tone: 'approval',
+    label: 'agora✓',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone={stateTone(r.state)} variant="soft">
+            {r.state}
+          </Pill>
+          <Mono>{r.runId.slice(0, 8)}</Mono>
+          <Dim>
+            by {r.confirmedBy} · proposal rev {r.proposalRevision}
+          </Dim>
+        </span>
+      ),
+      right: <Mono>#{r.proposalHash.slice(0, 8)}</Mono>,
+    }),
+    detail: (r) => (
+      <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+        <FieldRow label="runId">
+          <Mono>{r.runId}</Mono>
+        </FieldRow>
+        <FieldRow label="sourceSessionId">
+          <Mono>{r.sourceSessionId}</Mono>
+        </FieldRow>
+        <FieldRow label="lifecycleEpoch">
+          <Mono>{r.lifecycleEpoch}</Mono>
+        </FieldRow>
+        <FieldRow label="proposalRevision">
+          <span className="text-[var(--color-sev-info)]">{r.proposalRevision}</span>
+        </FieldRow>
+        <FieldRow label="runPacketRevision">
+          <span className="text-[var(--color-sev-info)]">{r.runPacketRevision}</span>
+        </FieldRow>
+        <FieldRow label="proposalHash" wide>
+          <Mono className="break-all">{r.proposalHash}</Mono>
+        </FieldRow>
+        {r.consumedBy !== undefined ? (
+          <FieldRow label="consumedBy" wide>
+            <Mono className="break-all">{r.consumedBy}</Mono>
+          </FieldRow>
+        ) : null}
+      </div>
+    ),
+  },
+
+  'agora.run': {
+    tone: 'subagent',
+    label: 'agora',
+    headline: (r) => {
+      const done = r.peers.filter((peer) => peer.status === 'completed').length;
+      return {
+        main: (
+          <span className="flex items-center gap-2 min-w-0">
+            <Pill tone={stateTone(r.terminalState)} variant="soft">
+              {r.phase}
+            </Pill>
+            <Mono>{r.runId.slice(0, 8)}</Mono>
+            <Dim className="truncate">
+              {done}/{r.peers.length} peers · rev {r.packetRevision} · {r.hostRoute}
+              {r.routeUpgrade === 'none' ? '' : ` · ${r.routeUpgrade}`}
+            </Dim>
+          </span>
+        ),
+        right: r.terminalState !== undefined ? <Mono>{r.terminalState}</Mono> : undefined,
+      };
+    },
+    detail: (r) => (
+      <div className="flex flex-col gap-2">
+        <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+          <FieldRow label="runId">
+            <Mono>{r.runId}</Mono>
+          </FieldRow>
+          <FieldRow label="necessity">
+            <span className="flex items-center gap-2">
+              <Mono>{r.necessity.outcome}</Mono>
+              {r.necessity.forcedByUser ? (
+                <Pill tone="warning" variant="soft">
+                  forced
+                </Pill>
+              ) : null}
+            </span>
+          </FieldRow>
+          <FieldRow label="explanation" wide>
+            <span className="text-fg-1">{r.necessity.explanation}</span>
+          </FieldRow>
+          {r.referenceAuditGate !== undefined ? (
+            <FieldRow label="auditGate" wide>
+              <span className="flex items-center gap-2 min-w-0">
+                <Pill tone={stateTone(r.referenceAuditGate.state)} variant="soft">
+                  {r.referenceAuditGate.state}
+                </Pill>
+                <Dim className="truncate">{r.referenceAuditGate.reason}</Dim>
+              </span>
+            </FieldRow>
+          ) : null}
+          {r.insertedTask !== undefined ? (
+            <FieldRow label="insertedTask" wide>
+              <Mono className="break-all">{r.insertedTask}</Mono>
+            </FieldRow>
+          ) : null}
+          {r.hostRecoveryResult !== undefined ? (
+            <FieldRow label="hostRecovery" wide>
+              <span className="text-fg-1">{r.hostRecoveryResult}</span>
+            </FieldRow>
+          ) : null}
+        </div>
+        {r.peers.length > 0 ? (
+          <div className="flex flex-col gap-[2px]">
+            {r.peers.map((peer) => (
+              <div key={peer.peer} className="flex items-center gap-2 min-w-0">
+                <Pill tone={stateTone(peer.status)} variant="soft">
+                  {peer.status}
+                </Pill>
+                <Mono>{peer.peer}</Mono>
+                <Dim className="truncate">
+                  {peer.model ?? peer.backend ?? '(unrouted)'}
+                  {peer.repairCount > 0 ? ` · ${peer.repairCount} repair` : ''}
+                  {peer.error !== undefined ? ` · ${truncate(peer.error, 80)}` : ''}
+                </Dim>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <JsonViewer value={r.packet} defaultOpenDepth={1} />
+      </div>
+    ),
+  },
+
+  'agora.override': {
+    tone: 'warning',
+    label: 'agora!',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone="warning" variant="soft">
+            {r.kind}
+          </Pill>
+          <Mono>{r.operationId}</Mono>
+          <Dim>{r.state}</Dim>
+        </span>
+      ),
+      right: <Mono>#{r.envelopeHash.slice(0, 8)}</Mono>,
+    }),
+  },
+
+  'reference_audit.state': {
+    tone: 'config',
+    label: 'ref·state',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone={r.material ? 'info' : 'neutral'} variant="soft">
+            {r.material ? 'material' : 'immaterial'}
+          </Pill>
+          <Dim>
+            {r.references.length} reference{r.references.length === 1 ? '' : 's'}
+          </Dim>
+        </span>
+      ),
+      right: r.referenceHash !== undefined ? <Mono>#{r.referenceHash.slice(0, 8)}</Mono> : undefined,
+    }),
+    detail: (r) => <JsonViewer value={r.references} defaultOpenDepth={2} />,
+  },
+
+  'reference_audit.override': {
+    tone: 'warning',
+    label: 'ref!',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone={stateTone(r.state)} variant="soft">
+            {r.state}
+          </Pill>
+          <Mono>{r.purpose}</Mono>
+          <Dim className="truncate">{r.reason}</Dim>
+        </span>
+      ),
+      right: <Mono>#{r.overrideHash.slice(0, 8)}</Mono>,
+    }),
+    detail: (r) => (
+      <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+        <FieldRow label="operationId">
+          <Mono>{r.operationId}</Mono>
+        </FieldRow>
+        <FieldRow label="referenceHash" wide>
+          <Mono className="break-all">{r.referenceHash}</Mono>
+        </FieldRow>
+        {r.auditRunId !== undefined ? (
+          <FieldRow label="auditRunId">
+            <Mono>{r.auditRunId}</Mono>
+          </FieldRow>
+        ) : null}
+        {r.consumedBy !== undefined ? (
+          <FieldRow label="consumedBy" wide>
+            <Mono className="break-all">{r.consumedBy}</Mono>
+          </FieldRow>
+        ) : null}
+      </div>
+    ),
+  },
+
+  'reference_audit.run': {
+    tone: 'meta',
+    label: 'ref·audit',
+    headline: (r) => {
+      const parts: string[] = [];
+      if (r.intensity !== undefined) parts.push(r.intensity);
+      parts.push(`${r.tracks.length} track${r.tracks.length === 1 ? '' : 's'}`);
+      if (r.claimCount !== undefined) parts.push(`${r.claimCount} claims`);
+      if (r.contradictionCount !== undefined && r.contradictionCount > 0) {
+        parts.push(`${r.contradictionCount} contradictions`);
+      }
+      return {
+        main: (
+          <span className="flex items-center gap-2 min-w-0">
+            <Pill tone={stateTone(r.terminalState)} variant="soft">
+              {r.terminalState}
+            </Pill>
+            <Mono>{r.runId.slice(0, 8)}</Mono>
+            <Dim className="truncate">
+              {r.triggered ? parts.join(' · ') : `not triggered${r.reason === undefined ? '' : ` · ${r.reason}`}`}
+            </Dim>
+          </span>
+        ),
+        right:
+          r.error !== undefined ? (
+            <Pill tone="error" variant="soft">
+              error
+            </Pill>
+          ) : undefined,
+      };
+    },
+    detail: (r) => (
+      <div className="flex flex-col gap-2">
+        <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+          <FieldRow label="runId">
+            <Mono>{r.runId}</Mono>
+          </FieldRow>
+          {r.referenceHash !== undefined ? (
+            <FieldRow label="referenceHash" wide>
+              <Mono className="break-all">{r.referenceHash}</Mono>
+            </FieldRow>
+          ) : null}
+          {r.unknownCount !== undefined ? (
+            <FieldRow label="unknownCount">
+              <span className="text-[var(--color-sev-info)]">{r.unknownCount}</span>
+            </FieldRow>
+          ) : null}
+          {r.licenseNoteCount !== undefined ? (
+            <FieldRow label="licenseNotes">
+              <span className="text-[var(--color-sev-info)]">{r.licenseNoteCount}</span>
+            </FieldRow>
+          ) : null}
+          {r.error !== undefined ? (
+            <FieldRow label="error" wide>
+              <span className="text-[var(--color-sev-error)]">{r.error}</span>
+            </FieldRow>
+          ) : null}
+        </div>
+        {r.tracks.length > 0 ? (
+          <div className="flex flex-col gap-[2px]">
+            {r.tracks.map((track) => (
+              <div key={track.trackId} className="flex items-center gap-2 min-w-0">
+                <Pill tone={stateTone(track.status)} variant="soft">
+                  {track.status}
+                </Pill>
+                <Mono>{track.workflowRole}</Mono>
+                <Dim className="truncate">
+                  {track.trackId}
+                  {track.repairCount > 0 ? ' · repaired' : ''}
+                  {track.reason === undefined ? '' : ` · ${track.reason}`}
+                </Dim>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {r.result !== undefined ? <JsonViewer value={r.result} defaultOpenDepth={1} /> : null}
+      </div>
+    ),
+  },
+
+  'asset_pipeline.run': {
+    tone: 'tools',
+    label: 'assets',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Pill tone={stateTone(r.terminalState)} variant="soft">
+            {r.action}
+          </Pill>
+          <Mono>{r.runId.slice(0, 8)}</Mono>
+          <Dim className="truncate">
+            {r.bom.length} bom · {r.candidates.length} candidate
+            {r.candidates.length === 1 ? '' : 's'} · {r.terminalState}
+          </Dim>
+        </span>
+      ),
+      right:
+        r.error !== undefined ? (
+          <Pill tone="error" variant="soft">
+            error
+          </Pill>
+        ) : undefined,
+    }),
+    detail: (r) => (
+      <div className="flex flex-col gap-2">
+        {r.error !== undefined ? (
+          <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-[2px]">
+            <FieldRow label="error" wide>
+              <span className="text-[var(--color-sev-error)]">{r.error}</span>
+            </FieldRow>
+          </div>
+        ) : null}
+        {r.bom.length > 0 ? <JsonViewer value={r.bom} defaultOpenDepth={1} /> : null}
+        {r.candidates.length > 0 ? <JsonViewer value={r.candidates} defaultOpenDepth={1} /> : null}
+        {r.execution !== undefined ? <JsonViewer value={r.execution} defaultOpenDepth={1} /> : null}
+      </div>
+    ),
   },
 };
 

@@ -16,7 +16,9 @@ interface TasksTabProps {
 
 const STATUS_TONE: Record<BackgroundTaskStatus, PillTone> = {
   running: 'info',
+  input_required: 'approval',
   completed: 'success',
+  expansion_denied: 'warning',
   failed: 'error',
   timed_out: 'warning',
   killed: 'warning',
