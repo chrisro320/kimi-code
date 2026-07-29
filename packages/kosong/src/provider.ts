@@ -282,4 +282,32 @@ export interface ChatProvider {
   ): ChatProvider;
   /** Upload a video and return a content part that can be sent to this provider. */
   uploadVideo?(input: string | VideoUploadInput, options?: GenerateOptions): Promise<VideoURLPart>;
+  /**
+   * Compact `history` provider-side and return the replacement history.
+   *
+   * Optional: only backends exposing a compaction endpoint implement it, and
+   * callers must additionally gate on the model's `remote_compaction`
+   * capability — the returned checkpoint is opaque state replayable solely
+   * against the endpoint and model that produced it.
+   *
+   * Implementations return a history that can be installed as-is; the caller
+   * is responsible for falling back to local summarization when this throws.
+   */
+  compactConversation?(
+    systemPrompt: string,
+    tools: Tool[],
+    history: Message[],
+    options?: GenerateOptions,
+  ): Promise<RemoteCompactionResult>;
+}
+
+/** Outcome of {@link ChatProvider.compactConversation}. */
+export interface RemoteCompactionResult {
+  /**
+   * Replacement history produced by the provider: the retained messages
+   * followed by the checkpoint that stands in for everything else.
+   */
+  readonly messages: Message[];
+  /** Usage billed by the compaction pass itself, or `null` if unreported. */
+  readonly usage: TokenUsage | null;
 }

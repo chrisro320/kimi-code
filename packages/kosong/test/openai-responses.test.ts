@@ -5,7 +5,13 @@ import {
   ChatProviderError,
 } from '#/errors';
 import { generate } from '#/generate';
-import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
+import type {
+  CompactionPart,
+  ContentPart,
+  Message,
+  StreamedMessagePart,
+  ToolCall,
+} from '#/message';
 import {
   OpenAIResponsesChatProvider,
   OpenAIResponsesStreamedMessage,
@@ -2187,3 +2193,192 @@ function makeAsyncIterable(
     },
   };
 }
+
+const COMPACTION_ENCRYPTED = 'gAAAAABo-checkpoint-payload-äø✓-0123456789';
+
+function createCompactionProvider(): OpenAIResponsesChatProvider {
+  return new OpenAIResponsesChatProvider({
+    model: 'gpt-5.6-sol',
+    apiKey: 'test-key',
+    baseUrl: 'http://localhost:43565/v1',
+  });
+}
+
+/** A `/responses/compact` response in the requested checkpoint dialect. */
+function makeCompactResponse(checkpointType: 'compaction' | 'compaction_summary') {
+  return {
+    id: 'cmp_test',
+    object: 'response.compaction',
+    created_at: 1234567890,
+    output: [
+      {
+        type: 'message',
+        id: 'msg_dev',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'stale instructions' }],
+      },
+      {
+        type: 'message',
+        id: 'msg_user',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'keep me' }],
+      },
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'reasoning-blob', summary: [] },
+      { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'ls', arguments: '{}' },
+      { type: checkpointType, id: 'cpt_1', encrypted_content: COMPACTION_ENCRYPTED },
+    ],
+    usage: {
+      input_tokens: 6338,
+      output_tokens: 97,
+      total_tokens: 6435,
+      input_tokens_details: { cached_tokens: 338 },
+    },
+  };
+}
+
+async function runCompact(
+  provider: OpenAIResponsesChatProvider,
+  checkpointType: 'compaction' | 'compaction_summary',
+  history: Message[],
+): Promise<{ result: Awaited<ReturnType<typeof provider.compactConversation>>; body: Record<string, unknown> }> {
+  let capturedBody: Record<string, unknown> | undefined;
+  ((provider as any)._client.responses as unknown as Record<string, unknown>)['compact'] = vi
+    .fn()
+    .mockImplementation((params: unknown) => {
+      capturedBody = params as Record<string, unknown>;
+      return Promise.resolve(makeCompactResponse(checkpointType));
+    });
+
+  const result = await provider.compactConversation('system prompt', [], history);
+  if (capturedBody === undefined) {
+    throw new Error('Expected compactConversation() to call responses.compact');
+  }
+  return { result, body: capturedBody };
+}
+
+/** Capture the request body of a normal `generate()` call. */
+async function captureGenerateBody(
+  provider: OpenAIResponsesChatProvider,
+  history: Message[],
+): Promise<Record<string, unknown>> {
+  let capturedBody: Record<string, unknown> | undefined;
+  (provider as any)._stream = false;
+  ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = vi
+    .fn()
+    .mockImplementation((params: unknown) => {
+      capturedBody = params as Record<string, unknown>;
+      return Promise.resolve({
+        id: 'resp_1',
+        object: 'response',
+        status: 'completed',
+        model: 'gpt-5.6-sol',
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      });
+    });
+
+  const stream = await provider.generate('system prompt', [] as Tool[], history);
+  for await (const part of stream) {
+    void part;
+  }
+  if (capturedBody === undefined) {
+    throw new Error('Expected generate() to call responses.create');
+  }
+  return capturedBody;
+}
+
+const HISTORY: Message[] = [
+  { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [] },
+  { role: 'assistant', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
+];
+
+describe('OpenAI Responses remote compaction', () => {
+  it.each(['compaction', 'compaction_summary'] as const)(
+    'decodes the %s dialect into one CompactionPart',
+    async (checkpointType) => {
+      const { result } = await runCompact(createCompactionProvider(), checkpointType, HISTORY);
+
+      const parts = result.messages.flatMap((message) => message.content);
+      const checkpoints = parts.filter((part): part is CompactionPart => part.type === 'compaction');
+      expect(checkpoints).toHaveLength(1);
+
+      const checkpoint = checkpoints[0]!;
+      expect(checkpoint.encrypted).toBe(COMPACTION_ENCRYPTED);
+      // The dialect is remembered so replay echoes back what the endpoint sent.
+      expect(checkpoint.itemType).toBe(checkpointType);
+      expect(checkpoint.itemId).toBe('cpt_1');
+      expect(checkpoint.lineage).toEqual({
+        provider: 'openai-responses',
+        model: 'gpt-5.6-sol',
+        baseUrl: 'http://localhost:43565/v1',
+      });
+      // Replay cost cannot be derived from the payload; it comes from usage.
+      expect(checkpoint.replayTokens).toBe(97);
+    },
+  );
+
+  it('keeps user/assistant messages and drops developer, reasoning and tool items', async () => {
+    const { result } = await runCompact(createCompactionProvider(), 'compaction_summary', HISTORY);
+
+    expect(result.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    const texts = result.messages.flatMap((m) =>
+      m.content.filter((p) => p.type === 'text').map((p) => (p as { text: string }).text),
+    );
+    expect(texts).toEqual(['keep me']);
+
+    const serialized = JSON.stringify(result.messages);
+    expect(serialized).not.toContain('stale instructions');
+    expect(serialized).not.toContain('reasoning-blob');
+    expect(serialized).not.toContain('function_call');
+  });
+
+  it('reports the compaction pass usage', async () => {
+    const { result } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
+    expect(result.usage).toEqual({
+      inputOther: 6000,
+      inputCacheRead: 338,
+      inputCacheCreation: 0,
+      output: 97,
+    });
+  });
+
+  it('sends the converted history to /responses/compact without streaming flags', async () => {
+    const { body } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
+    expect(body['model']).toBe('gpt-5.6-sol');
+    expect(body['instructions']).toBe('system prompt');
+    expect(body['store']).toBe(false);
+    expect(body['stream']).toBeUndefined();
+    expect(Array.isArray(body['input'])).toBe(true);
+  });
+
+  it('replays a checkpoint back as a top-level item, byte for byte', async () => {
+    const { result } = await runCompact(createCompactionProvider(), 'compaction_summary', HISTORY);
+
+    const provider = createCompactionProvider();
+    const body = await captureGenerateBody(provider, [
+      ...result.messages,
+      { role: 'user', content: [{ type: 'text', text: 'next turn' }], toolCalls: [] },
+    ]);
+
+    const input = body['input'] as Array<Record<string, unknown>>;
+    const checkpointItem = input.find((item) => item['type'] === 'compaction_summary');
+    expect(checkpointItem).toEqual({
+      type: 'compaction_summary',
+      id: 'cpt_1',
+      encrypted_content: COMPACTION_ENCRYPTED,
+    });
+    // It is its own top-level item, never folded into message content.
+    const messageItems = input.filter((item) => item['type'] === 'message');
+    expect(JSON.stringify(messageItems)).not.toContain(COMPACTION_ENCRYPTED);
+  });
+
+  it('surfaces a provider error when the SDK has no compaction endpoint', async () => {
+    const provider = createCompactionProvider();
+    // `compact` lives on the SDK prototype, so replace the whole namespace to
+    // model an SDK version that predates the endpoint.
+    (provider as any)._client.responses = {};
+    await expect(provider.compactConversation('', [], HISTORY)).rejects.toThrow(
+      /does not support the Responses compaction endpoint/,
+    );
+  });
+});

@@ -4,13 +4,21 @@ import {
   ChatProviderError,
   isContextOverflowErrorCode,
 } from '#/errors';
-import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
+import type {
+  CompactionLineage,
+  CompactionPart,
+  ContentPart,
+  Message,
+  StreamedMessagePart,
+  ToolCall,
+} from '#/message';
 import { extractText, isToolDeclarationOnlyMessage } from '#/message';
 import type {
   ChatProvider,
   FinishReason,
   GenerateOptions,
   ProviderRequestAuth,
+  RemoteCompactionResult,
   ResponseFormat,
   StreamedMessage,
   ThinkingEffort,
@@ -85,6 +93,8 @@ type ResponseOutputItemView =
   | {
       type: 'message';
       content: RawObject[];
+      /** Wire role, present on compaction output items. */
+      role?: string;
     }
   | {
       type: 'function_call';
@@ -97,6 +107,17 @@ type ResponseOutputItemView =
       type: 'reasoning';
       encryptedContent?: string;
       summary: RawObject[];
+    }
+  | {
+      type: 'compaction';
+      /**
+       * Native wire type this checkpoint arrived as. The SDK declares
+       * `compaction`; gateways may speak `compaction_summary`. Preserved so the
+       * item is echoed back in the dialect the endpoint expects.
+       */
+      rawType: string;
+      itemId?: string;
+      encryptedContent?: string;
     }
   | {
       type: 'other';
@@ -184,6 +205,20 @@ function readResponseOutputItem(
     return {
       type,
       content: readObjectArrayField(item, 'content') ?? [],
+      role: readStringField(item, 'role'),
+    };
+  }
+
+  // Compaction checkpoint. `compaction` is the SDK-declared type; gateways in
+  // the wild answer `/responses/compact` with `compaction_summary`. Both carry
+  // the same opaque `encrypted_content`, so decode either and remember which
+  // dialect it was so replay echoes it back unchanged.
+  if (type === 'compaction' || type === 'compaction_summary') {
+    return {
+      type: 'compaction',
+      rawType: type,
+      itemId: readStringField(item, 'id'),
+      encryptedContent: readStringField(item, 'encrypted_content'),
     };
   }
 
@@ -438,6 +473,10 @@ function contentPartsToInputItems(parts: ContentPart[]): unknown[] {
       case 'think':
         // Handled separately as reasoning items.
         break;
+      case 'compaction':
+        // Serialized by `convertMessage` as its own top-level item, not as
+        // message content.
+        break;
     }
   }
   return items;
@@ -480,6 +519,10 @@ function messageContentToFunctionOutputItems(content: ContentPart[]): unknown[] 
         break;
       case 'think':
         // Handled separately as reasoning items.
+        break;
+      case 'compaction':
+        // Serialized by `convertMessage` as its own top-level item, not as
+        // message content.
         break;
     }
   }
@@ -596,6 +639,20 @@ function convertMessage(
           type: 'reasoning',
           encrypted_content: encryptedValue,
         });
+      } else if (part.type === 'compaction') {
+        // A checkpoint is a top-level output item, not message content: flush
+        // whatever preceded it, then echo it back in the dialect it arrived
+        // as, byte-for-byte. Replaying a mutated payload invalidates it.
+        flushPendingParts();
+        const item: Record<string, unknown> = {
+          type: part.itemType,
+          encrypted_content: part.encrypted,
+        };
+        if (part.itemId !== undefined) {
+          item['id'] = part.itemId;
+        }
+        result.push(item as unknown as ResponseInputItem);
+        i += 1;
       } else {
         pendingParts.push(part);
         i += 1;
@@ -1047,6 +1104,81 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     }
   }
 }
+/** Read the usage block of a `/responses/compact` response. */
+function readCompactionUsage(response: RawObject): TokenUsage | null {
+  const usage = readObjectField(response, 'usage');
+  if (usage === undefined) return null;
+  const inputTokens = readNumberField(usage, 'input_tokens') ?? 0;
+  const outputTokens = readNumberField(usage, 'output_tokens') ?? 0;
+  const details = readObjectField(usage, 'input_tokens_details');
+  const cached = details ? (readNumberField(details, 'cached_tokens') ?? 0) : 0;
+  return {
+    inputOther: inputTokens - cached,
+    output: outputTokens,
+    inputCacheRead: cached,
+    inputCacheCreation: 0,
+  };
+}
+
+/** Concatenate the text of a compaction output message's content blocks. */
+function compactionMessageText(content: RawObject[]): string {
+  let text = '';
+  for (const block of content) {
+    const value = readStringField(block, 'text');
+    if (value !== undefined) text += value;
+  }
+  return text;
+}
+
+/**
+ * Turn a `/responses/compact` response into the replacement history.
+ *
+ * Kept: real user and assistant messages, plus the checkpoint itself.
+ * Dropped: `developer`/`system` prefixes (the caller re-sends its own
+ * instructions), and reasoning / tool traffic, which the endpoint has already
+ * folded into the checkpoint.
+ */
+function compactionOutputToMessages(
+  response: RawObject,
+  usage: TokenUsage | null,
+  lineage: CompactionLineage,
+): Message[] {
+  const output = readObjectArrayField(response, 'output') ?? [];
+  const messages: Message[] = [];
+  let checkpointText: string | undefined;
+
+  for (const [index, value] of output.entries()) {
+    const item = readResponseOutputItem(value, `response.output[${String(index)}]`);
+    if (item.type === 'message') {
+      const role = item.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+      const text = compactionMessageText(item.content);
+      if (text.length === 0) continue;
+      checkpointText = text;
+      messages.push({ role, content: [{ type: 'text', text }], toolCalls: [] });
+      continue;
+    }
+    if (item.type === 'compaction') {
+      if (item.encryptedContent === undefined) continue;
+      const part: CompactionPart = {
+        type: 'compaction',
+        encrypted: item.encryptedContent,
+        itemType: item.rawType,
+        lineage,
+      };
+      if (item.itemId !== undefined) part.itemId = item.itemId;
+      if (checkpointText !== undefined) part.text = checkpointText;
+      // The opaque payload's own replay cost is unknowable locally; bill it
+      // with what the compaction pass produced until a real round-trip
+      // reports the measured figure.
+      if (usage !== null) part.replayTokens = usage.output;
+      messages.push({ role: 'assistant', content: [part], toolCalls: [] });
+    }
+  }
+
+  return messages;
+}
+
 export class OpenAIResponsesChatProvider implements ChatProvider {
   readonly name: string = 'openai-responses';
 
@@ -1177,6 +1309,73 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         }
       ).create(createParams, options?.signal ? { signal: options.signal } : undefined);
       return new OpenAIResponsesStreamedMessage(response, this._stream);
+    } catch (error: unknown) {
+      throw convertOpenAIError(error);
+    }
+  }
+
+  /**
+   * See {@link ChatProvider.compactConversation}. Calls the Responses
+   * `/responses/compact` endpoint and returns the replacement history.
+   *
+   * The endpoint answers with the retained messages followed by a checkpoint
+   * item; everything the caller cannot replay portably (developer prefixes,
+   * reasoning, tool traffic) is dropped here so the result can be installed
+   * as-is.
+   */
+  async compactConversation(
+    systemPrompt: string,
+    tools: Tool[],
+    history: Message[],
+    options?: GenerateOptions,
+  ): Promise<RemoteCompactionResult> {
+    const normalizedHistory = normalizeToolCallIdsForProvider(
+      history,
+      OPENAI_RESPONSES_TOOL_CALL_ID_POLICY,
+    );
+    const input = convertHistoryMessages(
+      normalizedHistory,
+      this._model,
+      this._toolMessageConversion,
+    );
+
+    try {
+      const client = this._createClient(options?.auth);
+      const compact = (client as { responses?: { compact?: unknown } }).responses?.compact;
+      if (typeof compact !== 'function') {
+        throw new ChatProviderError(
+          'OpenAI SDK version does not support the Responses compaction endpoint.',
+        );
+      }
+
+      const params: Record<string, unknown> = { model: this._model, input, store: false };
+      if (systemPrompt) {
+        params['instructions'] = systemPrompt;
+      }
+      if (tools.length > 0) {
+        params['tools'] = tools.map((tool) => convertTool(tool));
+      }
+
+      options?.onRequestSent?.();
+      const response = await (
+        client.responses as {
+          compact(params: unknown, opts?: unknown): Promise<unknown>;
+        }
+      ).compact(params, options?.signal ? { signal: options.signal } : undefined);
+
+      const raw = asRawObject(response);
+      if (raw === null) {
+        throw new ChatProviderError('Responses compaction returned a non-object response.');
+      }
+      const usage = readCompactionUsage(raw);
+      return {
+        messages: compactionOutputToMessages(raw, usage, {
+          provider: this.name,
+          model: this._model,
+          baseUrl: this._baseUrl ?? '',
+        }),
+        usage,
+      };
     } catch (error: unknown) {
       throw convertOpenAIError(error);
     }
