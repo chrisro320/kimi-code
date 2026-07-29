@@ -53,18 +53,17 @@ import {
   DefaultCompactionStrategy,
   type CompactionStrategy,
 } from './strategy';
-import { buildCompactionSummaryText, isRealUserInput } from './handoff';
+import {
+  buildCompactionSummaryText,
+  isRealUserInput,
+  REMOTE_CHECKPOINT_SUMMARY_FALLBACK,
+} from './handoff';
 
 export const MAX_COMPACTION_RETRY_ATTEMPTS = 5;
 
 const DEFAULT_COMPACTION_MAX_COMPLETION_TOKENS = 128 * 1024;
 const OVERFLOW_CONTEXT_SAFETY_RATIO = 0.85;
 const OVERFLOW_STATUS_RECOVERY_RATIO = 0.5;
-
-/** Stand-in summary when a compaction endpoint returns no readable text. */
-const REMOTE_CHECKPOINT_SUMMARY_FALLBACK =
-  'The conversation so far was compacted by the model provider. The details are ' +
-  'preserved in a provider-side checkpoint rather than in text.';
 
 class CompactionTruncatedError extends Error {
   constructor() {

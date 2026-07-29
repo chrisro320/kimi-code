@@ -2871,6 +2871,93 @@ describe('remote compaction', () => {
   });
 });
 
+describe('checkpoint lineage', () => {
+  const REMOTE_CAPABILITIES = {
+    ...CATALOGUED_MODEL_CAPABILITIES,
+    remote_compaction: true,
+  } as const;
+
+  const CHECKPOINT: CompactionPart = {
+    type: 'compaction',
+    encrypted: 'opaque-checkpoint-payload',
+    itemType: 'compaction_summary',
+    text: 'Remote handoff note.',
+    lineage: {
+      provider: 'openai-responses',
+      model: 'gpt-5.6-sol',
+      baseUrl: 'http://localhost:43565/v1',
+    },
+  };
+
+  const patchedPrototypes: Array<Record<string, unknown>> = [];
+
+  afterEach(() => {
+    for (const proto of patchedPrototypes.splice(0)) {
+      delete proto['ownsCheckpoint'];
+    }
+  });
+
+  function stubOwnsCheckpoint(ctx: TestAgentContext, owns: boolean): void {
+    const proto = Object.getPrototypeOf(ctx.agent.config.provider) as Record<string, unknown>;
+    proto['ownsCheckpoint'] = (): boolean => owns;
+    patchedPrototypes.push(proto);
+  }
+
+  function foldedWithCheckpoint(ctx: TestAgentContext): void {
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.agent.context.applyCompaction({
+      summary: 'Remote handoff note.',
+      contextSummary: 'Remote handoff note.',
+      compactedCount: ctx.agent.context.history.length,
+      tokensBefore: 20,
+      checkpoint: CHECKPOINT,
+    });
+  }
+
+  it('sends the checkpoint when the active provider owns it', () => {
+    const ctx = testAgent();
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    foldedWithCheckpoint(ctx);
+    stubOwnsCheckpoint(ctx, true);
+
+    const projected = ctx.agent.context.project(ctx.agent.context.history);
+    const parts = projected.flatMap((message) => message.content);
+    expect(parts).toContainEqual(CHECKPOINT);
+  });
+
+  it('degrades the checkpoint to its summary for a provider that cannot replay it', () => {
+    const ctx = testAgent();
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    foldedWithCheckpoint(ctx);
+    stubOwnsCheckpoint(ctx, false);
+
+    const projected = ctx.agent.context.project(ctx.agent.context.history);
+    const parts = projected.flatMap((message) => message.content);
+    expect(parts.some((part) => part.type === 'compaction')).toBe(false);
+    expect(parts).toContainEqual({ type: 'text', text: 'Remote handoff note.' });
+
+    // Only the outgoing view is shaped: the stored history still holds the
+    // checkpoint, so switching back restores it.
+    const stored = ctx.agent.context.history.at(-1)!;
+    expect(stored.content).toEqual([CHECKPOINT]);
+  });
+
+  it('leaves histories without checkpoints untouched', () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'user one', 'assistant one', 20);
+
+    const history = ctx.agent.context.history;
+    const projected = ctx.agent.context.project(history);
+    expect(projected.flatMap((message) => message.content)).not.toContainEqual(
+      expect.objectContaining({ type: 'compaction' }),
+    );
+  });
+});
+
 function readHookPayloads(logPath: string): Array<Record<string, unknown>> {
   if (!existsSync(logPath)) return [];
   const text = readFileSync(logPath, 'utf-8').trim();

@@ -2382,3 +2382,28 @@ describe('OpenAI Responses remote compaction', () => {
     );
   });
 });
+
+describe('checkpoint ownership', () => {
+  const OWNED: CompactionPart = {
+    type: 'compaction',
+    encrypted: COMPACTION_ENCRYPTED,
+    itemType: 'compaction_summary',
+    lineage: {
+      provider: 'openai-responses',
+      model: 'gpt-5.6-sol',
+      baseUrl: 'http://localhost:43565/v1',
+    },
+  };
+
+  it('owns a checkpoint produced by the same endpoint and model', () => {
+    expect(createCompactionProvider().ownsCheckpoint(OWNED)).toBe(true);
+  });
+
+  it.each([
+    ['a different model', { ...OWNED.lineage, model: 'gpt-5.6-luna' }],
+    ['a different endpoint', { ...OWNED.lineage, baseUrl: 'http://127.0.0.1:8317/v1' }],
+    ['a different provider', { ...OWNED.lineage, provider: 'anthropic' }],
+  ])('disowns a checkpoint from %s', (_label, lineage) => {
+    expect(createCompactionProvider().ownsCheckpoint({ ...OWNED, lineage })).toBe(false);
+  });
+});

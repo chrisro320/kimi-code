@@ -1,4 +1,9 @@
-import type { Message, StreamedMessagePart, VideoURLPart } from './message';
+import type {
+  CompactionPart,
+  Message,
+  StreamedMessagePart,
+  VideoURLPart,
+} from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
@@ -299,6 +304,15 @@ export interface ChatProvider {
     history: Message[],
     options?: GenerateOptions,
   ): Promise<RemoteCompactionResult>;
+  /**
+   * Whether this instance can replay `checkpoint`.
+   *
+   * A checkpoint is opaque state bound to the endpoint and model that produced
+   * it, so only the provider can answer. Callers use it to shape an outgoing
+   * request: a checkpoint that is not owned must be degraded rather than sent.
+   * Absent means the backend has no notion of checkpoints and owns none.
+   */
+  ownsCheckpoint?(checkpoint: CompactionPart): boolean;
 }
 
 /** Outcome of {@link ChatProvider.compactConversation}. */

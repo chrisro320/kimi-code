@@ -1381,6 +1381,16 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     }
   }
 
+  /** See {@link ChatProvider.ownsCheckpoint}. */
+  ownsCheckpoint(checkpoint: CompactionPart): boolean {
+    const lineage = checkpoint.lineage;
+    return (
+      lineage.provider === this.name &&
+      lineage.model === this._model &&
+      lineage.baseUrl === (this._baseUrl ?? '')
+    );
+  }
+
   withThinking(effort: ThinkingEffort): OpenAIResponsesChatProvider {
     // 'on' sends no effort field; 'off' sends the model's declared off value
     // (e.g. 'none') when one is configured, and omits the field otherwise.

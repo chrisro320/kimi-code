@@ -342,3 +342,12 @@ export function buildCompactionSummaryText(summary: string): string {
   const suffix = summary.trim();
   return `${COMPACTION_SUMMARY_PREFIX}\n${suffix.length > 0 ? suffix : '(no summary available)'}`;
 }
+
+/**
+ * Stand-in text for a remote compaction checkpoint: used both when the endpoint
+ * returns no readable summary, and when a checkpoint is shown to a model that
+ * cannot replay it.
+ */
+export const REMOTE_CHECKPOINT_SUMMARY_FALLBACK =
+  'The conversation so far was compacted by the model provider. The details are ' +
+  'preserved in a provider-side checkpoint rather than in text.';
