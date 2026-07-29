@@ -11,6 +11,8 @@ export {
 } from './message';
 export type {
   AudioURLPart,
+  CompactionLineage,
+  CompactionPart,
   ContentPart,
   ImageURLPart,
   Message,

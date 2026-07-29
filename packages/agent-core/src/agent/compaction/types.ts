@@ -1,3 +1,5 @@
+import type { CompactionPart } from '@moonshot-ai/kosong';
+
 export interface CompactionResult {
   /** Human-facing summary text produced by the compaction model. */
   summary: string;
@@ -40,6 +42,15 @@ export interface CompactionResult {
    * compatibility with older wire records.
    */
   droppedCount?: number;
+  /**
+   * Provider-side compaction checkpoint standing in for the summarized prefix.
+   * Present only when the model declared `remote_compaction` and the endpoint
+   * answered: the live context then carries this opaque item instead of the
+   * summary text, and `summary` / `contextSummary` hold the readable summary
+   * for display and records. Persisted with the record because a restored
+   * session must replay the exact same checkpoint.
+   */
+  checkpoint?: CompactionPart;
 }
 
 /**
@@ -52,7 +63,12 @@ export type CompactionInput = Pick<CompactionResult, 'summary' | 'compactedCount
   Partial<
     Pick<
       CompactionResult,
-      'contextSummary' | 'tokensAfter' | 'keptUserMessageCount' | 'keptHeadUserMessageCount' | 'droppedCount'
+      | 'contextSummary'
+      | 'tokensAfter'
+      | 'keptUserMessageCount'
+      | 'keptHeadUserMessageCount'
+      | 'droppedCount'
+      | 'checkpoint'
     >
   >;
 

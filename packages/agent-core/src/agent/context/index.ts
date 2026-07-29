@@ -4,7 +4,11 @@ import type { Agent } from '..';
 import { ErrorCodes, KimiError } from '../../errors';
 import type { LoopRecordedEvent } from '../../loop';
 import { extractImageCompressionCaptions } from '../../tools/support/image-compress';
-import { estimateTokens, estimateTokensForMessages } from '../../utils/tokens';
+import {
+  estimateTokens,
+  estimateTokensForContentPart,
+  estimateTokensForMessages,
+} from '../../utils/tokens';
 import { escapeXml, escapeXmlAttr } from '../../utils/xml-escape';
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
@@ -355,9 +359,15 @@ export class ContextMemory {
     // are preserved verbatim. Older wire records did not have `contextSummary`,
     // so their `summary` remains the model-context text during restore.
     const contextSummary = input.contextSummary ?? input.summary;
+    // A remote checkpoint replaces the summary text in the model-facing
+    // context, so the post-compaction size is the checkpoint's replay cost
+    // (recorded on the part), not the length of the readable summary.
+    const summaryTokens =
+      input.checkpoint === undefined
+        ? estimateTokens(contextSummary)
+        : estimateTokensForContentPart(input.checkpoint);
     const tokensAfter =
-      input.tokensAfter ??
-      estimateTokens(contextSummary) + estimateTokensForMessages(keptMessages);
+      input.tokensAfter ?? summaryTokens + estimateTokensForMessages(keptMessages);
     const keptUserMessageCount =
       input.keptUserMessageCount ?? selection.head.length + selection.tail.length;
     const keptHeadUserMessageCount =
@@ -365,6 +375,7 @@ export class ContextMemory {
     const result: CompactionResult = {
       summary: input.summary,
       contextSummary,
+      checkpoint: input.checkpoint,
       compactedCount: input.compactedCount,
       tokensBefore: input.tokensBefore,
       tokensAfter,
@@ -388,9 +399,17 @@ export class ContextMemory {
         droppedCount: result.droppedCount,
       },
     });
+    // The summary message keeps its user role and `compaction_summary` origin
+    // in both modes so every "is this the fold marker" check stays valid; only
+    // the payload differs. With a checkpoint the model sees the opaque item
+    // (serialized by the provider as its own top-level item) instead of the
+    // summary text, which is kept on the part for display.
     const summaryMessage: ContextMessage = {
       role: 'user',
-      content: [{ type: 'text', text: contextSummary }],
+      content:
+        input.checkpoint === undefined
+          ? [{ type: 'text', text: contextSummary }]
+          : [input.checkpoint],
       toolCalls: [],
       origin: { kind: 'compaction_summary' },
     };
