@@ -2346,7 +2346,8 @@ describe('OpenAI Responses remote compaction', () => {
     const { body } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
     expect(body['model']).toBe('gpt-5.6-sol');
     expect(body['instructions']).toBe('system prompt');
-    expect(body['store']).toBe(false);
+    // The compaction endpoint rejects `store` outright, unlike `/responses`.
+    expect(body).not.toHaveProperty('store');
     expect(body['stream']).toBeUndefined();
     expect(Array.isArray(body['input'])).toBe(true);
   });
