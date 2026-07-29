@@ -170,6 +170,10 @@ export function collectReplayMessageContent(
       case 'text':
         target.text.push(part.text);
         break;
+      case 'compaction':
+        // Replay shows the summary a checkpoint carries as ordinary text.
+        target.text.push(part.text ?? '[compacted context checkpoint]');
+        break;
       case 'audio_url':
       case 'image_url':
       case 'video_url':
@@ -286,6 +290,10 @@ function contentPartToText(part: ContentPart): string {
       return mediaUrlPartToText('video', part.videoUrl.url);
     case 'audio_url':
       return mediaUrlPartToText('audio', part.audioUrl.url);
+    case 'compaction':
+      // Show the readable summary a remote compaction checkpoint carries; the
+      // opaque payload is provider state and never renders.
+      return part.text ?? '[compacted context checkpoint]';
   }
 }
 
