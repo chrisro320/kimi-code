@@ -1,5 +1,7 @@
 import type { ResolvedToolExecutionHookContext } from '#/agent/toolExecutor/toolHooks';
 import { isWithinWorkspace } from '#/tool/path-access';
+import { IGitService } from '#/app/git/git';
+import type { IGitService as GitService } from '#/app/git/git';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import type { IHostEnvironment as HostEnvironment } from '#/os/interface/hostEnvironment';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
@@ -29,6 +31,7 @@ export class CwdWriteApprovePermissionPolicyService implements PermissionPolicy 
   constructor(
     @IHostEnvironment private readonly env: HostEnvironment,
     @ISessionWorkspaceContext private readonly workspace: WorkspaceContext,
+    @IGitService private readonly git: GitService,
   ) {}
 
   async evaluate(

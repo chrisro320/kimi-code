@@ -144,6 +144,8 @@ interface SwarmRunResult {
   readonly error?: string;
 }
 
+const AGENT_SWARM_PARAMETERS = toInputJsonSchema(AgentSwarmToolInputSchema);
+
 export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
   readonly name = 'AgentSwarm' as const;
   readonly description = AGENT_SWARM_DESCRIPTION;

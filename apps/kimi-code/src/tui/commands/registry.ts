@@ -235,6 +235,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'idle-only',
   },
   {
+    name: 'secondary_model',
+    aliases: [],
+    description: 'Configure the secondary model for subagents',
+    priority: 90,
+    availability: 'always',
+    experimentalFlag: 'secondary-model',
+  },
+  {
     name: 'effort',
     aliases: ['thinking'],
     description: 'Switch thinking effort',

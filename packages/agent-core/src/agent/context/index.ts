@@ -485,8 +485,10 @@ export class ContextMemory {
     // project() strips `origin`, the only anchor for the announcements.
     // setModel never rewrites history, so a mid-session switch
     // degrades/upgrades losslessly.
-    const stripped = this.agent.toolSelectEnabled ? messages : stripDynamicToolContext(messages);
-    const shaped = degradeUnownedCheckpoints(stripped, () => this.agent.config.provider);
+    const disclosed = this.agent.toolSelectEnabled
+      ? this.agent.tools.shapeDynamicToolHistory(messages)
+      : stripDynamicToolContext(messages);
+    const shaped = degradeUnownedCheckpoints(disclosed, () => this.agent.config.provider);
     // Full compaction must summarize original output, never a lossy projection.
     const compacted = options?.compactToolResults === false
       ? shaped

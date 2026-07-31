@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 
 import { KIMI_BUILD_INFO } from '#/cli/build-info';
 import {
-  buildKimiDefaultHeaders,
   createKimiCodeUserAgent,
   getHostPackageJsonPath,
   getHostPackageRoot,
@@ -28,12 +27,6 @@ describe('cli version helpers', () => {
       'reference-audit',
       'asset-pipeline',
     ]);
-  });
-
-  it('builds default headers with the kimi-code-cli user-agent', () => {
-    const headers = buildKimiDefaultHeaders('1.2.3');
-
-    expect(headers['User-Agent']).toBe('kimi-code-cli/1.2.3');
   });
 
   it('builds the product user-agent for ad-hoc fetches', () => {

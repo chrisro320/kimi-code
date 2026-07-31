@@ -35,6 +35,27 @@ export const StatuslineConfigSchema = z.object({
   command: z.string().optional(),
 });
 
+export const STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'cwd', 'git', 'tips'] as const;
+export type StatusLineItem = (typeof STATUS_LINE_ITEMS)[number];
+
+export const StatusLineFileConfigSchema = z.object({
+  items: z.array(z.string()).optional(),
+  command: z.string().optional(),
+});
+
+export const StatusLineConfigSchema = z.object({
+  /** Ordered built-in slots for footer line 1; null means the default layout. */
+  items: z.array(z.enum(STATUS_LINE_ITEMS)).nullable(),
+  /** User command whose first stdout line replaces footer line 1; null disables. */
+  command: z.string().nullable(),
+});
+export type StatusLineConfig = z.infer<typeof StatusLineConfigSchema>;
+
+export const DEFAULT_STATUS_LINE_CONFIG: StatusLineConfig = {
+  items: null,
+  command: null,
+};
+
 export const TuiConfigFileSchema = z.object({
   theme: TuiThemeSchema.optional(),
   disable_paste_burst: z.boolean().optional(),
@@ -60,6 +81,7 @@ export const TuiConfigFileSchema = z.object({
       command: z.string().optional(),
     })
     .optional(),
+  status_line: StatusLineFileConfigSchema.optional(),
 });
 
 export const TuiConfigSchema = z.object({
@@ -72,6 +94,9 @@ export const TuiConfigSchema = z.object({
   // valid; DEFAULT_TUI_CONFIG + normalizeTuiConfig always populate it, so the
   // runtime value is never actually absent.
   statusline: StatuslineConfigSchema.optional(),
+  /** Present in every normalized config; optional only so hand-built test
+   * fixtures from before this field existed still typecheck. */
+  statusLine: StatusLineConfigSchema.optional(),
 });
 
 export type TuiConfigFileShape = z.infer<typeof TuiConfigFileSchema>;
@@ -100,6 +125,7 @@ export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   notifications: DEFAULT_NOTIFICATIONS_CONFIG,
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
   statusline: DEFAULT_STATUSLINE_CONFIG,
+  statusLine: DEFAULT_STATUS_LINE_CONFIG,
 });
 
 /**
@@ -121,7 +147,10 @@ export function getTuiConfigPath(): string {
   return join(getDataDir(), 'tui.toml');
 }
 
-export async function loadTuiConfig(filePath: string = getTuiConfigPath()): Promise<TuiConfig> {
+export async function loadTuiConfig(
+  filePath: string = getTuiConfigPath(),
+  warn?: (message: string) => void,
+): Promise<TuiConfig> {
   if (!existsSync(filePath)) {
     await saveTuiConfig(DEFAULT_TUI_CONFIG, filePath);
     return DEFAULT_TUI_CONFIG;
@@ -129,19 +158,22 @@ export async function loadTuiConfig(filePath: string = getTuiConfigPath()): Prom
 
   try {
     const text = await readFile(filePath, 'utf-8');
-    return parseTuiConfig(text);
+    return parseTuiConfig(text, warn);
   } catch {
     throw new TuiConfigParseError(DEFAULT_TUI_CONFIG);
   }
 }
 
-export function parseTuiConfig(tomlText: string): TuiConfig {
+export function parseTuiConfig(
+  tomlText: string,
+  warn?: (message: string) => void,
+): TuiConfig {
   if (tomlText.trim().length === 0) {
     return DEFAULT_TUI_CONFIG;
   }
   const raw = parseToml(tomlText) as Record<string, unknown>;
   const parsed = TuiConfigFileSchema.parse(raw);
-  return normalizeTuiConfig(parsed);
+  return normalizeTuiConfig(parsed, warn);
 }
 
 export async function saveTuiConfig(
@@ -152,8 +184,26 @@ export async function saveTuiConfig(
   await writeFile(filePath, renderTuiConfig(config), 'utf-8');
 }
 
-export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
+export function normalizeTuiConfig(
+  config: TuiConfigFileShape,
+  warn: (message: string) => void = (message) => {
+    // oxlint-disable-next-line no-console
+    console.warn(message);
+  },
+): TuiConfig {
   const command = config.editor?.command?.trim();
+  const statusLineCommand = config.status_line?.command?.trim();
+  const knownItems = new Set<string>(STATUS_LINE_ITEMS);
+  const statusLineItems =
+    config.status_line?.items
+      ?.filter((item) => {
+        const known = knownItems.has(item);
+        if (!known) {
+          warn(`[tui.toml] ignoring unknown status_line item: ${item}`);
+        }
+        return known;
+      })
+      .map((item) => item as StatusLineItem) ?? null;
   return TuiConfigSchema.parse({
     theme: config.theme ?? DEFAULT_TUI_CONFIG.theme,
     disablePasteBurst: config.disable_paste_burst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
@@ -170,10 +220,39 @@ export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
       enabled: config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled,
       command: config.statusline?.command?.trim() || undefined,
     },
+    statusLine: {
+      items: statusLineItems,
+      command:
+        statusLineCommand === undefined || statusLineCommand.length === 0
+          ? null
+          : statusLineCommand,
+    },
   });
 }
 
 export function renderTuiConfig(config: TuiConfig): string {
+  // An active status_line must round-trip: any preference save rewrites the
+  // whole file, so the section is emitted live when set and left as a
+  // commented-out guide when unset.
+  const statusItems = config.statusLine?.items;
+  const statusCommand = config.statusLine?.command;
+  const statusLines: string[] = [];
+  if (statusItems !== null && statusItems !== undefined) {
+    statusLines.push(`items = ${JSON.stringify(statusItems)}`);
+  }
+  if (statusCommand) {
+    statusLines.push(`command = "${escapeTomlBasicString(statusCommand)}"`);
+  }
+  const statusSection =
+    statusLines.length > 0
+      ? `[status_line]\n${statusLines.join('\n')}\n`
+      : `# [status_line]
+# Pick and order the built-in footer slots: ${STATUS_LINE_ITEMS.join(', ')}
+# items = ${JSON.stringify([...STATUS_LINE_ITEMS])}
+# Or render your own: a command whose first stdout line replaces footer line 1.
+# It receives a JSON snapshot (model, cwd, git, usage, mode) on stdin.
+# command = "~/.kimi-code/statusline.sh"
+`;
   return `# ~/.kimi-code/tui.toml
 # Client preferences for kimi-code.
 # Agent/runtime settings stay in ~/.kimi-code/config.toml.
@@ -194,7 +273,8 @@ auto_install = ${String(config.upgrade.autoInstall)} # true | false
 [statusline]
 enabled = ${String(config.statusline?.enabled ?? DEFAULT_STATUSLINE_CONFIG.enabled)} # true | false — quota + cache-hit status row at the bottom
 command = "${escapeTomlBasicString(config.statusline?.command ?? '')}" # optional shell command; overrides the built-in row with its stdout (stdin gets a JSON state payload)
-`;
+
+${statusSection}`;
 }
 
 function escapeTomlBasicString(value: string): string {

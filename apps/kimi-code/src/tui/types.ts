@@ -11,7 +11,12 @@ import type {
   ToolInputDisplay,
 } from '@moonshot-ai/kimi-code-sdk';
 
-import type { NotificationsConfig, StatuslineConfig, UpgradePreferences } from './config';
+import type {
+  NotificationsConfig,
+  StatuslineConfig,
+  StatusLineConfig,
+  UpgradePreferences,
+} from './config';
 import type { ManagedUsageReport } from './components/messages/usage-panel';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types';
 import type { ColorToken, ThemeName } from './theme';
@@ -109,6 +114,8 @@ export interface AppState {
   totalTokens?: number;
   /** Epoch ms of the last assistant reply; anchors the statusline TTL countdown. */
   lastReplyAt?: number;
+  /** Footer status line customization from tui.toml; absent means the default layout. */
+  statusLine?: StatusLineConfig;
   availableModels: Record<string, ModelAlias>;
   availableProviders: Record<string, ProviderConfig>;
   sessionTitle: string | null;
@@ -315,6 +322,10 @@ export interface TUIStartupOptions {
   readonly auto: boolean;
   readonly plan: boolean;
   readonly model?: string;
+  /** Resolved profile name from --agent/--agent-file; bound to the startup session only. */
+  readonly agentProfile?: string;
+  /** Raw --agent-file paths, passed to session creation alongside `agentProfile`. */
+  readonly agentFiles?: readonly string[];
   readonly startupNotice?: string;
 }
 

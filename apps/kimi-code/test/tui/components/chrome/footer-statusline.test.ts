@@ -13,8 +13,22 @@ function makeState(patch: Partial<AppState>): AppState {
   return {
     statusline: { enabled: true },
     managedUsage: {
-      summary: { label: 'Weekly limit', used: 56, limit: 100, resetHint: 'resets in 5d 6h 49m' },
-      limits: [{ label: '5h limit', used: 7, limit: 100, resetHint: 'resets in 3h 49m' }],
+      summary: {
+        name: 'Weekly limit',
+        window: { unit: 'week', duration: 1 },
+        used: 56,
+        limit: 100,
+        resetAt: new Date(Date.now() + (5 * 24 * 60 + 6 * 60 + 49) * 60_000 + 30_000).toISOString(),
+      },
+      limits: [
+        {
+          name: '5h limit',
+          window: { unit: 'hour', duration: 5 },
+          used: 7,
+          limit: 100,
+          resetAt: new Date(Date.now() + (3 * 60 + 49) * 60_000 + 30_000).toISOString(),
+        },
+      ],
       extraUsage: null,
     },
     lastCacheHit: 0.91,

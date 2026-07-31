@@ -1,6 +1,6 @@
 Retrieve or resolve a background task snapshot.
 
-Default `inspect` after `Bash(run_in_background=true)` or `Agent(run_in_background=true)`: check progress, inspect an `input_required` editing candidate, or read a completed task. Use `approve_scope_expansion` / `deny_scope_expansion` only with the exact candidate hash and requested scope reported by inspect.
+Default `inspect` after `Bash(run_in_background=true)`, `Agent(run_in_background=true)`, or `AskUserQuestion(background=true)`: check progress, inspect an `input_required` editing candidate, or read a completed task. Use `approve_scope_expansion` / `deny_scope_expansion` only with the exact candidate hash and requested scope reported by inspect.
 
 Guidelines:
 - Prefer automatic completion notifications; use this tool only when you need task output before the notification arrives.

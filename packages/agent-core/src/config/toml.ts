@@ -4,6 +4,7 @@ import { dirname } from 'pathe';
 
 import { ErrorCodes, KimiError } from '#/errors';
 import { applyEnvModelConfig, stripEnvModelConfig } from './env-model';
+import { applySecondaryModelConfig, stripSecondaryModelConfig } from './secondary-model';
 import {
   KimiConfigSchema,
   formatConfigValidationError,
@@ -21,6 +22,7 @@ import {
   type OAuthRef,
   type PermissionConfig,
   type ProviderConfig,
+  type SecondaryModelConfig,
   type ServicesConfig,
   type SubagentConfig,
   type SubagentPoolRoute,
@@ -106,7 +108,7 @@ export function loadRuntimeConfig(
   filePath: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): KimiConfig {
-  return applyEnvModelConfig(readConfigFile(filePath), env);
+  return applySecondaryModelConfig(applyEnvModelConfig(readConfigFile(filePath), env), env);
 }
 
 export interface RuntimeConfigLoadResult {
@@ -201,6 +203,8 @@ export function loadRuntimeConfigSafe(
       `Ignoring KIMI_MODEL_* environment overrides: ${describeUnknownError(error)}`,
     );
   }
+  // Never throws: the secondary overlay only copies already-validated entries.
+  config = applySecondaryModelConfig(config, env);
 
   return { config, fileWarnings, envWarnings, fileError };
 }
@@ -325,6 +329,8 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = transformSubagentData(value);
     } else if (targetKey === 'agora' && isPlainObject(value)) {
       result[targetKey] = transformAgoraData(value);
+    } else if (targetKey === 'secondaryModel' && isPlainObject(value)) {
+      result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'mcp' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
     } else if (!isPlainObject(value)) {
@@ -505,10 +511,11 @@ function transformLoopControlData(data: Record<string, unknown>): Record<string,
 /* ------------------------------------------------------------------ */
 
 export async function writeConfigFile(filePath: string, config: KimiConfig): Promise<void> {
-  // Final guard: never persist the env-synthesized model/provider to disk,
-  // even if a caller passes back the runtime config as a patch (see
-  // stripEnvModelConfig / the getConfig -> setConfig round-trip).
-  const validated = validateConfig(stripEnvModelConfig(config));
+  // Final guard: never persist the env-synthesized model/provider or the
+  // secondary-model runtime view to disk, even if a caller passes back the
+  // runtime config as a patch (see stripEnvModelConfig /
+  // stripSecondaryModelConfig / the getConfig -> setConfig round-trip).
+  const validated = validateConfig(stripSecondaryModelConfig(stripEnvModelConfig(config)));
   await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
   await atomicWrite(filePath, `${stringifyToml(configToTomlData(validated))}\n`);
 }
@@ -533,6 +540,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
     'defaultPlanMode',
     'mergeAllAvailableSkills',
     'extraSkillDirs',
+    'extraAgentDirs',
     'telemetry',
   ];
   for (const key of scalarFields) {
@@ -547,6 +555,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
   setSection(out, 'background', config.background, backgroundToToml);
   setSection(out, 'subagent', config.subagent, subagentToToml);
   setSection(out, 'agora', config.agora, agoraToToml);
+  setSection(out, 'secondary_model', config.secondaryModel, secondaryModelToToml);
   setSection(out, 'mcp', config.mcp, mcpToToml);
   setSection(out, 'image', config.image, imageToToml);
   setSection(out, 'experimental', config.experimental, experimentalToToml);
@@ -809,6 +818,21 @@ function agoraToToml(agora: AgoraConfig, rawAgora: unknown): Record<string, unkn
         converted[peerId] = peerOut;
       }
       out['peers'] = converted;
+    } else {
+      setDefined(out, camelToSnake(key), value);
+    }
+  }
+  return out;
+}
+
+function secondaryModelToToml(
+  secondaryModel: SecondaryModelConfig,
+  rawSecondaryModel: unknown,
+): Record<string, unknown> {
+  const out = cloneRecord(rawSecondaryModel);
+  for (const [key, value] of Object.entries(secondaryModel)) {
+    if (key === 'capabilities' && Array.isArray(value)) {
+      out[camelToSnake(key)] = [...value];
     } else {
       setDefined(out, camelToSnake(key), value);
     }

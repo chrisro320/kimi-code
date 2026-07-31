@@ -7,6 +7,7 @@ import type {
   SpawnSubagentOptions,
   SubagentHandle,
 } from './subagent-host';
+import type { SubagentModelChoice } from './subagent-binding';
 import { isUserCancellation } from '../utils/abort';
 
 /*
@@ -55,6 +56,7 @@ type BaseQueuedSubagentTask<T> = {
   readonly dispatch?: DispatchSpawnMetadata;
   readonly enforceDispatch?: boolean;
   readonly signal?: AbortSignal;
+  readonly modelChoice?: SubagentModelChoice;
 };
 
 export type SpawnQueuedSubagentTask<T = unknown> = BaseQueuedSubagentTask<T> & {
@@ -334,6 +336,7 @@ export class SubagentBatch<T> {
           modelAlias: task.modelAlias,
           dispatch: task.dispatch,
           enforceDispatch: task.enforceDispatch,
+          modelChoice: task.modelChoice,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);

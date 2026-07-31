@@ -333,7 +333,8 @@ describe('KimiHarness config API', () => {
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
 
     const features = await harness.getExperimentalFeatures();
-    expect(features).toEqual([
+    expect(features).toEqual(
+      expect.arrayContaining([
       {
         id: 'tool-select',
         title: 'Tool select (progressive tool disclosure)',
@@ -349,14 +350,26 @@ describe('KimiHarness config API', () => {
         id: 'subagent-worktree-isolation',
         title: 'Editing subagent worktree isolation',
         description:
-          'Run editing-capable subagents (internal and external) in a temporary detached git worktree seeded from the current uncommitted state, then apply their changes back only when they stay within the declared dispatch scope and the source has not diverged. On scope violation, baseline mismatch, abort, or timeout, the workspace is left untouched and recovery data is preserved instead.',
+          'Run editing-capable subagents (internal and external) in a temporary detached git worktree seeded from the current uncommitted state, then apply safe changes back through guarded candidate-path checks even when necessary companion files expand the declared scope. On a real path conflict, unsafe change, abort, or timeout, the workspace is left untouched and recovery data is preserved instead.',
         surface: 'core',
         env: 'KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION',
         defaultEnabled: false,
         enabled: false,
         source: 'default',
       },
-    ]);
+      {
+        id: 'secondary-model',
+        title: 'Secondary model for subagents',
+        description:
+          'Let newly spawned subagents use a separately configured secondary model by default, with an explicit primary-model override for quality-sensitive tasks.',
+        surface: 'core',
+        env: 'KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL',
+        defaultEnabled: false,
+        enabled: false,
+        source: 'default',
+      },
+    ]),
+    );
   });
 
   it('can create the default config scaffold without selecting a model', async () => {

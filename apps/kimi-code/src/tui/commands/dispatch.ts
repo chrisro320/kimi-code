@@ -31,6 +31,7 @@ import {
   handleEffortCommand,
   handleModelCommand,
   handlePlanCommand,
+  handleSecondaryModelCommand,
   handleThemeCommand,
   handleYoloCommand,
   showExperimentsPanel,
@@ -78,6 +79,7 @@ export {
   handleEffortCommand,
   handleModelCommand,
   handlePlanCommand,
+  handleSecondaryModelCommand,
   handleThemeCommand,
   handleYoloCommand,
   showModelPicker,
@@ -334,6 +336,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'subagent':
       await handleSubagentCommand(host, args);
+      return;
+    case 'secondary_model':
+      await handleSecondaryModelCommand(host, args);
       return;
     case 'effort':
       await handleEffortCommand(host, args);

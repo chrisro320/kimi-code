@@ -66,6 +66,7 @@ auto_install = false
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
       statusline: { enabled: true },
+      statusLine: { items: null, command: null },
     });
   });
 
@@ -91,6 +92,7 @@ command = "   "
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
       statusline: { enabled: true },
+      statusLine: { items: null, command: null },
     });
   });
 
@@ -125,6 +127,7 @@ command = "   "
         notifications: { enabled: false, condition: 'always' },
         upgrade: { autoInstall: false },
         statusline: { enabled: true },
+        statusLine: { items: null, command: null },
       },
       filePath,
     );
@@ -136,6 +139,7 @@ command = "   "
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
       statusline: { enabled: true },
+      statusLine: { items: null, command: null },
     });
   });
 
@@ -149,10 +153,100 @@ command = "   "
         notifications: DEFAULT_TUI_CONFIG.notifications,
         upgrade: DEFAULT_TUI_CONFIG.upgrade,
         statusline: DEFAULT_TUI_CONFIG.statusline ?? { enabled: true },
+        statusLine: DEFAULT_TUI_CONFIG.statusLine,
       },
       filePath,
     );
 
     expect((await loadTuiConfig(filePath)).theme).toBe(theme);
+  });
+});
+
+describe('TUI config status_line', () => {
+  it('defaults to null when the section is omitted', () => {
+    const config = parseTuiConfig(`theme = "dark"`);
+
+    expect(config.statusLine).toEqual({ items: null, command: null });
+  });
+
+  it('parses items and command', () => {
+    const config = parseTuiConfig(`
+[status_line]
+items = ["model", "git", "cwd"]
+command = "~/.kimi-code/statusline.sh"
+`);
+
+    expect(config.statusLine).toEqual({
+      items: ['model', 'git', 'cwd'],
+      command: '~/.kimi-code/statusline.sh',
+    });
+  });
+
+  it('skips unknown items with a warning instead of failing the whole file', () => {
+    const config = parseTuiConfig(`
+[status_line]
+items = ["model", "wat", "git"]
+`);
+
+    expect(config.statusLine?.items).toEqual(['model', 'git']);
+  });
+
+  it('routes unknown-item warnings through the provided callback instead of stderr', () => {
+    const warnings: string[] = [];
+    const config = parseTuiConfig(
+      `
+[status_line]
+items = ["model", "wat", "git"]
+`,
+      (message) => warnings.push(message),
+    );
+
+    expect(config.statusLine?.items).toEqual(['model', 'git']);
+    expect(warnings).toEqual(['[tui.toml] ignoring unknown status_line item: wat']);
+  });
+
+  it('normalizes an empty command to null', () => {
+    const config = parseTuiConfig(`
+[status_line]
+command = "   "
+`);
+
+    expect(config.statusLine?.command).toBeNull();
+  });
+
+  it('documents status_line in the rendered template', async () => {
+    await saveTuiConfig(DEFAULT_TUI_CONFIG, filePath);
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('[status_line]');
+    expect(text).toContain('items');
+    expect(text).toContain('command');
+  });
+});
+
+describe('TUI config status_line round-trip', () => {
+  it('preserves an active status_line across save and reload', async () => {
+    await saveTuiConfig(
+      {
+        ...DEFAULT_TUI_CONFIG,
+        statusLine: { items: ['model', 'git'], command: '~/.kimi-code/statusline.sh' },
+      },
+      filePath,
+    );
+
+    const reloaded = await loadTuiConfig(filePath);
+    expect(reloaded.statusLine).toEqual({
+      items: ['model', 'git'],
+      command: '~/.kimi-code/statusline.sh',
+    });
+  });
+
+  it('keeps the status_line section commented out when unset', async () => {
+    await saveTuiConfig(DEFAULT_TUI_CONFIG, filePath);
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('# [status_line]');
+    expect(text).toContain('# items =');
+    expect(text).toContain('# command =');
   });
 });
