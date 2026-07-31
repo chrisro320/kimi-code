@@ -11,6 +11,10 @@ import { join } from 'node:path';
 import type { ToolCall } from '@moonshot-ai/kosong';
 import { describe, expect, it, vi } from 'vitest';
 
+import { CronListInputSchema } from '../../src/tools/cron/cron-list';
+import { GetGoalToolInputSchema } from '../../src/tools/builtin/goal/get-goal';
+import { EnterPlanModeInputSchema } from '../../src/tools/builtin/planning/enter-plan-mode';
+import { toInputJsonSchema } from '../../src/tools/support/input-schema';
 import { budgetToolResultForModel } from '../../src/agent/turn/tool-result-budget';
 import type { KimiConfig } from '../../src/config';
 import { HookEngine } from '../../src/session/hooks';
@@ -236,6 +240,43 @@ describe('Agent tools', () => {
         user: text "Which tools are active?"
     `);
     await ctx.expectResumeMatches();
+  });
+
+  it('keeps a non-empty parameter object on every no-argument builtin schema', () => {
+    // Some OpenAI-compatible relays hang on a function schema whose `properties`
+    // is empty, so parameter-less builtins carry a throwaway `_unused` field.
+    // The guard is easy to lose silently: upstream has relocated these schemas
+    // into fresh modules before, and the new file — being conflict-free — landed
+    // as a plain `z.object({})`, which no conflict marker and no type error
+    // would have caught.
+    const noArgSchemas = {
+      CronList: CronListInputSchema,
+      GetGoal: GetGoalToolInputSchema,
+      EnterPlanMode: EnterPlanModeInputSchema,
+    };
+
+    for (const [name, schema] of Object.entries(noArgSchemas)) {
+      const parameters = toInputJsonSchema(schema) as { properties?: object };
+      expect(
+        Object.keys(parameters.properties ?? {}),
+        `${name} must advertise at least one property`,
+      ).not.toEqual([]);
+    }
+  });
+
+  it('never advertises an active builtin with an empty parameter object', () => {
+    const ctx = testAgent();
+    ctx.configure();
+
+    const offenders = ctx.agent.tools.loopTools
+      .filter((tool) => {
+        const parameters = tool.parameters as { type?: string; properties?: object } | undefined;
+        if (parameters?.type !== 'object') return false;
+        return Object.keys(parameters.properties ?? {}).length === 0;
+      })
+      .map((tool) => tool.name);
+
+    expect(offenders).toEqual([]);
   });
 
   it('disables Bash background mode unless task management tools are active', async () => {

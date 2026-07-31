@@ -16,5 +16,6 @@ export default defineConfig({
       KIMI_LOG_LEVEL: 'off',
     },
     include: ['test/**/*.test.ts', 'test/**/*.test.tsx'],
+    setupFiles: [resolve(appRoot, 'vitest.setup.ts')],
   },
 });
