@@ -24,9 +24,11 @@ import {
   type OpenAIContentPart,
   TOOL_RESULT_MEDIA_PLACEHOLDER,
   TOOL_RESULT_MEDIA_PROMPT,
+  type OpenAIToolParam,
   type ToolMessageConversion,
   toolToOpenAI,
 } from './openai-common';
+import { flattenRootToolSchemaUnion } from './kimi-schema';
 import {
   convertChatCompletionStreamToolCall,
   type BufferedChatCompletionToolCall,
@@ -81,6 +83,16 @@ export interface OpenAILegacyOptions {
   stream?: boolean | undefined;
   maxTokens?: number | undefined;
   reasoningKey?: string | undefined;
+  /**
+   * Force every assistant message to carry the reasoning field, even when it
+   * holds no thinking content (the field is then written as an empty string).
+   * Some OpenAI-compatible gateways reject a history whose tool-calling
+   * assistant messages lack the field entirely (opencode zen's Console Go
+   * route answers `400 Upstream request failed`). Off by default: the field
+   * is otherwise written only when the message actually carries thinking.
+   * Mirrors the `preservedThinkingEnabled` arm of the Kimi provider.
+   */
+  preserveThinking?: boolean | undefined;
   /**
    * The effort value that encodes "thinking off" on this wire (e.g. `'none'`
    * for xai grok). When set, `withThinking('off')` sends it as
@@ -159,6 +171,7 @@ function convertMessage(
   message: Message,
   reasoningKey: string,
   toolMessageConversion: ToolMessageConversion,
+  preserveThinking: boolean,
 ): OpenAIMessage {
   let reasoningContent = '';
   let hasReasoningPart = false;
@@ -237,7 +250,10 @@ function convertMessage(
   // Qwen, One API gateways — work out of the box). Servers that don't
   // understand the field ignore it; an explicit `reasoningKey` config pins
   // the dialect instead of detecting it.
-  if (hasReasoningPart) {
+  // `preserveThinking` additionally force-replays the field on assistant
+  // messages that carry no thinking, for endpoints that require it to be
+  // present on every tool-calling assistant message.
+  if (hasReasoningPart || (preserveThinking && message.role === 'assistant')) {
     result[reasoningKey] = reasoningContent;
   }
 
@@ -249,6 +265,19 @@ function convertMessage(
 // Note the omission inline in the tool message text instead.
 const OMITTED_AUDIO_PLACEHOLDER = '(audio omitted: not supported by this provider)';
 const OMITTED_VIDEO_PLACEHOLDER = '(video omitted: not supported by this provider)';
+
+/**
+ * `toolToOpenAI` plus the root-union flattening every chat-completions
+ * gateway needs: a bare `anyOf` at `function.parameters` is rejected outright
+ * by strict upstreams (opencode zen's Console Go route answers `400 Upstream
+ * request failed`). Tools without a root union pass through untouched.
+ */
+function toolToOpenAIWithFlattenedRootUnion(tool: Tool): OpenAIToolParam {
+  const converted = toolToOpenAI(tool);
+  const flattened = flattenRootToolSchemaUnion(tool.parameters);
+  if (flattened === tool.parameters) return converted;
+  return { ...converted, function: { ...converted.function, parameters: flattened } };
+}
 
 function convertToolMessageContentForChat(
   message: Message,
@@ -299,6 +328,7 @@ function convertHistoryMessages(
   history: readonly Message[],
   reasoningKey: string,
   toolMessageConversion: ToolMessageConversion,
+  preserveThinking: boolean,
 ): OpenAIMessage[] {
   const messages: OpenAIMessage[] = [];
   const pendingToolResultMedia: OpenAIContentPart[] = [];
@@ -311,7 +341,7 @@ function convertHistoryMessages(
     if (msg.role !== 'tool') {
       appendToolResultMediaMessage(messages, pendingToolResultMedia);
     }
-    messages.push(convertMessage(msg, reasoningKey, toolMessageConversion));
+    messages.push(convertMessage(msg, reasoningKey, toolMessageConversion, preserveThinking));
     if (msg.role === 'tool') {
       pendingToolResultMedia.push(...toolResultImageParts(msg));
     }
@@ -483,6 +513,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
   private _baseUrl: string | undefined;
   private _defaultHeaders: Record<string, string> | undefined;
   private _reasoningKeyDialect: ReasoningKeyDialect;
+  private _preserveThinking: boolean;
   private _thinkingEffort: ThinkingEffort | undefined;
   private _offEffort: string | undefined;
   private _generationKwargs: OpenAILegacyGenerationKwargs;
@@ -508,6 +539,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
         ? normalizedReasoningKey
         : undefined,
     );
+    this._preserveThinking = options.preserveThinking ?? false;
     this._thinkingEffort = undefined;
     this._offEffort = options.offEffort;
     this._generationKwargs = {
@@ -558,6 +590,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
         normalizedHistory,
         this._reasoningKeyDialect.outboundKey(),
         this._toolMessageConversion,
+        this._preserveThinking,
       ),
     );
 
@@ -622,7 +655,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
     }
 
     if (tools.length > 0) {
-      createParams['tools'] = tools.map((t) => toolToOpenAI(t));
+      createParams['tools'] = tools.map((t) => toolToOpenAIWithFlattenedRootUnion(t));
     }
 
     if (this._stream) {

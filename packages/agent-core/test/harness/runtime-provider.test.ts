@@ -226,6 +226,46 @@ describe('resolveRuntimeProvider model metadata', () => {
   });
 });
 
+describe('resolveRuntimeProvider preserve_thinking forwarding', () => {
+  // opencode zen's "Console Go" route rejects a history whose tool-calling
+  // assistant messages carry no reasoning field; `preserve_thinking` in
+  // `[models.*]` forces the field on for such endpoints.
+  const configWithPreserveThinking = (preserveThinking?: boolean): KimiConfig => ({
+    ...BASE_CONFIG,
+    providers: {
+      ...BASE_CONFIG.providers,
+      ocg: { type: 'openai', apiKey: 'sk-zen', baseUrl: 'https://zen.example/v1' },
+    },
+    models: {
+      ...BASE_CONFIG.models!,
+      'zen-alias': {
+        provider: 'ocg',
+        model: 'deepseek-v4-flash',
+        maxContextSize: 1_000_000,
+        ...(preserveThinking === undefined ? {} : { preserveThinking }),
+      },
+    },
+  });
+
+  it('forwards alias.preserveThinking to the openai provider config', () => {
+    const resolved = resolveRuntimeProvider({
+      config: configWithPreserveThinking(true),
+      model: 'zen-alias',
+    });
+
+    expect(resolved.provider).toMatchObject({ type: 'openai', preserveThinking: true });
+  });
+
+  it('leaves it undefined when the alias does not declare it', () => {
+    const resolved = resolveRuntimeProvider({
+      config: configWithPreserveThinking(),
+      model: 'zen-alias',
+    });
+
+    expect((resolved.provider as { preserveThinking?: boolean }).preserveThinking).toBeUndefined();
+  });
+});
+
 describe('resolveRuntimeProvider maxOutputSize forwarding', () => {
   it('returns alias.maxOutputSize for request completion budgeting', () => {
     const resolved = resolveRuntimeProvider({

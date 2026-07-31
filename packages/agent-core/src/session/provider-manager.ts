@@ -130,6 +130,7 @@ export class ProviderManager implements ModelProvider {
       this.options.kimiRequestHeaders,
       effectiveAlias.maxOutputSize,
       effectiveAlias.reasoningKey,
+      effectiveAlias.preserveThinking,
       this.options.promptCacheKey,
       effectiveAlias.supportEfforts,
       effectiveAlias.offEffort,
@@ -263,6 +264,7 @@ function toKosongProviderConfig(
   kimiRequestHeaders: Record<string, string> | undefined,
   maxOutputSize: number | undefined,
   reasoningKey: string | undefined,
+  preserveThinking: boolean | undefined,
   promptCacheKey: string | undefined,
   supportEfforts: readonly string[] | undefined,
   offEffort: string | undefined,
@@ -317,6 +319,7 @@ function toKosongProviderConfig(
           modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'OPENAI_BASE_URL'),
         apiKey: providerApiKey(provider),
         reasoningKey,
+        preserveThinking,
         offEffort,
         // Session affinity: route every request of this session through the
         // same provider-side prompt cache (the OpenAI analog of Anthropic

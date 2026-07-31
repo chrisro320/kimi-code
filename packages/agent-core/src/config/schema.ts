@@ -49,6 +49,12 @@ const ModelAliasBaseSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   displayName: z.string().optional(),
   reasoningKey: z.string().optional(),
+  // Force every assistant message sent over the OpenAI chat-completions wire
+  // to carry the reasoning field, even when it holds no thinking (written as
+  // an empty string). Required by gateways that reject a history whose
+  // tool-calling assistant messages omit the field entirely (opencode zen's
+  // Console Go route answers `400 Upstream request failed`). Off by default.
+  preserveThinking: z.boolean().optional(),
   protocol: z.literal('anthropic').optional(),
   // Explicitly declare adaptive-thinking support, overriding the kosong
   // model-name version inference. Needed for custom-named Anthropic endpoints

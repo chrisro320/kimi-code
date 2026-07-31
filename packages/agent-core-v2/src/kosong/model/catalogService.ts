@@ -641,6 +641,7 @@ function buildProtocolProviderOptions(
     case 'openai': {
       const reasoningKey = nonEmpty(model.reasoningKey);
       if (reasoningKey !== undefined) options.reasoningKey = reasoningKey;
+      if (model.preserveThinking !== undefined) options.preserveThinking = model.preserveThinking;
       if (model.offEffort !== undefined) options.offEffort = model.offEffort;
       break;
     }

@@ -903,6 +903,64 @@ describe('reasoning dialect (behavior probes)', () => {
     expect(messages[0]).toMatchObject({ reasoning_content: 'earlier reasoning' });
   });
 
+  // opencode zen's "Console Go" route rejects a history whose tool-calling
+  // assistant messages carry no reasoning field at all (400 "Upstream request
+  // failed"); an empty string is accepted. `preserve_thinking` in
+  // `[models.*]` forces the field on for such endpoints.
+  const toolCallingHistory = (): Message[] => [
+    { role: 'user', content: [{ type: 'text', text: 'call it' }], toolCalls: [] },
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: '' }],
+      toolCalls: [{ type: 'function', id: 'call_1', name: 'lookup', arguments: '{}' }],
+    },
+    { role: 'tool', content: [{ type: 'text', text: 'ok' }], toolCalls: [], toolCallId: 'call_1' },
+  ];
+
+  it('preserveThinking forces an empty reasoning field on assistant messages', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+      preserveThinking: true,
+    });
+
+    const body = await captureOpenAIBody(provider, undefined, toolCallingHistory());
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages[1]!['reasoning_content']).toBe('');
+    expect(messages[0]).not.toHaveProperty('reasoning_content');
+    expect(messages[2]).not.toHaveProperty('reasoning_content');
+  });
+
+  it('omits the reasoning field entirely when preserveThinking is unset', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+
+    const body = await captureOpenAIBody(provider, undefined, toolCallingHistory());
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages[1]).not.toHaveProperty('reasoning_content');
+  });
+
+  it('a trait preserveThinking hook outranks the preserveThinking option', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+      preserveThinking: true,
+      hooks: { preserveThinking: () => false },
+    });
+
+    const body = await captureOpenAIBody(provider, undefined, toolCallingHistory());
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages[1]).not.toHaveProperty('reasoning_content');
+  });
+
   it('an explicit reasoningKey pins the dialect against detection', async () => {
     const provider = new OpenAILegacyChatProvider({
       model: 'gpt-4.1',
@@ -959,6 +1017,62 @@ const JSON_SCHEMA_FORMAT: ResponseFormat = {
   type: 'json_schema',
   jsonSchema: { name: 'contact', schema: CONTACT_SCHEMA, strict: true },
 };
+
+describe('root-union tool schema flattening (generic OpenAI chat base)', () => {
+  // A tool built from `z.union([...])` of object schemas serializes to a bare
+  // root `anyOf`; strict chat-completions upstreams reject that root shape
+  // (opencode zen's Console Go route answers 400 Upstream request failed).
+  const unionTool = {
+    name: 'TaskOutput',
+    description: 'union-shaped tool',
+    parameters: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      anyOf: [
+        {
+          type: 'object',
+          properties: { action: { type: 'string' }, task_id: { type: 'string' } },
+          required: ['action', 'task_id'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: { task_id: { type: 'string' }, block: { type: 'boolean' } },
+          required: ['task_id'],
+          additionalProperties: false,
+        },
+      ],
+    },
+  };
+
+  it('flattens a root anyOf into a single type: object schema', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+
+    let captured: Record<string, unknown> | undefined;
+    const client = sdkClient(provider) as { chat: { completions: { create: unknown } } };
+    client.chat.completions.create = vi.fn().mockImplementation((params: unknown) => {
+      captured = params as Record<string, unknown>;
+      return {
+        withResponse: () =>
+          Promise.resolve({ data: chatCompletionResponse(), response: { headers: new Headers() } }),
+      };
+    });
+    await drain(await provider.generate('', [unionTool], PROBE_HISTORY));
+
+    const tools = captured!['tools'] as Array<{ function: { parameters: Record<string, unknown> } }>;
+    const parameters = tools[0]!.function.parameters;
+    expect(parameters['type']).toBe('object');
+    expect(parameters).not.toHaveProperty('anyOf');
+    expect(Object.keys(parameters['properties'] as object).sort()).toEqual([
+      'action',
+      'block',
+      'task_id',
+    ]);
+  });
+});
 
 describe('responseFormat wire encoding (per base)', () => {
   it('maps json_schema to the OpenAI Chat Completions response_format', async () => {

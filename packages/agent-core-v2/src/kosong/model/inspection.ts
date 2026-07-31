@@ -227,6 +227,7 @@ const PROVIDER_OPTION_FIELD: Readonly<Record<string, string>> = {
   adaptiveThinking: 'adaptiveThinking',
   betaApi: 'betaApi',
   reasoningKey: 'reasoningKey',
+  preserveThinking: 'preserveThinking',
 };
 
 /** Attribute each `resolved.providerOptions.*` key back to its model field or the provider env bag. */

@@ -135,6 +135,27 @@ export function normalizeKimiToolSchema(schema: Record<string, unknown>): Record
   return ensureKimiPropertyTypes(derefJsonSchema(schema));
 }
 
+/**
+ * Flatten a root `anyOf`/`oneOf` of object schemas into a single
+ * `type: 'object'` schema — the shape-only half of
+ * {@link normalizeKimiToolSchema}, without the Moonshot-specific
+ * property-type filling.
+ *
+ * Chat-completions gateways in general (not just Moonshot) reject a union
+ * sitting directly at the `function.parameters` root: opencode zen's
+ * "Console Go" route answers `400 Upstream request failed` for a tool whose
+ * parameters are a bare root `anyOf`. Flattening is the one rewrite both
+ * flavors accept, so the generic OpenAI chat base applies it to every tool.
+ * Schemas without a root union are returned untouched (same object), keeping
+ * the wire shape — and therefore the provider-side prompt cache — stable for
+ * the overwhelmingly common case.
+ */
+export function flattenRootToolSchemaUnion(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  return mergeRootUnion(schema) ?? schema;
+}
+
 function ensureKimiPropertyTypes(schema: Record<string, unknown>): Record<string, unknown> {
   const normalized = cloneJsonValue(schema);
   if (!isRecord(normalized)) {

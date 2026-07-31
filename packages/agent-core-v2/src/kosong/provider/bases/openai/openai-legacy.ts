@@ -73,6 +73,7 @@ import {
   toolToOpenAI,
 } from './openai-common';
 import { ReasoningKeyDialect } from './reasoning-key';
+import { flattenRootToolSchemaUnion } from './tool-schema';
 import {
   mergeRequestHeaders,
   requireProviderApiKey,
@@ -134,6 +135,15 @@ export interface OpenAILegacyOptions {
   stream?: boolean | undefined;
   maxTokens?: number | undefined;
   reasoningKey?: string | undefined;
+  /**
+   * Force every assistant message to carry the reasoning field, even when it
+   * holds no thinking (the field is then written as an empty string). Some
+   * OpenAI-compatible gateways reject a history whose tool-calling assistant
+   * messages omit the field entirely (opencode zen's Console Go route answers
+   * `400 Upstream request failed`). A trait's `preserveThinking` hook still
+   * wins when present — a vendor protocol fact outranks operator config.
+   */
+  preserveThinking?: boolean | undefined;
   offEffort?: string | undefined;
   thinkingEffort?: ThinkingEffort | undefined;
   httpClient?: unknown;
@@ -525,6 +535,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
   private readonly _baseUrl: string | undefined;
   private readonly _defaultHeaders: Record<string, string> | undefined;
   private readonly _reasoningKeyDialect: ReasoningKeyDialect;
+  private readonly _preserveThinking: boolean | undefined;
   private readonly _offEffort: string | undefined;
   private readonly _thinkingEffort: ThinkingEffort | undefined;
   private readonly _generationKwargs: OpenAILegacyGenerationKwargs;
@@ -561,6 +572,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
         ? normalizedReasoningKey
         : this._hooks?.reasoningKey?.(),
     );
+    this._preserveThinking = options.preserveThinking;
     this._thinkingEffort = options.thinkingEffort;
     this._offEffort = options.offEffort;
     this._generationKwargs = normalizeGenerationKwargs(
@@ -602,7 +614,10 @@ export class OpenAILegacyChatProvider implements ChatProvider {
     // preserveThinking decides whether assistant messages force-replay their
     // reasoning field; the hook reads the already-seeded kwargs (e.g. the
     // thinking config a withThinking hook just encoded).
-    const preserveThinking = this._hooks?.preserveThinking?.(kwargs) ?? false;
+    // Precedence: a trait hook (vendor protocol fact) wins over operator
+    // config (`[models.*] preserve_thinking`), which wins over the default.
+    const preserveThinking =
+      this._hooks?.preserveThinking?.(kwargs) ?? this._preserveThinking ?? false;
     // Outbound reasoning field: the dialect the endpoint actually spoke.
     const reasoningKey = this._reasoningKeyDialect.outboundKey();
 
@@ -647,7 +662,18 @@ export class OpenAILegacyChatProvider implements ChatProvider {
     };
 
     if (tools.length > 0) {
-      const convertTool = this._hooks?.convertTool ?? ((tool: Tool) => toolToOpenAI(tool));
+      // Without a trait convertTool, flatten a root `anyOf` at
+      // `function.parameters` — strict chat-completions upstreams reject that
+      // root shape outright (see `tool-schema.ts`). Tools without a root union
+      // pass through byte-identical.
+      const convertTool =
+        this._hooks?.convertTool ??
+        ((tool: Tool) => {
+          const converted = toolToOpenAI(tool);
+          const flattened = flattenRootToolSchemaUnion(tool.parameters);
+          if (flattened === tool.parameters) return converted;
+          return { ...converted, function: { ...converted.function, parameters: flattened } };
+        });
       createParams['tools'] = tools.map((tool) => convertTool(tool));
     }
     if (options?.responseFormat !== undefined) {

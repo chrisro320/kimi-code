@@ -2195,3 +2195,161 @@ describe('remote compaction checkpoints', () => {
     expect(JSON.stringify(body)).toContain('visible');
   });
 });
+
+describe('preserveThinking (forced reasoning-field replay)', () => {
+  // opencode zen's "Console Go" route rejects a history whose tool-calling
+  // assistant messages carry no reasoning field at all (400 "Upstream request
+  // failed"), even though an empty string is accepted. Thinking is not always
+  // still in history by the time the turn is replayed, so the field has to be
+  // forced on for such endpoints.
+  const toolCallingHistory = (): Message[] => [
+    { role: 'user', content: [{ type: 'text', text: 'call it' }], toolCalls: [] },
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: '' }],
+      toolCalls: [{ type: 'function', id: 'call_1', name: 'lookup', arguments: '{}' }],
+    },
+    { role: 'tool', content: [{ type: 'text', text: 'ok' }], toolCalls: [], toolCallId: 'call_1' },
+  ];
+
+  it('writes an empty reasoning field on assistant messages without thinking', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'test-key',
+      stream: false,
+      preserveThinking: true,
+    });
+    const body = await captureRequestBody(provider, '', [], toolCallingHistory());
+
+    const messages = body['messages'] as Record<string, unknown>[];
+    expect(messages[1]!['reasoning_content']).toBe('');
+  });
+
+  it('omits the field entirely when preserveThinking is not set', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'test-key',
+      stream: false,
+    });
+    const body = await captureRequestBody(provider, '', [], toolCallingHistory());
+
+    const messages = body['messages'] as Record<string, unknown>[];
+    expect(messages[1]).not.toHaveProperty('reasoning_content');
+  });
+
+  it('honors an explicit reasoningKey for the forced field', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'test-key',
+      stream: false,
+      preserveThinking: true,
+      reasoningKey: 'reasoning',
+    });
+    const body = await captureRequestBody(provider, '', [], toolCallingHistory());
+
+    const messages = body['messages'] as Record<string, unknown>[];
+    expect(messages[1]!['reasoning']).toBe('');
+    expect(messages[1]).not.toHaveProperty('reasoning_content');
+  });
+
+  it('still carries real thinking content when present', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'test-key',
+      stream: false,
+      preserveThinking: true,
+    });
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'q' }], toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: 'inner monologue' },
+          { type: 'text', text: 'answer' },
+        ],
+        toolCalls: [],
+      },
+    ];
+    const body = await captureRequestBody(provider, '', [], history);
+
+    const messages = body['messages'] as Record<string, unknown>[];
+    expect(messages[1]!['reasoning_content']).toBe('inner monologue');
+  });
+
+  it('does not touch user or tool messages', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'deepseek-v4-flash',
+      apiKey: 'test-key',
+      stream: false,
+      preserveThinking: true,
+    });
+    const body = await captureRequestBody(provider, '', [], toolCallingHistory());
+
+    const messages = body['messages'] as Record<string, unknown>[];
+    expect(messages[0]).not.toHaveProperty('reasoning_content');
+    expect(messages[2]).not.toHaveProperty('reasoning_content');
+  });
+});
+
+describe('root-union tool schema flattening', () => {
+  // A tool built from `z.union([...])` of object schemas serializes to a bare
+  // root `anyOf`, which strict chat-completions upstreams reject outright
+  // (opencode zen's Console Go route answers 400 Upstream request failed).
+  const unionTool: Tool = {
+    name: 'TaskOutput',
+    description: 'union-shaped tool',
+    parameters: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      anyOf: [
+        {
+          type: 'object',
+          properties: { action: { type: 'string' }, task_id: { type: 'string' } },
+          required: ['action', 'task_id'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: { task_id: { type: 'string' }, block: { type: 'boolean' } },
+          required: ['task_id'],
+          additionalProperties: false,
+        },
+      ],
+    },
+  };
+
+  it('flattens a root anyOf into a single type: object schema', async () => {
+    const provider = createProvider();
+    const body = await captureRequestBody(provider, '', [unionTool], [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [] },
+    ]);
+
+    const tools = body['tools'] as Array<{ function: { parameters: Record<string, unknown> } }>;
+    const parameters = tools[0]!.function.parameters;
+    expect(parameters['type']).toBe('object');
+    expect(parameters).not.toHaveProperty('anyOf');
+    expect(Object.keys(parameters['properties'] as object).sort()).toEqual([
+      'action',
+      'block',
+      'task_id',
+    ]);
+  });
+
+  it('leaves an ordinary object schema byte-identical', async () => {
+    const plainTool: Tool = {
+      name: 'lookup',
+      description: 'plain tool',
+      parameters: {
+        type: 'object',
+        properties: { q: { type: 'string' } },
+        required: ['q'],
+      },
+    };
+    const provider = createProvider();
+    const body = await captureRequestBody(provider, '', [plainTool], [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [] },
+    ]);
+
+    const tools = body['tools'] as Array<{ function: { parameters: Record<string, unknown> } }>;
+    expect(tools[0]!.function.parameters).toEqual(plainTool.parameters);
+  });
+});
