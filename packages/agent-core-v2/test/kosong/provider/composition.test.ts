@@ -1188,7 +1188,13 @@ describe('responseFormat wire encoding (per base)', () => {
 });
 
 describe('Anthropic thinking keep (context-management overlay)', () => {
-  it('overlays the clear-thinking edit and forces the beta endpoint when keep is set', async () => {
+  // Applying the clear-thinking edit forces the beta Messages API, and that
+  // endpoint collapses prompt caching on Anthropic-compatible gateways (the
+  // qwen token-plan endpoint drops to a 0% hit rate on long-idle turns).
+  // Preserved thinking is carried client-side through the unsigned thinking
+  // blocks kept in history, so `keep` must stay off the wire entirely. Mirrors
+  // the v1 guard in agent-core's kimi-env-params.test.ts.
+  it('keeps a set keep off the wire and stays on the standard endpoint', async () => {
     const provider = new AnthropicChatProvider({
       model: 'claude-opus-4-6',
       apiKey: 'sk-probe',
@@ -1199,14 +1205,12 @@ describe('Anthropic thinking keep (context-management overlay)', () => {
       thinking: { effort: 'high', keep: 'all' },
     });
 
-    expect(via).toBe('beta');
-    expect(params['context_management']).toEqual({
-      edits: [{ type: 'clear_thinking_20251015', keep: 'all' }],
-    });
-    expect(params['betas']).toContain('context-management-2025-06-27');
+    expect(via).toBe('standard');
+    expect(params).not.toHaveProperty('context_management');
+    expect(params).not.toHaveProperty('betas');
   });
 
-  it('never duplicates the edit or the beta across turns on the same provider', async () => {
+  it('never starts emitting the edit or the beta on later turns of the same provider', async () => {
     const provider = new AnthropicChatProvider({
       model: 'claude-opus-4-6',
       apiKey: 'sk-probe',
@@ -1217,11 +1221,10 @@ describe('Anthropic thinking keep (context-management overlay)', () => {
     const first = await captureAnthropicBody(provider, keepAll);
     const second = await captureAnthropicBody(provider, keepAll);
 
-    for (const { params } of [first, second]) {
-      const edits = (params['context_management'] as { edits: unknown[] }).edits;
-      expect(edits).toEqual([{ type: 'clear_thinking_20251015', keep: 'all' }]);
-      const betas = params['betas'] as string[];
-      expect(betas.filter((beta) => beta === 'context-management-2025-06-27')).toHaveLength(1);
+    for (const { params, via } of [first, second]) {
+      expect(via).toBe('standard');
+      expect(params).not.toHaveProperty('context_management');
+      expect(params).not.toHaveProperty('betas');
     }
   });
 

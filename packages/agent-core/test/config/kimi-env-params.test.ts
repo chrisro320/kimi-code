@@ -170,32 +170,32 @@ function anthropicState(provider: ChatProvider): AnthropicKeepState {
 }
 
 describe('applyAnthropicThinkingKeep', () => {
-  it('injects context_management keep="all" by default when thinking is on', () => {
-    const out = applyAnthropicThinkingKeep(anthropic(), 'high', {});
-    expect(anthropicState(out).contextManagement).toEqual({
-      edits: [{ type: 'clear_thinking_20251015', keep: 'all' }],
-    });
-    expect(anthropicState(out).betaFeatures).toContain('context-management-2025-06-27');
-  });
+  // The clear_thinking edit is deliberately never applied on this path.
+  // `withThinkingKeep()` emits the edit *and* forces the beta Messages API, and
+  // that beta endpoint collapses prompt caching on Anthropic-compatible
+  // gateways (the qwen token-plan endpoint: hit rate drops to 0 on long-idle
+  // turns). Preserved thinking is already carried client-side via the unsigned
+  // thinking blocks `convertMessage` keeps in history, so the edit buys nothing
+  // and costs the cache. These tests pin that: whatever `keep` resolves to, the
+  // provider comes back untouched and stays on the standard endpoint.
+  //
+  // Keep-resolution precedence itself (env over config, off-values, blank
+  // fallthrough) is covered against `applyKimiEnvThinkingKeep` above, which
+  // shares `resolveThinkingKeep` and does act on the result.
+  it.each([
+    ['keep resolved from the default', {}, undefined],
+    ['keep resolved from env', { KIMI_MODEL_THINKING_KEEP: 'all' }, undefined],
+    ['keep resolved from config', {}, 'all'],
+    ['env keep overriding config', { KIMI_MODEL_THINKING_KEEP: 'all' }, 'off'],
+  ] as const)('returns the provider untouched with %s', (_label, env, configKeep) => {
+    const provider = anthropic();
+    const out = applyAnthropicThinkingKeep(provider, 'high', env, configKeep);
 
-  it('injects keep from env when thinking is on', () => {
-    const out = applyAnthropicThinkingKeep(anthropic(), 'high', { KIMI_MODEL_THINKING_KEEP: 'all' });
-    expect(anthropicState(out).contextManagement?.edits[0]?.keep).toBe('all');
-  });
-
-  it('injects keep from config when env is unset', () => {
-    const out = applyAnthropicThinkingKeep(anthropic(), 'high', {}, 'all');
-    expect(anthropicState(out).contextManagement?.edits[0]?.keep).toBe('all');
-  });
-
-  it('env takes precedence over config', () => {
-    const out = applyAnthropicThinkingKeep(
-      anthropic(),
-      'high',
-      { KIMI_MODEL_THINKING_KEEP: 'all' },
-      'off',
+    expect(out).toBe(provider);
+    expect(anthropicState(out).contextManagement).toBeUndefined();
+    expect(anthropicState(out).betaFeatures ?? []).not.toContain(
+      'context-management-2025-06-27',
     );
-    expect(anthropicState(out).contextManagement?.edits[0]?.keep).toBe('all');
   });
 
   it.each(['off', 'false', '0', 'no', 'none', 'null', 'OFF', 'None'])(
@@ -231,14 +231,17 @@ describe('applyAnthropicThinkingKeep', () => {
     expect(anthropicState(out).contextManagement).toBeUndefined();
   });
 
-  it('does not duplicate the context-management beta on repeated calls', () => {
+  it('never accumulates the context-management beta across repeated calls', () => {
+    const provider = anthropic();
     const out = applyAnthropicThinkingKeep(
-      applyAnthropicThinkingKeep(anthropic(), 'high', {}),
+      applyAnthropicThinkingKeep(provider, 'high', {}),
       'high',
       {},
     );
+
+    expect(out).toBe(provider);
     const betas = anthropicState(out).betaFeatures ?? [];
-    expect(betas.filter((b) => b === 'context-management-2025-06-27')).toHaveLength(1);
+    expect(betas.filter((b) => b === 'context-management-2025-06-27')).toHaveLength(0);
   });
 
   it('leaves non-anthropic providers untouched', () => {

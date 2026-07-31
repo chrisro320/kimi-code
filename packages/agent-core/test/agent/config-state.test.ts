@@ -658,7 +658,11 @@ describe('ConfigState.provider applies global KIMI_MODEL_* request config', () =
     });
   }
 
-  it('injects context_management clear_thinking keep into config.provider for anthropic when thinking is on', () => {
+  // End-to-end counterpart to the unit guard in kimi-env-params.test.ts: a
+  // resolved `keep` must not reach the wire as a clear_thinking edit, because
+  // that edit forces the beta Messages API and collapses prompt caching on
+  // Anthropic-compatible gateways. Preserved thinking rides in history instead.
+  it('keeps config.provider on the standard endpoint for anthropic even when keep is set', () => {
     vi.stubEnv('KIMI_MODEL_THINKING_KEEP', 'all');
     try {
       const ctx = anthropicAgentWithThinkingKeep(undefined);
@@ -669,10 +673,8 @@ describe('ConfigState.provider applies global KIMI_MODEL_* request config', () =
         contextManagement?: { edits: Array<{ type: string; keep?: string }> };
         betaFeatures?: string[];
       };
-      expect(gen.contextManagement).toEqual({
-        edits: [{ type: 'clear_thinking_20251015', keep: 'all' }],
-      });
-      expect(gen.betaFeatures).toContain('context-management-2025-06-27');
+      expect(gen.contextManagement).toBeUndefined();
+      expect(gen.betaFeatures ?? []).not.toContain('context-management-2025-06-27');
     } finally {
       vi.unstubAllEnvs();
     }
