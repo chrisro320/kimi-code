@@ -564,13 +564,19 @@ describe('disclosure mode — executable table freshness', () => {
 });
 
 describe('disclosure mode — compaction', () => {
-  it('filters protocol context from the summarizer input and discards loaded schemas after compaction', async () => {
+  it('reuses the turn projection as the summarizer input and discards loaded schemas after compaction', async () => {
     const ctx = await disclosureAgent();
 
     ctx.mockNextResponse({ type: 'text', text: 'load' }, selectCall('call-1', [GRAFANA_TOOL]));
     ctx.mockNextResponse({ type: 'text', text: 'ok' });
     await runTurn(ctx, 'load it');
     expect(schemaMessages(ctx)).toHaveLength(1);
+
+    // The projection the next turn request would have sent. The summarizer
+    // request must reuse it as its prefix: shaping protocol context away here
+    // (and only here) would diverge from the turn projection at the first
+    // protocol message and void the provider prompt cache from there on.
+    const turnProjection = ctx.agent.context.messages;
 
     const compacted = new Promise<{ tokensAfter: number }>((resolve) => {
       ctx.emitter.once('context.apply_compaction', (entry: { args: { tokensAfter: number } }) => {
@@ -583,10 +589,11 @@ describe('disclosure mode — compaction', () => {
     const { tokensAfter } = await compacted;
     await completed;
 
-    // Summarizer input: no schema messages, no announcements.
+    // Summarizer input: byte-for-byte the turn projection, plus the trailing
+    // summarization instruction.
     const summarizerCall = ctx.llmCalls.at(-1)!;
-    expect(summarizerCall.history.some((m) => m.tools !== undefined)).toBe(false);
-    expect(JSON.stringify(summarizerCall.history)).not.toContain('<tools_added>');
+    expect(summarizerCall.history.slice(0, turnProjection.length)).toEqual(turnProjection);
+    expect(JSON.stringify(summarizerCall.history)).toContain('<tools_added>');
 
     // Post-compaction context: the loaded set is DISCARDED — no schema
     // message is rebuilt, the ledger is empty, deferred extras drop out of

@@ -22,7 +22,6 @@ import {
 import type { Agent } from '..';
 import type { GenerateOptionsWithRequestLogFields } from '../llm-request-logger';
 import type { ContextMessage } from '../context/types';
-import { stripDynamicToolContext } from '../context/dynamic-tools';
 import { isAbortError } from '../../loop/errors';
 import {
   findAPIStatusError,
@@ -442,15 +441,16 @@ export class FullCompaction {
       // summarizer request itself cannot fit. Any trimmed messages are not
       // covered by the produced summary; `droppedCount` reports that blind spot.
       // Dynamic-tool protocol context (schema messages, loadable-tools
-      // announcements) is excluded from the summarizer input entirely: it is
-      // protocol state, not conversation — summarizing it wastes tokens and
-      // risks schema text leaking into the summary. The post-compaction
-      // boundary re-announces the manifest; the schemas themselves are
-      // deliberately dropped (discard-on-compaction) and re-selectable on
-      // demand. Must happen before project() (which strips the origin
-      // anchor). `originalHistory` itself stays untouched for the
-      // prefix-race check and `compactedCount`.
-      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
+      // announcements) is shaped by project() alone, exactly as it is for a
+      // turn request: stripped when tool-select is off, kept when it is on.
+      // Shaping it here as well would make the summarizer prefix diverge from
+      // the turn projection at the first protocol message and void the
+      // provider prompt cache from there on — measured as an 18% cache hit on
+      // a summarizer request whose tools, system prompt, and message count
+      // were identical to the loop request immediately before it.
+      // `originalHistory` itself stays untouched for the prefix-race check
+      // and `compactedCount`.
+      let historyForModel: readonly ContextMessage[] = originalHistory;
       let droppedCount = 0;
       let mediaStripAttempted = false;
       let overflowShrinkCount = 0;

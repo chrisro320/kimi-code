@@ -406,6 +406,61 @@ describe('FullCompaction', () => {
     ).toBe(false);
   });
 
+  it('keeps the summarizer prefix identical to the turn projection when tool-select is on', async () => {
+    const ctx = testAgent({
+      experimentalFlags: new FlagResolver(
+        { KIMI_CODE_EXPERIMENTAL_TOOL_SELECT: '1' },
+        FLAG_DEFINITIONS,
+      ),
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        dynamically_loaded_tools: true,
+      },
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    appendDynamicToolProtocolContext(ctx);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    expect(ctx.agent.toolSelectEnabled).toBe(true);
+
+    // The projection the next turn request would have sent. The summarizer
+    // request must reuse it byte-for-byte as its prefix, otherwise the
+    // provider prompt cache is voided from the first divergent message on.
+    const turnProjection = ctx.agent.context.messages;
+    expect(turnProjection.some((message) => messageText(message).includes('CronList'))).toBe(true);
+
+    ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
+    await ctx.rpc.beginCompaction({});
+    await ctx.once('compaction.completed');
+
+    const [compactionCall] = ctx.llmCalls;
+    expect(compactionCall?.history.slice(0, turnProjection.length)).toEqual(turnProjection);
+  });
+
+  it('strips dynamic-tool protocol context from the summarizer request when tool-select is off', async () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    appendDynamicToolProtocolContext(ctx);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    expect(ctx.agent.toolSelectEnabled).toBe(false);
+
+    const turnProjection = ctx.agent.context.messages;
+    expect(turnProjection.some((message) => messageText(message).includes('CronList'))).toBe(false);
+
+    ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
+    await ctx.rpc.beginCompaction({});
+    await ctx.once('compaction.completed');
+
+    const [compactionCall] = ctx.llmCalls;
+    expect(compactionCall?.history.slice(0, turnProjection.length)).toEqual(turnProjection);
+  });
+
   it('force-refreshes OAuth credentials on compaction 401 and treats replay 401 as provider auth error', async () => {
     const records: TelemetryRecord[] = [];
     const tokenCalls: Array<boolean | undefined> = [];
@@ -2720,4 +2775,32 @@ function inputHistorySnapshot(history: readonly Message[]): string[] {
 
 function normalizeInputText(text: string): string {
   return text.includes('first-person handoff note') ? '<compaction-instruction>' : text;
+}
+
+function appendDynamicToolProtocolContext(ctx: TestAgentContext): void {
+  ctx.dispatch({
+    type: 'context.append_message',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: 'Loadable tools: CronList' }],
+      toolCalls: [],
+      origin: { kind: 'system_trigger', name: 'loadable-tools' },
+    },
+  });
+  ctx.dispatch({
+    type: 'context.append_message',
+    message: {
+      role: 'system',
+      content: [],
+      toolCalls: [],
+      tools: [
+        {
+          name: 'CronList',
+          description: 'List cron jobs.',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+      origin: { kind: 'injection', variant: 'dynamic_tool_schema' },
+    },
+  });
 }
