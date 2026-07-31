@@ -233,7 +233,7 @@ describe('AgentPermissionPolicyService git cwd write approval', () => {
       args: { path: 'src/a.ts', content: 'x' },
       accesses: ToolAccesses.writeFile(join(workspaceDir, 'src/a.ts')),
     })).resolves.toMatchObject({
-      policyName: 'git-cwd-write-approve',
+      policyName: 'cwd-write-approve',
       result: { kind: 'approve' },
     });
   });
@@ -247,7 +247,7 @@ describe('AgentPermissionPolicyService git cwd write approval', () => {
       args: { path: join(extraDir, 'src/a.ts'), old_string: 'A', new_string: 'B' },
       accesses: ToolAccesses.readWriteFile(join(extraDir, 'src/a.ts')),
     })).resolves.toMatchObject({
-      policyName: 'git-cwd-write-approve',
+      policyName: 'cwd-write-approve',
       result: { kind: 'approve' },
     });
   });

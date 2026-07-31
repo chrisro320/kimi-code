@@ -14,7 +14,7 @@ import {
   GitControlPathAccessAskPermissionPolicy,
   SensitiveFileAccessAskPermissionPolicy,
 } from './file-access-ask';
-import { GitCwdWriteApprovePermissionPolicy } from './git-cwd-write-approve';
+import { CwdWriteApprovePermissionPolicy } from './cwd-write-approve';
 import { GoalStartReviewAskPermissionPolicy } from './goal-start-review-ask';
 import { PlanModeGuardDenyPermissionPolicy } from './plan-mode-guard-deny';
 import { PlanModeToolApprovePermissionPolicy } from './plan-mode-tool-approve';
@@ -81,8 +81,8 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     new SwarmModeAgentSwarmApprovePermissionPolicy(agent),
     // Tool is in the default-approve list (read-only / UI helpers) → approve.
     new DefaultToolApprovePermissionPolicy(),
-    // Write/Edit on POSIX paths inside cwd inside a git work tree → approve.
-    new GitCwdWriteApprovePermissionPolicy(agent),
+    // Write/Edit on POSIX paths inside cwd → approve.
+    new CwdWriteApprovePermissionPolicy(agent),
     // Nothing matched → ask.
     new FallbackAskPermissionPolicy(),
   ];

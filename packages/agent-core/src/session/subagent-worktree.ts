@@ -52,6 +52,33 @@ export interface SubagentWorktreeHandle {
   finish(outcome: SubagentWorktreeOutcome): Promise<SubagentWorktreeFinishResult>;
 }
 
+/**
+ * Isolation can never work in this workspace: the backend cannot materialize
+ * POSIX state, the directory is not a git repository, or the repository has no
+ * commit to base a worktree on. That is a property of the environment, not a
+ * failure -- retrying or repairing the tree changes nothing.
+ *
+ * Kept distinct from the `null` return, which means isolation *should* have
+ * worked here and did not (worktree creation failed, the baseline could not be
+ * snapshotted, the seeded tree diverged from it). That case still refuses
+ * dispatch: running unisolated in a repository whose state we failed to capture
+ * is the exact situation the isolation exists to prevent.
+ */
+export interface SubagentWorktreeUnsupported {
+  readonly unsupported: string;
+}
+
+export type SubagentWorktreeAcquisition =
+  | SubagentWorktreeHandle
+  | SubagentWorktreeUnsupported
+  | null;
+
+export function isSubagentWorktreeUnsupported(
+  acquisition: SubagentWorktreeAcquisition,
+): acquisition is SubagentWorktreeUnsupported {
+  return acquisition !== null && 'unsupported' in acquisition;
+}
+
 export type EditingCandidatePathClassification = 'in_scope' | 'scope_expansion_requested';
 
 export type EditingCandidatePathState =
@@ -130,18 +157,24 @@ export async function acquireSubagentWorktree(
   kaos: Kaos,
   repoCwd: string,
   options: SubagentWorktreeOptions = {},
-): Promise<SubagentWorktreeHandle | null> {
+): Promise<SubagentWorktreeAcquisition> {
   const capabilities = getCapabilities(kaos);
-  if (!capabilities.stateMaterialization) return null;
+  if (!capabilities.stateMaterialization) {
+    return { unsupported: 'the backend cannot materialize POSIX filesystem state' };
+  }
 
   const initialRepoRoot = await gitStdout(kaos, repoCwd, ['rev-parse', '--show-toplevel']);
-  if (initialRepoRoot === null) return null;
+  if (initialRepoRoot === null) {
+    return { unsupported: 'the workspace is not a git repository' };
+  }
   const rootResolution = await resolveIsolationRoot(kaos, initialRepoRoot, options.scope);
   if (rootResolution === null) return null;
   const repoRoot = rootResolution.repoRoot;
   const effectiveCwd = repoRoot === initialRepoRoot ? repoCwd : repoRoot;
   const headCommit = await gitStdout(kaos, effectiveCwd, ['rev-parse', 'HEAD']);
-  if (headCommit === null) return null;
+  if (headCommit === null) {
+    return { unsupported: 'the repository has no commit to base an isolated worktree on' };
+  }
 
   const commonDirRaw = await gitStdout(kaos, effectiveCwd, ['rev-parse', '--git-common-dir']);
   const commonDir = commonDirRaw === null

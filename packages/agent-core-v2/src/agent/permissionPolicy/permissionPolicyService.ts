@@ -17,7 +17,7 @@ import { AutoModeAskUserQuestionDenyPermissionPolicyService } from '#/agent/perm
 import { DefaultToolApprovePermissionPolicyService } from '#/agent/permissionPolicy/policies/default-tool-approve';
 import { FallbackAskPermissionPolicyService } from '#/agent/permissionPolicy/policies/fallback-ask';
 import { GitControlPathAccessAskPermissionPolicyService } from '#/agent/permissionPolicy/policies/git-control-path-access-ask';
-import { GitCwdWriteApprovePermissionPolicyService } from '#/agent/permissionPolicy/policies/git-cwd-write-approve';
+import { CwdWriteApprovePermissionPolicyService } from '#/agent/permissionPolicy/policies/cwd-write-approve';
 import { SensitiveFileAccessAskPermissionPolicyService } from '#/agent/permissionPolicy/policies/sensitive-file-access-ask';
 import { SessionApprovalHistoryPermissionPolicyService } from '#/agent/permissionPolicy/policies/session-approval-history';
 import { UserConfiguredAllowPermissionPolicyService } from '#/agent/permissionPolicy/policies/user-configured-allow';
@@ -55,7 +55,7 @@ export class AgentPermissionPolicyService
       this.instantiation.createInstance(GitControlPathAccessAskPermissionPolicyService),
       this.instantiation.createInstance(YoloModeApprovePermissionPolicyService),
       this.instantiation.createInstance(DefaultToolApprovePermissionPolicyService),
-      this.instantiation.createInstance(GitCwdWriteApprovePermissionPolicyService),
+      this.instantiation.createInstance(CwdWriteApprovePermissionPolicyService),
       this.instantiation.createInstance(FallbackAskPermissionPolicyService),
     ];
   }

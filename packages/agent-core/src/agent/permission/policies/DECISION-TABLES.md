@@ -140,16 +140,17 @@ Policies are evaluated in the order `PermissionManager` registers them (see `pol
 - **Minimal blocked effect**: only the specific git-control-path access.
 - **Recovery / override**: user approves if the git-internals write is genuinely intended (rare, e.g. a deliberate hook install).
 
-## git-cwd-write-approve.ts — `GitCwdWriteApprovePermissionPolicy`
+## cwd-write-approve.ts — `CwdWriteApprovePermissionPolicy`
 
-- **Protected asset**: N/A — this is an auto-*approve* narrowing, not a guard; it exists to skip a redundant ask for writes already inside a known-safe git working tree.
-- **Authoritative evidence**: POSIX path class, a non-empty `cwd`, every write access within the workspace (`isWithinWorkspace`), and a confirmed git worktree marker at `cwd` (`findGitWorkTreeMarker`).
+- **Protected asset**: N/A — this is an auto-*approve* narrowing, not a guard; it exists to skip a redundant ask for writes the user already authorized by pointing the agent at this workspace.
+- **Authoritative evidence**: POSIX path class, a non-empty `cwd`, and every write access within the workspace (`isWithinWorkspace`, which covers `additionalDirs`).
 - **Weak signal**: none — every condition is an exact check; any one failing just falls through to the next policy (no ask is skipped incorrectly).
-- **Trigger example**: `Write`/`Edit` inside the workspace of a real git working tree on POSIX.
+- **Trigger example**: `Write`/`Edit` inside the workspace on POSIX, whether or not the directory is under version control.
 - **Non-trigger example**: Windows path class (`pathClass() !== 'posix'`) — deliberately excluded and falls through, not auto-approved; a write outside the workspace root also falls through (still subject to `file-access-ask.ts`/other policies).
 - **Indeterminate state**: any missing precondition → fall through (`return` with no result), never a false approve.
 - **Minimal blocked effect**: N/A (approve-only, and only narrows which calls skip the ask — never widens denial).
 - **Recovery / override**: N/A.
+- **Why no git check**: this policy used to require a git work-tree marker at `cwd`. Authorization comes from the user choosing the workspace, not from the directory being a repository — git supplies a way to undo a write, not the permission to make it. The marker requirement meant an uninitialized project asked for approval on every Write/Edit while the identical write one `git init` away was auto-approved even in manual mode: a difference in ceremony, not in risk. The accesses that do warrant a prompt are asked about earlier in the chain by `SensitiveFileAccessAskPermissionPolicy` and `GitControlPathAccessAskPermissionPolicy`, both of which still run first and are unaffected.
 
 ## goal-start-review-ask.ts — `GoalStartReviewAskPermissionPolicy`
 

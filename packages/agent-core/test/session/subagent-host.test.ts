@@ -1245,6 +1245,97 @@ describe('SessionSubagentHost worktree isolation', () => {
     expect(session.metadata.agents).toEqual({});
   });
 
+  it('dispatches unisolated when the workspace can never support isolation (best-effort default)', async () => {
+    const parent = testAgent();
+    parent.configure();
+
+    const child = testAgent();
+    child.configure();
+    const summary =
+      'Implemented the requested change in full and verified it against the existing test suite, leaving a thorough and complete summary so the parent agent can proceed without repeating any of the finished investigation work.';
+    child.mockNextResponse({ type: 'text', text: summary });
+
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({
+      unsupported: 'the repository has no commit to base an isolated worktree on',
+    });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Implement the fix',
+      description: 'Fix bug',
+      runInBackground: false,
+      signal,
+      enforceDispatch: true,
+      dispatch: { scope: ['src/**'] },
+    });
+    await handle.completion;
+
+    expect(child.agent.config.cwd).toBe(parent.agent.config.cwd);
+  });
+
+  it('still refuses an unsupported workspace under subagent.isolation = "strict"', async () => {
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent();
+    child.configure();
+
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({
+      unsupported: 'the workspace is not a git repository',
+    });
+
+    const session = fakeSession(parent.agent, child.agent, {}, {
+      providers: {},
+      subagent: { isolation: 'strict' },
+    } as unknown as KimiConfig);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(
+      host.spawn({
+        profileName: 'coder',
+        parentToolCallId: 'call_agent',
+        prompt: 'Implement the fix',
+        description: 'Fix bug',
+        runInBackground: false,
+        signal,
+        enforceDispatch: true,
+        dispatch: { scope: ['src/**'] },
+      }),
+    ).rejects.toThrow('the workspace is not a git repository');
+    expect(session.createAgent).not.toHaveBeenCalled();
+  });
+
+  it('refuses a discard-changes dispatch even in best-effort mode when isolation is unsupported', async () => {
+    const parent = testAgent();
+    parent.configure();
+    const child = testAgent();
+    child.configure();
+
+    vi.mocked(acquireSubagentWorktree).mockResolvedValue({
+      unsupported: 'the workspace is not a git repository',
+    });
+
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(
+      host.spawn({
+        profileName: 'coder',
+        parentToolCallId: 'call_agent',
+        prompt: 'Analyze only',
+        description: 'Analyze',
+        runInBackground: false,
+        signal,
+        enforceDispatch: true,
+        dispatch: { scope: ['src/**'], discardChanges: true },
+      }),
+    ).rejects.toThrow('Dispatch was refused');
+    expect(session.createAgent).not.toHaveBeenCalled();
+  });
+
   it('does not attempt isolation when the experimental flag is disabled (default)', async () => {
     const parent = testAgent();
     parent.configure();

@@ -23,6 +23,7 @@ import { TaskStopTool } from '../../../src/tools/background/task-stop';
 import {
   acquireSubagentWorktree,
   applySubagentWorktreeCandidate,
+  isSubagentWorktreeUnsupported,
   type EditingCandidateDraft,
 } from '../../../src/session/subagent-worktree';
 import {
@@ -168,7 +169,9 @@ async function createRealCandidateTask(options: {
   const worktree = await acquireSubagentWorktree(options.kaos, options.repo, {
     scope: ['src/widget.ts'],
   });
-  if (worktree === null) throw new Error('expected local Git worktree isolation');
+  if (worktree === null || isSubagentWorktreeUnsupported(worktree)) {
+    throw new Error('expected local Git worktree isolation');
+  }
   await writeFile(join(worktree.cwd, 'src/widget.ts'), options.sourceText);
   await mkdir(dirname(join(worktree.cwd, options.companionPath)), { recursive: true });
   await writeFile(join(worktree.cwd, options.companionPath), options.companionText);

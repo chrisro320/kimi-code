@@ -63,7 +63,7 @@ type PermissionPolicyResult =
 | 7 | 会话批准记忆 | `session-approval-history` | 本会话 "approve for session" 缓存 |
 | 8 | 敏感/特殊路径 | `sensitive-file-access-ask`、`git-control-path-access-ask` | 工具访问的文件路径 |
 | 9 | 工具内在风险 | `default-tool-approve` | 工具名 ∈ 默认安全集合 |
-| 10 | 工作区写信任 | `git-cwd-write-approve` | POSIX + git worktree + cwd 内写 |
+| 10 | 工作区写信任 | `cwd-write-approve` | POSIX + cwd 内写 |
 | 11 | 兜底 | `fallback-ask` | 无（默认 ask） |
 
 链的顺序是一条**从高到低的安全级联**：外部强制 → 结构性拒绝 → 状态机拒绝 → 静态 deny → mode 放行 → 会话记忆放行 → 静态 ask → 静态 allow → 流程放行 → 敏感路径 ask → 默认放行 → 兜底 ask。
@@ -81,7 +81,7 @@ interface RunnableToolExecution {
 }
 ```
 
-`ToolAccesses` 是 `ToolResourceAccess[]`，目前支持 `file` 与 `all` 两类资源（详见 §5.5）。权限维度（如 `sensitive-file-access-ask`、`git-cwd-write-approve`）读 `context.execution.accesses` 做判断。
+`ToolAccesses` 是 `ToolResourceAccess[]`，目前支持 `file` 与 `all` 两类资源（详见 §5.5）。权限维度（如 `sensitive-file-access-ask`、`cwd-write-approve`）读 `context.execution.accesses` 做判断。
 
 ### 2.4 优势
 

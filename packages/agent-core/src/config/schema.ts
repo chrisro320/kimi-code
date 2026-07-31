@@ -238,6 +238,14 @@ export const SubagentConfigSchema = z.object({
    * in milliseconds. `0` means no timeout. Defaults to 2 hours when unset.
    */
   timeoutMs: z.number().int().min(0).optional(),
+  /**
+   * How a workspace that cannot support worktree isolation at all (not a git
+   * repository, no commit yet, non-POSIX backend) is handled when an editing
+   * subagent is dispatched. `best-effort` dispatches unisolated with a warning;
+   * `strict` refuses the dispatch. Isolation that should have worked and failed
+   * always refuses, in both modes.
+   */
+  isolation: z.enum(['strict', 'best-effort']).optional(),
   routing: z.record(z.string().min(1), SubagentRoutingSchema).optional(),
   backends: z.record(z.string().min(1), SubagentBackendSchema).optional(),
   /**

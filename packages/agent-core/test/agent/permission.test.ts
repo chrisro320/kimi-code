@@ -774,7 +774,7 @@ describe('Permission policy chain', () => {
       'yolo-mode-approve',
       'swarm-mode-agent-swarm-approve',
       'default-tool-approve',
-      'git-cwd-write-approve',
+      'cwd-write-approve',
       'fallback-ask',
     ]);
   });
@@ -1392,8 +1392,11 @@ describe('Default tool approve policy', () => {
 
   it.each([
     ['Bash', { command: 'printf first', timeout: 60 }],
-    ['Write', { path: '/workspace/a.ts', content: 'x' }],
-    ['Edit', { path: '/workspace/a.ts', old_string: 'a', new_string: 'b' }],
+    // Paths sit outside the workspace so `cwd-write-approve` does not take over
+    // the decision — what is under test is that `default-tool-approve` itself
+    // never covers Write/Edit.
+    ['Write', { path: '/outside/a.ts', content: 'x' }],
+    ['Edit', { path: '/outside/a.ts', old_string: 'a', new_string: 'b' }],
     ['Custom', { value: 1 }],
   ] as const)('does not default-approve %s', async (toolName, args) => {
     const { manager, requestApproval, telemetryTrack } = makePermissionManager(async () => ({
@@ -2996,7 +2999,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
     expect(stat).not.toHaveBeenCalled();
   });
@@ -3029,7 +3032,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
     expect(stat).not.toHaveBeenCalled();
   });
@@ -3049,7 +3052,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
       expect.objectContaining({
-        policy_name: 'git-cwd-write-approve',
+        policy_name: 'cwd-write-approve',
         tool_name: 'Write',
         permission_mode: 'manual',
         decision: 'approve',
@@ -3074,7 +3077,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
       expect.objectContaining({
-        policy_name: 'git-cwd-write-approve',
+        policy_name: 'cwd-write-approve',
         tool_name: 'Edit',
         permission_mode: 'manual',
         decision: 'approve',
@@ -3106,7 +3109,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
       expect.objectContaining({
-        policy_name: 'git-cwd-write-approve',
+        policy_name: 'cwd-write-approve',
         tool_name: toolName,
         permission_mode: 'manual',
         decision: 'approve',
@@ -3114,7 +3117,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
   });
 
-  it('still requests approval when cwd is not inside a git work tree', async () => {
+  it('bypasses approval inside the cwd even when it is not a git work tree', async () => {
     const { manager, requestApproval, telemetryTrack } = makePermissionManager(
       async () => ({ decision: 'approved' }),
       { kaos: nonGitKaos() },
@@ -3124,14 +3127,14 @@ describe('Default git CWD Write/Edit permission', () => {
       manager.beforeToolCall(writeHook({ path: 'src/a.ts', content: 'x' })),
     ).resolves.toBeUndefined();
 
-    expect(requestApproval).toHaveBeenCalledTimes(1);
-    expect(telemetryTrack).not.toHaveBeenCalledWith(
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
-  it('rechecks missing git marker checks across repeated Write/Edit calls in the same cwd', async () => {
+  it('keeps approving repeated Write/Edit calls in an uninitialized cwd', async () => {
     const stat = vi.fn<Kaos['stat']>().mockRejectedValue(new Error('ENOENT'));
     const { manager, requestApproval } = makePermissionManager(
       async () => ({ decision: 'approved' }),
@@ -3147,17 +3150,7 @@ describe('Default git CWD Write/Edit permission', () => {
       ),
     ).resolves.toBeUndefined();
 
-    expect(requestApproval).toHaveBeenCalledTimes(2);
-    expect(stat.mock.calls.map(([path]) => path)).toEqual([
-      '/workspace/.git',
-      '/.git',
-      '/workspace/.git',
-      '/.git',
-      '/workspace/.git',
-      '/.git',
-      '/workspace/.git',
-      '/.git',
-    ]);
+    expect(requestApproval).not.toHaveBeenCalled();
   });
 
   it('still requests approval when a relative path escapes cwd via ..', async () => {
@@ -3206,7 +3199,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3224,7 +3217,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3243,7 +3236,7 @@ describe('Default git CWD Write/Edit permission', () => {
       expect(requestApproval).toHaveBeenCalledTimes(1);
       expect(telemetryTrack).not.toHaveBeenCalledWith(
         'permission_policy_decision',
-        expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+        expect.objectContaining({ policy_name: 'cwd-write-approve' }),
       );
     },
   );
@@ -3272,7 +3265,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3290,7 +3283,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3315,7 +3308,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3500,7 +3493,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).not.toHaveBeenCalled();
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3520,7 +3513,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).not.toHaveBeenCalled();
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3562,7 +3555,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3583,7 +3576,7 @@ describe('Default git CWD Write/Edit permission', () => {
       expect(requestApproval).toHaveBeenCalledTimes(1);
       expect(telemetryTrack).not.toHaveBeenCalledWith(
         'permission_policy_decision',
-        expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+        expect.objectContaining({ policy_name: 'cwd-write-approve' }),
       );
     },
   );
@@ -3609,7 +3602,7 @@ describe('Default git CWD Write/Edit permission', () => {
       );
       expect(telemetryTrack).toHaveBeenCalledWith(
         'permission_policy_decision',
-        expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+        expect.objectContaining({ policy_name: 'cwd-write-approve' }),
       );
     },
   );
@@ -3686,7 +3679,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
       expect.objectContaining({
-        policy_name: 'git-cwd-write-approve',
+        policy_name: 'cwd-write-approve',
         tool_name: 'Write',
         permission_mode: 'manual',
         decision: 'approve',
@@ -3714,7 +3707,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3737,7 +3730,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).not.toHaveBeenCalled();
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3764,7 +3757,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).not.toHaveBeenCalled();
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3792,7 +3785,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3817,7 +3810,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3835,7 +3828,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3864,7 +3857,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3896,7 +3889,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).not.toHaveBeenCalled();
     expect(telemetryTrack).toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3932,7 +3925,7 @@ describe('Default git CWD Write/Edit permission', () => {
     );
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3960,7 +3953,7 @@ describe('Default git CWD Write/Edit permission', () => {
     expect(requestApproval).toHaveBeenCalledTimes(1);
     expect(telemetryTrack).not.toHaveBeenCalledWith(
       'permission_policy_decision',
-      expect.objectContaining({ policy_name: 'git-cwd-write-approve' }),
+      expect.objectContaining({ policy_name: 'cwd-write-approve' }),
     );
   });
 
@@ -3979,8 +3972,10 @@ describe('Default git CWD Write/Edit permission', () => {
     ).resolves.toBeUndefined();
 
     expect(requestApproval).not.toHaveBeenCalled();
+    // One probe per call: `GitControlPathAccessAskPermissionPolicy` is now the
+    // only policy resolving the marker, and it must not cache it across calls.
     const markerCalls = stat.mock.calls.filter(([path]) => path === '/workspace/.git');
-    expect(markerCalls).toHaveLength(4);
+    expect(markerCalls).toHaveLength(2);
   });
 });
 

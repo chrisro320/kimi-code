@@ -8,13 +8,23 @@ import type {
   PermissionPolicy,
   PermissionPolicyResult,
 } from '#/agent/permissionPolicy/types';
-import {
-  findLocalGitWorkTreeMarker,
-  writeFileAccesses,
-} from './path-utils';
+import { writeFileAccesses } from './path-utils';
 
-export class GitCwdWriteApprovePermissionPolicyService implements PermissionPolicy {
-  readonly name = 'git-cwd-write-approve';
+/**
+ * Approves writes that stay inside the workspace the user pointed the agent at.
+ *
+ * The authorization comes from the user having chosen this `cwd`, not from the
+ * directory happening to be a git work tree — git supplies a way to undo a
+ * write, not the permission to make it. Requiring a marker made an
+ * uninitialized project ask for approval on every Write/Edit while the same
+ * write one `git init` away was auto-approved even in manual mode: a difference
+ * in ceremony, not in risk. Accesses that do warrant a prompt are asked about
+ * earlier in the chain by the sensitive-file and git-control-path policies.
+ *
+ * Mirrors agent-core's `CwdWriteApprovePermissionPolicy`.
+ */
+export class CwdWriteApprovePermissionPolicyService implements PermissionPolicy {
+  readonly name = 'cwd-write-approve';
 
   constructor(
     @IHostEnvironment private readonly env: HostEnvironment,
@@ -45,8 +55,6 @@ export class GitCwdWriteApprovePermissionPolicyService implements PermissionPoli
       return undefined;
     }
 
-    return (await findLocalGitWorkTreeMarker(cwd)) === null
-      ? undefined
-      : { kind: 'approve' };
+    return { kind: 'approve' };
   }
 }

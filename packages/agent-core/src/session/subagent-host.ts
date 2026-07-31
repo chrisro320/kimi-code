@@ -21,6 +21,7 @@ import type {
   DispatchWorkCard,
 } from '../agent/dispatch/controller';
 import { InMemoryAgentRecordPersistence } from '../agent/records';
+import { log } from '../logging/logger';
 import { isAbortError } from '../loop/errors';
 import { sleepForRetry } from '../loop/retry';
 import { redactUntrustedRaw } from '../security/redaction';
@@ -37,6 +38,7 @@ import {
 import { collectGitContext } from './git-context';
 import {
   acquireSubagentWorktree,
+  isSubagentWorktreeUnsupported,
   type EditingCandidateDraft,
   type SubagentWorktreeFinishResult,
   type SubagentWorktreeHandle,
@@ -1157,6 +1159,15 @@ export class SessionSubagentHost {
     if (options?.dispatch?.readOnly !== true) child.tools.inheritUserTools(parent.tools);
   }
 
+  /**
+   * Resolve how a workspace that cannot support isolation at all is handled.
+   * `best-effort` (the default) dispatches unisolated so plain directories and
+   * fresh repositories stay usable; `strict` keeps the historical refusal.
+   */
+  private isolationMode(): 'strict' | 'best-effort' {
+    return this.session.options.config?.subagent?.isolation ?? 'best-effort';
+  }
+
   /** Acquire an isolated worktree for every editing-capable dispatch. */
   private async acquireWorktreeIfNeeded(
     parent: Agent,
@@ -1168,6 +1179,23 @@ export class SessionSubagentHost {
     const explicitlyEnabled = parent.experimentalFlags.enabled('subagent-worktree-isolation');
     if ((!enforceIsolation && !explicitlyEnabled && !discardChanges) || (!isEditingCapableProfile(profile) && !discardChanges)) return null;
     const worktree = await acquireSubagentWorktree(parent.kaos, parent.config.cwd, { scope });
+    if (isSubagentWorktreeUnsupported(worktree)) {
+      // A `discardChanges` dispatch promises the caller that nothing the child
+      // writes survives the run, and only the worktree can keep that promise —
+      // so it is refused even in best-effort mode. The opt-in experimental flag
+      // is an explicit request for isolation and is treated the same way.
+      if (discardChanges || explicitlyEnabled || this.isolationMode() === 'strict') {
+        throw new Error(
+          `Editing subagent isolation is unavailable here: ${worktree.unsupported}. Dispatch was refused.`,
+        );
+      }
+      log.warn('subagent worktree: dispatching without isolation', {
+        cwd: parent.config.cwd,
+        profile: profile.name,
+        reason: worktree.unsupported,
+      });
+      return null;
+    }
     if (worktree === null && (enforceIsolation || explicitlyEnabled)) {
       throw new Error('Editing subagent isolation could not be created; dispatch was refused.');
     }
@@ -1186,6 +1214,14 @@ export class SessionSubagentHost {
       const worktree = await acquireSubagentWorktree(parent.kaos, parent.config.cwd, {
         scope: options.dispatch.scope,
       });
+      // No best-effort degradation here: a read-only / discard-changes peer is
+      // only read-only because its writes land in a worktree that is thrown
+      // away. Without one there is nothing left enforcing the guarantee.
+      if (isSubagentWorktreeUnsupported(worktree)) {
+        throw new Error(
+          `Read-only Agora peer isolation is unavailable here: ${worktree.unsupported}.`,
+        );
+      }
       if (worktree === null) throw new Error('Read-only Agora peer isolation could not be created.');
       return worktree;
     }

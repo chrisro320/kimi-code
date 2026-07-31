@@ -10,8 +10,26 @@ import {
   __testing,
   acquireSubagentWorktree,
   applySubagentWorktreeCandidate,
+  isSubagentWorktreeUnsupported,
   type EditingCandidateDraft,
+  type SubagentWorktreeHandle,
 } from '../../src/session/subagent-worktree';
+
+/**
+ * Every test below this line exercises a workspace where isolation is
+ * supported, so it only cares about the handle-or-failure half of the return
+ * type. The two `unsupported` cases assert on `acquireSubagentWorktree`
+ * directly.
+ */
+async function acquireHandle(
+  ...args: Parameters<typeof acquireSubagentWorktree>
+): Promise<SubagentWorktreeHandle | null> {
+  const acquired = await acquireSubagentWorktree(...args);
+  if (isSubagentWorktreeUnsupported(acquired)) {
+    throw new Error(`isolation unexpectedly unsupported: ${acquired.unsupported}`);
+  }
+  return acquired;
+}
 
 // These tests drive the real `git` binary through a real `LocalKaos` (the
 // same integration-test posture as `GlobTool integration (real ripgrep)` in
@@ -91,26 +109,32 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     tempDirs.push(repoDir);
   });
 
-  it('returns null when the directory is not a git repository', async () => {
+  it('reports isolation as unsupported when the directory is not a git repository', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'not-a-repo-'));
     tempDirs.push(dir);
 
-    expect(await acquireSubagentWorktree(kaos, dir)).toBeNull();
+    const acquired = await acquireSubagentWorktree(kaos, dir);
+    expect(isSubagentWorktreeUnsupported(acquired)).toBe(true);
+    expect(acquired).toEqual({ unsupported: 'the workspace is not a git repository' });
   });
 
-  it('returns null for a repository with no commits yet (unborn HEAD)', async () => {
+  it('reports isolation as unsupported for a repository with no commits yet (unborn HEAD)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'unborn-'));
     tempDirs.push(dir);
     git(dir, ['init', '-q']);
 
-    expect(await acquireSubagentWorktree(kaos, dir)).toBeNull();
+    const acquired = await acquireSubagentWorktree(kaos, dir);
+    expect(isSubagentWorktreeUnsupported(acquired)).toBe(true);
+    expect(acquired).toEqual({
+      unsupported: 'the repository has no commit to base an isolated worktree on',
+    });
   });
 
   it('seeds the isolated worktree with tracked dirty and untracked baseline state, without touching the source', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nedited\n');
     await writeFile(join(repoDir, 'new.txt'), 'brand new\n');
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
@@ -126,7 +150,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   it('excludes secret-looking untracked files from the seeded worktree', async () => {
     await writeFile(join(repoDir, '.env'), 'SECRET=1\n');
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
 
     await expect(stat(join(handle!.cwd, '.env'))).rejects.toThrow();
@@ -136,7 +160,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('cleans up the worktree and preserves recovery data on an incomplete outcome, without applying anything', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nedited\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
@@ -153,7 +177,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('discards analysis-only worker delta without creating recovery artifacts', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt', 'created.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt', 'created.txt'] });
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
     await writeFile(join(worktreeCwd, 'a.txt'), 'hello\nanalysis edit\n');
@@ -176,7 +200,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('applies an in-scope worker delta back onto the workspace on success, then removes the worktree', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt', 'created.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt', 'created.txt'] });
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
@@ -193,7 +217,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('applies a worker-side deletion of a baseline untracked file back onto the workspace', async () => {
     await writeFile(join(repoDir, 'scratch.txt'), 'seed me\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['scratch.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['scratch.txt'] });
     expect(handle).not.toBeNull();
     await expect(readFile(join(handle!.cwd, 'scratch.txt'), 'utf8')).resolves.toBe('seed me\n');
 
@@ -205,7 +229,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('records worker-side deletions in the scope-expansion candidate', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['allowed'] });
     expect(handle).not.toBeNull();
     await rm(join(handle!.cwd, 'a.txt'));
 
@@ -223,7 +247,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('ignores baseline-only dirty files outside scope when applying a worker delta', async () => {
     await writeFile(join(repoDir, 'baseline.txt'), 'baseline noise\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
 
     await writeFile(join(handle!.cwd, 'a.txt'), 'hello\nworker edit\n');
@@ -237,7 +261,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   it('returns a worker-only scope-expansion candidate without mutating the workspace', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nbaseline edit\n');
     await writeFile(join(repoDir, 'baseline.txt'), 'baseline noise\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
@@ -270,7 +294,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('replays an approved candidate after unrelated HEAD drift but rejects candidate-path divergence', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
     await writeFile(join(handle!.cwd, 'a.test.txt'), 'companion test\n');
@@ -288,7 +312,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     expect(await readFile(join(repoDir, 'a.test.txt'), 'utf8')).toBe('companion test\n');
     expect(await readFile(join(repoDir, 'unrelated.txt'), 'utf8')).toBe('unrelated change\n');
 
-    const conflicting = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const conflicting = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(conflicting).not.toBeNull();
     await writeFile(join(conflicting!.cwd, 'a.txt'), 'second worker edit\n');
     await writeFile(join(conflicting!.cwd, 'second.test.txt'), 'second companion\n');
@@ -304,7 +328,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('rejects a candidate whose immutable payload no longer matches its recorded hash', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
     await writeFile(join(handle!.cwd, 'a.test.txt'), 'companion test\n');
@@ -331,7 +355,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('rejects and preserves recovery data when the workspace changed underneath the running subagent (baseline mismatch)', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
     const worktreeCwd = handle!.cwd;
 
@@ -350,8 +374,8 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await writeFile(join(repoDir, 'b.txt'), 'second\n');
     git(repoDir, ['add', 'b.txt']);
     git(repoDir, ['commit', '-q', '-m', 'add second file']);
-    const first = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
-    const second = await acquireSubagentWorktree(kaos, repoDir, { scope: ['b.txt'] });
+    const first = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
+    const second = await acquireHandle(kaos, repoDir, { scope: ['b.txt'] });
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
 
@@ -368,8 +392,8 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('serializes competing workers and rejects the second writer to the same path', async () => {
-    const first = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
-    const second = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const first = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
+    const second = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
     await writeFile(join(first!.cwd, 'a.txt'), 'first worker\n');
@@ -388,7 +412,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('allows a new commit when no candidate path changed', async () => {
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
 
     await writeFile(join(repoDir, 'b.txt'), 'second file\n');
@@ -403,7 +427,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     const nested = await initNestedWorkspace();
     tempDirs.push(nested.outer);
 
-    const handle = await acquireSubagentWorktree(kaos, nested.outer, {
+    const handle = await acquireHandle(kaos, nested.outer, {
       scope: ['upstream-kimi-code/packages/agent-core/**'],
     });
     expect(handle).not.toBeNull();
@@ -424,7 +448,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     const nested = await initNestedWorkspace();
     tempDirs.push(nested.outer);
 
-    const handle = await acquireSubagentWorktree(kaos, nested.outer);
+    const handle = await acquireHandle(kaos, nested.outer);
     expect(handle).not.toBeNull();
     await handle!.finish({ kind: 'incomplete' });
   });
@@ -436,7 +460,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['add', 'pkg']);
     git(repoDir, ['commit', '-q', '-m', 'add nested package']);
 
-    const handle = await acquireSubagentWorktree(kaos, subdir);
+    const handle = await acquireHandle(kaos, subdir);
     expect(handle).not.toBeNull();
     expect(handle!.cwd.endsWith(join('pkg', 'sub'))).toBe(true);
     expect(await readFile(join(handle!.cwd, 'nested.txt'), 'utf8')).toBe('nested\n');
@@ -446,7 +470,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('treats an unstaged tracked deletion as baseline state when the worker is a no-op', async () => {
     await rm(join(repoDir, 'a.txt'));
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
     await expect(stat(join(handle!.cwd, 'a.txt'))).rejects.toThrow();
     await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
@@ -462,7 +486,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['commit', '-q', '-m', 'add rename source']);
     git(repoDir, ['mv', 'rename-source.txt', 'renamed.txt']);
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir);
+    const handle = await acquireHandle(kaos, repoDir);
     expect(handle).not.toBeNull();
     await expect(readFile(join(handle!.cwd, 'added.txt'), 'utf8')).resolves.toBe('staged addition\n');
     await expect(stat(join(handle!.cwd, 'a.txt'))).rejects.toThrow();
@@ -475,7 +499,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('applies a worker edit to the new endpoint of a staged rename', async () => {
     git(repoDir, ['mv', 'a.txt', 'renamed.txt']);
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['renamed.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['renamed.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'renamed.txt'), 'worker rename edit\n');
     await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
@@ -485,12 +509,12 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
   it('preserves baseline mode changes and applies worker mode-only deltas', async () => {
     await chmod(join(repoDir, 'a.txt'), 0o755);
-    const baseline = await acquireSubagentWorktree(kaos, repoDir);
+    const baseline = await acquireHandle(kaos, repoDir);
     expect(baseline).not.toBeNull();
     await expect(baseline!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
     expect((await stat(join(repoDir, 'a.txt'))).mode & 0o777).toBe(0o755);
 
-    const worker = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const worker = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(worker).not.toBeNull();
     await chmod(join(worker!.cwd, 'a.txt'), 0o644);
     await expect(worker!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
@@ -504,7 +528,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['add', 'target-one.txt', 'target-two.txt', 'link.txt']);
     git(repoDir, ['commit', '-q', '-m', 'add symlink']);
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['link.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['link.txt'] });
     expect(handle).not.toBeNull();
     await rm(join(handle!.cwd, 'link.txt'));
     await symlink('target-two.txt', join(handle!.cwd, 'link.txt'));
@@ -512,7 +536,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     expect(await readFile(join(repoDir, 'link.txt'), 'utf8')).toBe('two\n');
     expect((await lstat(join(repoDir, 'link.txt'))).isSymbolicLink()).toBe(true);
 
-    const guarded = await acquireSubagentWorktree(kaos, repoDir, { scope: ['dir/file.txt'] });
+    const guarded = await acquireHandle(kaos, repoDir, { scope: ['dir/file.txt'] });
     expect(guarded).not.toBeNull();
     await rm(join(repoDir, 'dir'), { recursive: true, force: true });
     await symlink('.', join(repoDir, 'dir'));
@@ -522,13 +546,13 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   });
 
   it('rejects worker-planted symlinks with absolute or escaping targets', async () => {
-    const absolute = await acquireSubagentWorktree(kaos, repoDir, { scope: ['**/*'] });
+    const absolute = await acquireHandle(kaos, repoDir, { scope: ['**/*'] });
     expect(absolute).not.toBeNull();
     await symlink('/etc/passwd', join(absolute!.cwd, 'escape-abs.txt'));
     await expect(absolute!.finish({ kind: 'success' })).rejects.toThrow(/unsafe symlink target/);
     await expect(stat(join(repoDir, 'escape-abs.txt'))).rejects.toThrow();
 
-    const escaping = await acquireSubagentWorktree(kaos, repoDir, { scope: ['**/*'] });
+    const escaping = await acquireHandle(kaos, repoDir, { scope: ['**/*'] });
     expect(escaping).not.toBeNull();
     await symlink('../../outside.txt', join(escaping!.cwd, 'escape-rel.txt'));
     await expect(escaping!.finish({ kind: 'success' })).rejects.toThrow(/unsafe symlink target/);
@@ -538,7 +562,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
   it('stores dirty-overlap before and after candidate payloads plus binary and deletion states', async () => {
     await writeFile(join(repoDir, 'a.txt'), 'hello\nbaseline\n');
     await writeFile(join(repoDir, 'binary.bin'), Buffer.from([0, 1, 2, 255]));
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['allowed'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['allowed'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'binary.bin'), Buffer.from([255, 2, 1, 0]));
     await rm(join(handle!.cwd, 'a.txt'));
@@ -564,7 +588,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await writeFile(join(repoDir, 'b.txt'), 'before b\n');
     git(repoDir, ['add', 'b.txt']);
     git(repoDir, ['commit', '-q', '-m', 'add b']);
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt', 'b.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt', 'b.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker a\n');
     await writeFile(join(handle!.cwd, 'b.txt'), 'worker b\n');
@@ -580,7 +604,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     const lockDir = join(repoDir, commonDir, 'kimi-code-subagent-apply.lock');
     await mkdir(lockDir, { recursive: true });
     await writeFile(join(lockDir, 'owner.json'), '{"owner":"external"}\n');
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
     await expect(handle!.finish({ kind: 'success' })).rejects.toThrow(/filesystem repository lock is held/);
@@ -592,7 +616,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['add', 'binary.bin']);
     git(repoDir, ['commit', '-q', '-m', 'add binary']);
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['binary.bin'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['binary.bin'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'binary.bin'), Buffer.from([255, 254, 128, 2, 1, 0]));
     await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
@@ -605,7 +629,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     await chmod(join(repoDir, 'a.txt'), 0o664);
     expect(git(repoDir, ['status', '--porcelain'])).toBe('');
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
     await expect(handle!.finish({ kind: 'success' })).resolves.toEqual({ applied: true });
@@ -617,7 +641,7 @@ describe('acquireSubagentWorktree (real git integration)', () => {
     git(repoDir, ['add', 'b.txt']);
     git(repoDir, ['commit', '-q', '-m', 'add b']);
 
-    const handle = await acquireSubagentWorktree(kaos, repoDir, { scope: ['a.txt'] });
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
     expect(handle).not.toBeNull();
     await writeFile(join(handle!.cwd, 'a.txt'), 'worker edit\n');
     // Concurrent human edit to a path the worker never touched.
