@@ -139,6 +139,12 @@ export function parseMessageId(
 }
 
 /**
+ * Shown in place of a remote compaction checkpoint when the compact call
+ * returned no readable summary. The opaque payload itself is never displayed.
+ */
+const COMPACTION_CHECKPOINT_PLACEHOLDER = '[compacted context checkpoint]';
+
+/**
  * kosong's `Message.role` is `'system' | 'user' | 'assistant' | 'tool'` —
  * already aligned with SCHEMAS §3's `MessageRole`. We pass-through.
  */
@@ -160,6 +166,10 @@ function mapContentPart(part: ContextMessage['content'][number]): MessageContent
         ? { type: 'thinking', thinking: part.think, signature: sig }
         : { type: 'thinking', thinking: part.think };
     }
+    case 'compaction':
+      // Only the human-readable summary crosses the protocol boundary; the
+      // opaque checkpoint payload is never rendered or exported.
+      return { type: 'text', text: part.text ?? COMPACTION_CHECKPOINT_PLACEHOLDER };
     case 'image_url':
       return {
         type: 'image',

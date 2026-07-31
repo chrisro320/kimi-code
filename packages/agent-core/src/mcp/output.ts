@@ -322,7 +322,7 @@ function applyBinaryPartCap(parts: readonly ContentPart[]): {
   const out: ContentPart[] = [];
 
   for (const part of parts) {
-    if (part.type === 'text' || part.type === 'think') {
+    if (part.type === 'text' || part.type === 'think' || part.type === 'compaction') {
       out.push(part);
       continue;
     }

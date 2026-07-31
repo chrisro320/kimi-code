@@ -29,13 +29,61 @@ export interface VideoURLPart {
 }
 
 /**
+ * Identity a remote compaction checkpoint is bound to. A checkpoint is opaque
+ * provider state: it is only replayable against the same endpoint/provider/model
+ * that produced it. Callers compare this before replaying and fall back to a
+ * portable representation when it no longer matches.
+ */
+export interface CompactionLineage {
+  readonly provider: string;
+  readonly model: string;
+  readonly baseUrl: string;
+}
+
+/**
+ * A provider-side compaction checkpoint (OpenAI Responses `/responses/compact`).
+ *
+ * `encrypted` is opaque model-native state that must be replayed back verbatim;
+ * it is never rendered and never sent to a provider other than the one named in
+ * {@link lineage}. `text` is the human-readable summary the compact call returns
+ * alongside it, kept solely for display.
+ */
+export interface CompactionPart {
+  type: 'compaction';
+  /** Opaque checkpoint payload, replayed verbatim. Never displayed. */
+  encrypted: string;
+  /** Native item type the checkpoint arrived as, echoed back on replay. */
+  itemType: string;
+  /** Provider item id, echoed back on replay when present. */
+  itemId?: string;
+  /** Human-readable summary for display only. */
+  text?: string;
+  /**
+   * Input tokens this checkpoint bills when replayed, as reported by the
+   * compact call. Local estimators cannot derive it — the opaque payload's
+   * length says nothing about its rendered cost — so it is recorded here and
+   * superseded by the next round-trip's real usage.
+   */
+  replayTokens?: number;
+  /** Provider identity this checkpoint is replayable against. */
+  lineage: CompactionLineage;
+}
+
+/**
  * A single piece of content within a {@link Message}.
  *
- * The union covers text, model reasoning ("think"), images, audio, and video.
- * Providers convert these to their native content-block format during
- * {@link ChatProvider.generate}.
+ * The union covers text, model reasoning ("think"), images, audio, video, and
+ * remote compaction checkpoints. Providers convert these to their native
+ * content-block format during {@link ChatProvider.generate}; a provider that
+ * does not own a {@link CompactionPart}'s lineage must drop it.
  */
-export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart;
+export type ContentPart =
+  | TextPart
+  | ThinkPart
+  | ImageURLPart
+  | AudioURLPart
+  | VideoURLPart
+  | CompactionPart;
 
 export interface ToolCall {
   type: 'function';
@@ -114,11 +162,16 @@ export interface Message {
   readonly tools?: readonly Tool[] | undefined;
 }
 
-/** Check if a streamed part is a ContentPart (text, think, image_url, audio_url, video_url). */
+/** Check if a streamed part is a ContentPart (text, think, image_url, audio_url, video_url, compaction). */
 export function isContentPart(part: StreamedMessagePart): part is ContentPart {
   const t = part.type;
   return (
-    t === 'text' || t === 'think' || t === 'image_url' || t === 'audio_url' || t === 'video_url'
+    t === 'text' ||
+    t === 'think' ||
+    t === 'image_url' ||
+    t === 'audio_url' ||
+    t === 'video_url' ||
+    t === 'compaction'
   );
 }
 

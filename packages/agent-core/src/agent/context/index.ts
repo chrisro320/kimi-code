@@ -1,10 +1,19 @@
-import { createToolMessage, type ContentPart, type Message } from '@moonshot-ai/kosong';
+import {
+  createToolMessage,
+  type ChatProvider,
+  type ContentPart,
+  type Message,
+} from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
 import { ErrorCodes, KimiError } from '../../errors';
 import type { LoopRecordedEvent } from '../../loop';
 import { extractImageCompressionCaptions } from '../../tools/support/image-compress';
-import { estimateTokens, estimateTokensForMessages } from '../../utils/tokens';
+import {
+  estimateTokens,
+  estimateTokensForContentPart,
+  estimateTokensForMessages,
+} from '../../utils/tokens';
 import { escapeXml, escapeXmlAttr } from '../../utils/xml-escape';
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
@@ -27,6 +36,7 @@ import {
   type ProjectOptions,
   trimTrailingOpenToolExchange,
 } from './projector';
+import { REMOTE_CHECKPOINT_SUMMARY_FALLBACK } from '../compaction/handoff';
 import { stripDynamicToolContext } from './dynamic-tools';
 import {
   USER_PROMPT_ORIGIN,
@@ -355,9 +365,15 @@ export class ContextMemory {
     // are preserved verbatim. Older wire records did not have `contextSummary`,
     // so their `summary` remains the model-context text during restore.
     const contextSummary = input.contextSummary ?? input.summary;
+    // A remote checkpoint replaces the summary text in the model-facing
+    // context, so the post-compaction size is the checkpoint's replay cost
+    // (recorded on the part), not the length of the readable summary.
+    const summaryTokens =
+      input.checkpoint === undefined
+        ? estimateTokens(contextSummary)
+        : estimateTokensForContentPart(input.checkpoint);
     const tokensAfter =
-      input.tokensAfter ??
-      estimateTokens(contextSummary) + estimateTokensForMessages(keptMessages);
+      input.tokensAfter ?? summaryTokens + estimateTokensForMessages(keptMessages);
     const keptUserMessageCount =
       input.keptUserMessageCount ?? selection.head.length + selection.tail.length;
     const keptHeadUserMessageCount =
@@ -365,6 +381,7 @@ export class ContextMemory {
     const result: CompactionResult = {
       summary: input.summary,
       contextSummary,
+      checkpoint: input.checkpoint,
       compactedCount: input.compactedCount,
       tokensBefore: input.tokensBefore,
       tokensAfter,
@@ -388,9 +405,17 @@ export class ContextMemory {
         droppedCount: result.droppedCount,
       },
     });
+    // The summary message keeps its user role and `compaction_summary` origin
+    // in both modes so every "is this the fold marker" check stays valid; only
+    // the payload differs. With a checkpoint the model sees the opaque item
+    // (serialized by the provider as its own top-level item) instead of the
+    // summary text, which is kept on the part for display.
     const summaryMessage: ContextMessage = {
       role: 'user',
-      content: [{ type: 'text', text: contextSummary }],
+      content:
+        input.checkpoint === undefined
+          ? [{ type: 'text', text: contextSummary }]
+          : [input.checkpoint],
       toolCalls: [],
       origin: { kind: 'compaction_summary' },
     };
@@ -460,7 +485,8 @@ export class ContextMemory {
     // project() strips `origin`, the only anchor for the announcements.
     // setModel never rewrites history, so a mid-session switch
     // degrades/upgrades losslessly.
-    const shaped = this.agent.toolSelectEnabled ? messages : stripDynamicToolContext(messages);
+    const stripped = this.agent.toolSelectEnabled ? messages : stripDynamicToolContext(messages);
+    const shaped = degradeUnownedCheckpoints(stripped, () => this.agent.config.provider);
     // Full compaction must summarize original output, never a lossy projection.
     const compacted = options?.compactToolResults === false
       ? shaped
@@ -854,4 +880,39 @@ function formatUndoUnavailableMessage(
   function formatPromptCount(count: number): string {
     return `${String(count)} ${count === 1 ? 'prompt' : 'prompts'}`;
   }
+}
+
+/**
+ * Replace remote compaction checkpoints the active provider cannot replay with
+ * their readable summary.
+ *
+ * Same contract as the dynamic-tool shaping above: the stored history is never
+ * rewritten, only this outgoing view. Switching back to the model that produced
+ * a checkpoint therefore restores it — and its fidelity — with no rebuild and
+ * no extra compaction pass. Sending it to anyone else would at best waste
+ * tokens on an unreplayable payload.
+ *
+ * `provider` is a thunk so the common case — no checkpoint in the history —
+ * costs nothing.
+ */
+function degradeUnownedCheckpoints(
+  messages: readonly ContextMessage[],
+  provider: () => ChatProvider,
+): readonly ContextMessage[] {
+  if (!messages.some((message) => message.content.some((part) => part.type === 'compaction'))) {
+    return messages;
+  }
+  const active = provider();
+  let changed = false;
+  const shaped = messages.map((message) => {
+    if (!message.content.some((part) => part.type === 'compaction')) return message;
+    const content = message.content.map((part): ContentPart => {
+      if (part.type !== 'compaction') return part;
+      if (active.ownsCheckpoint?.(part) === true) return part;
+      changed = true;
+      return { type: 'text', text: part.text ?? REMOTE_CHECKPOINT_SUMMARY_FALLBACK };
+    });
+    return { ...message, content };
+  });
+  return changed ? shaped : messages;
 }

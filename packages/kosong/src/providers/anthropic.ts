@@ -550,6 +550,14 @@ function convertMessage(message: Message, model: string): MessageParam {
       if (!(last?.type === 'text' && last.text === placeholder)) {
         blocks.push({ type: 'text', text: placeholder } satisfies TextBlockParam);
       }
+    } else if (part.type === 'compaction') {
+      // A remote compaction checkpoint carries opaque OpenAI Responses state.
+      // It must never reach Anthropic — in particular it must not be routed
+      // into a thinking block's `signature`, which would send a foreign
+      // payload as if it were this provider's own reasoning signature. Drop it;
+      // the caller is responsible for having rebuilt a portable history before
+      // switching protocols.
+      continue;
     }
   }
 

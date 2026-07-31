@@ -1,4 +1,9 @@
-import type { Message, StreamedMessagePart, VideoURLPart } from './message';
+import type {
+  CompactionPart,
+  Message,
+  StreamedMessagePart,
+  VideoURLPart,
+} from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
@@ -282,4 +287,41 @@ export interface ChatProvider {
   ): ChatProvider;
   /** Upload a video and return a content part that can be sent to this provider. */
   uploadVideo?(input: string | VideoUploadInput, options?: GenerateOptions): Promise<VideoURLPart>;
+  /**
+   * Compact `history` provider-side and return the replacement history.
+   *
+   * Optional: only backends exposing a compaction endpoint implement it, and
+   * callers must additionally gate on the model's `remote_compaction`
+   * capability — the returned checkpoint is opaque state replayable solely
+   * against the endpoint and model that produced it.
+   *
+   * Implementations return a history that can be installed as-is; the caller
+   * is responsible for falling back to local summarization when this throws.
+   */
+  compactConversation?(
+    systemPrompt: string,
+    tools: Tool[],
+    history: Message[],
+    options?: GenerateOptions,
+  ): Promise<RemoteCompactionResult>;
+  /**
+   * Whether this instance can replay `checkpoint`.
+   *
+   * A checkpoint is opaque state bound to the endpoint and model that produced
+   * it, so only the provider can answer. Callers use it to shape an outgoing
+   * request: a checkpoint that is not owned must be degraded rather than sent.
+   * Absent means the backend has no notion of checkpoints and owns none.
+   */
+  ownsCheckpoint?(checkpoint: CompactionPart): boolean;
+}
+
+/** Outcome of {@link ChatProvider.compactConversation}. */
+export interface RemoteCompactionResult {
+  /**
+   * Replacement history produced by the provider: the retained messages
+   * followed by the checkpoint that stands in for everything else.
+   */
+  readonly messages: Message[];
+  /** Usage billed by the compaction pass itself, or `null` if unreported. */
+  readonly usage: TokenUsage | null;
 }

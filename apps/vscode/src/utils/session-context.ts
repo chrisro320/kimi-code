@@ -196,6 +196,9 @@ function formatPartMarkdown(part: ContentPart): string {
     case "image_url": return "[image]";
     case "audio_url": return "[audio]";
     case "video_url": return "[video]";
+    // A remote compaction checkpoint renders as the summary it carries; the
+    // opaque payload is provider state.
+    case "compaction": return part.text ?? "[compacted context checkpoint]";
   }
 }
 

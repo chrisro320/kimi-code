@@ -2164,3 +2164,34 @@ describe('OpenAILegacyChatProvider — non-indexed streaming tool_calls', () => 
     expect(parts).toEqual([]);
   });
 });
+
+describe('remote compaction checkpoints', () => {
+  it('drops a foreign checkpoint instead of throwing on an unknown content part', async () => {
+    const provider = createProvider();
+    const history: Message[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'compaction',
+            encrypted: 'openai-checkpoint-payload',
+            itemType: 'compaction_summary',
+            lineage: {
+              provider: 'openai-responses',
+              model: 'gpt-5.6-sol',
+              baseUrl: 'http://localhost:43565/v1',
+            },
+          },
+          { type: 'text', text: 'visible' },
+        ],
+        toolCalls: [],
+      },
+    ];
+
+    // Chat Completions cannot replay a Responses checkpoint. Dropping it keeps
+    // the turn alive; the previous behaviour threw `Unknown content part type`.
+    const body = await captureRequestBody(provider, '', [], history);
+    expect(JSON.stringify(body)).not.toContain('openai-checkpoint-payload');
+    expect(JSON.stringify(body)).toContain('visible');
+  });
+});

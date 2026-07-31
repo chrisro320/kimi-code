@@ -248,6 +248,10 @@ function resolveModelCapabilities(
     dynamically_loaded_tools:
       declared.has('dynamically_loaded_tools') ||
       detected.dynamically_loaded_tools === true,
+    // Provider-side compaction checkpoints. Opt-in per model only: a
+    // checkpoint is opaque state replayable solely against the endpoint and
+    // model that produced it, so it is never inferred from the catalog.
+    remote_compaction: declared.has('remote_compaction'),
   };
 }
 

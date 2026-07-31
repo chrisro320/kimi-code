@@ -1095,6 +1095,7 @@ function capabilityNames(capabilities: ModelCapability | undefined): string[] {
     capabilities.thinking ? 'thinking' : undefined,
     capabilities.tool_use ? 'tool_use' : undefined,
     capabilities.dynamically_loaded_tools === true ? 'dynamically_loaded_tools' : undefined,
+    capabilities.remote_compaction === true ? 'remote_compaction' : undefined,
   ].filter((capability): capability is string => capability !== undefined);
 }
 

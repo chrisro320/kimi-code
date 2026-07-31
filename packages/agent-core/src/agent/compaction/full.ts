@@ -8,6 +8,7 @@ import {
   APIEmptyResponseError,
   inputTotal,
   isRetryableGenerateError,
+  type CompactionPart,
   type ContentPart,
   type GenerateResult,
   type Message,
@@ -51,7 +52,11 @@ import {
   DefaultCompactionStrategy,
   type CompactionStrategy,
 } from './strategy';
-import { buildCompactionSummaryText, isRealUserInput } from './handoff';
+import {
+  buildCompactionSummaryText,
+  isRealUserInput,
+  REMOTE_CHECKPOINT_SUMMARY_FALLBACK,
+} from './handoff';
 
 export const MAX_COMPACTION_RETRY_ATTEMPTS = 5;
 
@@ -437,6 +442,7 @@ export class FullCompaction {
       const delays = retryBackoffDelays(MAX_COMPACTION_RETRY_ATTEMPTS);
       let usage: TokenUsage | null = null;
       let summary: string | undefined;
+      let checkpoint: CompactionPart | undefined;
       // Compact the whole history, trimming old messages only when the
       // summarizer request itself cannot fit. Any trimmed messages are not
       // covered by the produced summary; `droppedCount` reports that blind spot.
@@ -455,7 +461,22 @@ export class FullCompaction {
       let mediaStripAttempted = false;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
-      while (true) {
+      // Provider-side compaction first when the model opted in. It preserves
+      // model-native state the text summary cannot, but it is never required:
+      // anything short of success falls through to the summarizer below.
+      const remote = await this.tryRemoteCompaction(signal, historyForModel, data);
+      if (remote !== undefined) {
+        checkpoint = remote.checkpoint;
+        if (remote.usage !== null) {
+          this.agent.usage.record(model, remote.usage);
+        }
+      }
+      // The summarizer runs either way. On the remote path its output is not
+      // what the model reads — the checkpoint is — but it is the only portable
+      // record of the fold: the endpoint returns no prose, so without this
+      // there would be nothing to show the user, and nothing to fall back on
+      // when the checkpoint reaches a model that cannot replay it.
+      while (summary === undefined) {
         // A request-building projection: close still-open calls in the sliced
         // prefix (synthesizeMissing) and drop stray results with no call anywhere
         // (dropOrphanResults), so the summarizer request cannot be rejected by a
@@ -605,12 +626,21 @@ export class FullCompaction {
 
       const rawSummary = this.postProcessSummary(summary ?? '');
       const contextSummary = buildCompactionSummaryText(rawSummary);
+      if (checkpoint !== undefined) {
+        // Carry the portable summary on the checkpoint so a provider that
+        // cannot replay it still has something faithful to show and to send.
+        checkpoint = {
+          ...checkpoint,
+          text: rawSummary.length > 0 ? rawSummary : REMOTE_CHECKPOINT_SUMMARY_FALLBACK,
+        };
+      }
       const result = this.agent.context.applyCompaction({
         summary: rawSummary,
         contextSummary,
         compactedCount: originalHistory.length,
         tokensBefore,
         droppedCount: droppedCount === 0 ? undefined : droppedCount,
+        checkpoint,
       });
       // Loaded dynamic tool schemas are deliberately NOT rebuilt: compaction
       // discards the loaded set entirely (the boundary announcement re-lists
@@ -627,6 +657,7 @@ export class FullCompaction {
       // diverge — don't rename the record side to match.
       this.agent.telemetry.track('compaction_finished', {
         source: data.source,
+        implementation: checkpoint === undefined ? 'local' : 'remote',
         tokens_before: result.tokensBefore,
         tokens_after: result.tokensAfter,
         duration_ms: Date.now() - startedAt,
@@ -666,6 +697,64 @@ export class FullCompaction {
       )
         throw error;
       throw new KimiError(ErrorCodes.COMPACTION_FAILED, String(error), { cause: error });
+    }
+  }
+
+  /**
+   * Compact through the provider's own compaction endpoint.
+   *
+   * Returns `undefined` whenever the local summarizer should run instead: the
+   * model did not opt in, the provider exposes no endpoint, or the call failed.
+   * Compaction must always be able to make progress — the context has to shrink
+   * for the turn to continue — so a remote failure degrades to the text summary
+   * rather than aborting.
+   *
+   * Only the checkpoint is taken from the response. Which user messages survive
+   * a fold is this engine's own decision (`applyCompaction` derives it from the
+   * live history), so the retained messages the endpoint echoes back are
+   * discarded rather than merged, which would double them.
+   */
+  private async tryRemoteCompaction(
+    signal: AbortSignal,
+    historyForModel: readonly ContextMessage[],
+    data: Readonly<CompactionBeginData>,
+  ): Promise<{ checkpoint: CompactionPart; usage: TokenUsage | null } | undefined> {
+    if (this.agent.config.modelCapabilities.remote_compaction !== true) return undefined;
+    const provider = this.agent.config.provider;
+    if (provider.compactConversation === undefined) return undefined;
+
+    const messages = this.agent.context.project(historyForModel, {
+      synthesizeMissing: true,
+      dropOrphanResults: true,
+      compactToolResults: false,
+    });
+
+    try {
+      const result = await provider.compactConversation(
+        this.agent.config.systemPrompt,
+        [...this.agent.tools.loopTools],
+        messages,
+        { signal },
+      );
+      const checkpoint = result.messages
+        .flatMap((message) => message.content)
+        .find((part): part is CompactionPart => part.type === 'compaction');
+      if (checkpoint === undefined) {
+        this.agent.telemetry.track('compaction_remote_fallback', {
+          source: data.source,
+          reason: 'no_checkpoint',
+        });
+        return undefined;
+      }
+      return { checkpoint, usage: result.usage };
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      this.agent.telemetry.track('compaction_remote_fallback', {
+        source: data.source,
+        reason: 'request_failed',
+        error_type: error instanceof Error ? error.name : 'Unknown',
+      });
+      return undefined;
     }
   }
 
