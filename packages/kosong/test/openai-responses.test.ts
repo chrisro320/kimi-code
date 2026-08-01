@@ -18,6 +18,7 @@ import {
   OpenAIResponsesChatProvider,
   OpenAIResponsesStreamedMessage,
 } from '#/providers/openai-responses';
+import type { OpenAIResponsesGenerationKwargs } from '#/providers/openai-responses';
 import type { GenerateOptions } from '#/provider';
 import type { Tool } from '#/tool';
 import { describe, it, expect, vi } from 'vitest';
@@ -2257,11 +2258,14 @@ function makeAsyncIterable(
 
 const COMPACTION_ENCRYPTED = 'gAAAAABo-checkpoint-payload-äø✓-0123456789';
 
-function createCompactionProvider(): OpenAIResponsesChatProvider {
+function createCompactionProvider(
+  generationKwargs?: OpenAIResponsesGenerationKwargs,
+): OpenAIResponsesChatProvider {
   return new OpenAIResponsesChatProvider({
     model: 'gpt-5.6-sol',
     apiKey: 'test-key',
     baseUrl: 'http://localhost:43565/v1',
+    ...(generationKwargs === undefined ? {} : { generationKwargs }),
   });
 }
 
@@ -2416,6 +2420,46 @@ describe('OpenAI Responses remote compaction', () => {
     expect(body).not.toHaveProperty('store');
     expect(body['stream']).toBeUndefined();
     expect(Array.isArray(body['input'])).toBe(true);
+  });
+
+  it('sends the session prompt_cache_key so the fold shares the loop cache bucket', async () => {
+    const provider = createCompactionProvider({ prompt_cache_key: 'session-abc' });
+    const { body } = await runCompact(provider, 'compaction', HISTORY);
+
+    // Same bucket as the loop path: the provider-side cache keys on this value,
+    // and a fold that omits it re-sends the whole context uncached.
+    const generateBody = await captureGenerateBody(
+      createCompactionProvider({ prompt_cache_key: 'session-abc' }),
+      HISTORY,
+    );
+    expect(body['prompt_cache_key']).toBe(generateBody['prompt_cache_key']);
+    expect(body['prompt_cache_key']).toBe('session-abc');
+    // Forwarding the cache key must not drag `store` along with it.
+    expect(body).not.toHaveProperty('store');
+  });
+
+  it('omits prompt_cache_key when the host injected no session key', async () => {
+    // The host always sets the property and leaves it undefined when it has no
+    // key, so an unguarded copy would send `prompt_cache_key: undefined`.
+    const provider = createCompactionProvider({ prompt_cache_key: undefined });
+    const { body } = await runCompact(provider, 'compaction', HISTORY);
+    expect(body).not.toHaveProperty('prompt_cache_key');
+  });
+
+  it('forwards no generation kwargs beyond the cache key', async () => {
+    const provider = createCompactionProvider({
+      prompt_cache_key: 'session-abc',
+      max_output_tokens: 4096,
+      temperature: 0.5,
+      reasoning_effort: 'high',
+    });
+    const { body } = await runCompact(provider, 'compaction', HISTORY);
+    expect(Object.keys(body).sort()).toEqual([
+      'input',
+      'instructions',
+      'model',
+      'prompt_cache_key',
+    ]);
   });
 
   it('replays a checkpoint back as a top-level item, byte for byte', async () => {

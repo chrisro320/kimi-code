@@ -1371,6 +1371,17 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       if (tools.length > 0) {
         params['tools'] = tools.map((tool) => convertTool(tool));
       }
+      // Session affinity: the loop path sends `prompt_cache_key` (injected per
+      // session by the host) through `_generationKwargs`, and the provider-side
+      // cache buckets by that key. Without it here the fold lands in a different
+      // bucket and re-sends the whole context uncached — measured at 0% cached
+      // against 94-97% on the neighbouring loop requests. Only this one kwarg is
+      // forwarded: the endpoint rejects `store` outright (see above), and the
+      // rest are unverified against it.
+      const promptCacheKey = this._generationKwargs['prompt_cache_key'];
+      if (promptCacheKey !== undefined) {
+        params['prompt_cache_key'] = promptCacheKey;
+      }
 
       options?.onRequestSent?.();
       const response = await (
