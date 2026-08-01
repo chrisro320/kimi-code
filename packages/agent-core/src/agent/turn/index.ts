@@ -815,6 +815,11 @@ export class TurnFlow {
     let goalOutcomeToolResultPending = false;
     const deduper = new ToolCallDeduplicator({ telemetry: this.agent.telemetry });
     await this.agent.mcp?.waitForInitialLoad(signal);
+    // Apply a compaction-deferred system-prompt re-render here, before the
+    // turn snapshots `llm`: this is the one point where changing the prompt
+    // costs a single cache-prefix rebuild instead of one per fold. Same
+    // boundary cadence, and for the same reason, as the injections below.
+    await this.agent.flushPendingSystemPromptRefresh();
     // Surface the active goal at the start of the turn (append-only; no-op when
     // there is no active goal). Each goal continuation is its own turn, so this
     // re-injects the reminder once per turn rather than per step, preserving prompt caching.

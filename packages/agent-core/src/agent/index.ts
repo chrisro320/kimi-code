@@ -195,6 +195,8 @@ export class Agent {
     readonly knownEfforts: string | undefined;
   }> = [];
   private readonly systemPromptContextProvider?: (() => Promise<PreparedSystemPromptContext>) | undefined;
+  /** Set by `requestSystemPromptRefresh`, drained on the next turn boundary. */
+  private pendingSystemPromptRefresh = false;
 
   constructor(options: AgentOptions) {
     this.type = options.type ?? 'main';
@@ -480,9 +482,9 @@ export class Agent {
 
   /**
    * Re-render the system prompt with freshly gathered runtime context (cwd
-   * listing, AGENTS.md, additional-dirs info, skill list). Called after
-   * compaction so the post-compaction turns do not keep a snapshot captured
-   * at session bootstrap. Invalidates the prompt-cache prefix by design.
+   * listing, AGENTS.md, additional-dirs info, skill list). Invalidates the
+   * prompt-cache prefix by design, so it must only run on a turn boundary —
+   * see `requestSystemPromptRefresh`.
    */
   async refreshSystemPrompt(): Promise<void> {
     if (this.activeProfile === undefined) return;
@@ -492,6 +494,35 @@ export class Agent {
         })
       : await this.systemPromptContextProvider();
     this.updateSystemPromptFromProfile(this.activeProfile, context);
+  }
+
+  /**
+   * Ask for a re-render at the next turn boundary instead of right now.
+   *
+   * A turn snapshots `llm` (and with it the system prompt) once, while the
+   * compaction path reads `config.systemPrompt` live. Refreshing mid-turn
+   * therefore never reaches the turn's own requests — it only changes the
+   * prompt the fold-time requests send, handing the provider a prefix it has
+   * never seen and voiding the prompt cache from the first token. Measured:
+   * from the second fold in a turn onward, fold-time requests dropped to the
+   * static prefix and re-sent ~24k tokens uncached, every fold.
+   *
+   * Deferring loses nothing the current turn could have used, and lands the
+   * refresh where a fresh snapshot is taken anyway.
+   */
+  requestSystemPromptRefresh(): void {
+    this.pendingSystemPromptRefresh = true;
+  }
+
+  /** Run a deferred `refreshSystemPrompt`, if one was requested. */
+  async flushPendingSystemPromptRefresh(): Promise<void> {
+    if (!this.pendingSystemPromptRefresh) return;
+    this.pendingSystemPromptRefresh = false;
+    try {
+      await this.refreshSystemPrompt();
+    } catch (error) {
+      this.log.error('failed to refresh system prompt', { error });
+    }
   }
 
   private updateSystemPromptFromProfile(

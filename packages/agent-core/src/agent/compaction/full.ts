@@ -345,11 +345,12 @@ export class FullCompaction {
       // post-compaction reminders are back, so the first post-compaction turn
       // never builds a request before they are reinjected. Only after reinjection
       // do we clear the flag, announce completion, and replay deferred input.
-      try {
-        await this.agent.refreshSystemPrompt();
-      } catch (error) {
-        this.agent.log.error('failed to refresh system prompt after compaction', { error });
-      }
+      // Deferred to the next turn boundary, never applied here: this turn is
+      // already committed to the system prompt its `llm` snapshot captured, so
+      // re-rendering now cannot reach its requests — it would only hand the
+      // fold-time requests (which read `config.systemPrompt` live) a prefix the
+      // provider has never seen. See `Agent.requestSystemPromptRefresh`.
+      this.agent.requestSystemPromptRefresh();
       await this.agent.injection.injectAfterCompaction();
       // The reinjected reminders (loadable-tools manifest, goal) are part of
       // the post-compaction floor: every compaction strips and re-appends

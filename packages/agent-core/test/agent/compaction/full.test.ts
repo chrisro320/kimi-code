@@ -291,7 +291,7 @@ describe('FullCompaction', () => {
     );
   });
 
-  it('refreshes the system prompt after compaction completes', async () => {
+  it('defers the system-prompt refresh past the fold to the next turn boundary', async () => {
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
@@ -306,10 +306,21 @@ describe('FullCompaction', () => {
     await ctx.rpc.beginCompaction({});
     await ctx.once('compaction.completed');
 
+    // Re-rendering here would only change the prompt the fold-time requests
+    // send — the turn is already committed to its `llm` snapshot — and hand the
+    // provider a prefix it has never seen.
+    expect(refreshSpy).not.toHaveBeenCalled();
+
+    await ctx.agent.flushPendingSystemPromptRefresh();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+    // The request is drained, not sticky: a boundary with nothing pending must
+    // not rebuild the prefix again.
+    await ctx.agent.flushPendingSystemPromptRefresh();
     expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('does not reset active tools while refreshing the system prompt after compaction', async () => {
+  it('does not reset active tools when the deferred refresh runs', async () => {
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
@@ -326,6 +337,7 @@ describe('FullCompaction', () => {
     ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
     await ctx.rpc.beginCompaction({});
     await ctx.once('compaction.completed');
+    await ctx.agent.flushPendingSystemPromptRefresh();
 
     const activeTools = ctx.agent.tools
       .data()
