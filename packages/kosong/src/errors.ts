@@ -520,10 +520,31 @@ export function parseRetryAfterMs(headers: unknown): number | null {
   return seconds * 1000;
 }
 
+// Explicit capacity rejections mislabeled with an auth status — e.g. the
+// managed gateway's `401 k3-256k supports only 256K context`. The wording,
+// not the status, carries the meaning: nothing about the credential changed,
+// and classifying it as an auth error bricks the session — every later
+// request, including the compaction that would shrink the context, fails
+// identically. Accepted on 401/403 only, and kept separate from the
+// 400/413/422 family above, whose wordings are too broad for an auth status.
+const CONTEXT_OVERFLOW_CAPACITY_MESSAGE_PATTERNS = [
+  /supports only [\d.,]+\s*[kmg] context/,
+] as const;
+
 export function isContextOverflowStatusError(statusCode: number, message: string): boolean {
-  if (statusCode !== 400 && statusCode !== 413 && statusCode !== 422) return false;
   const lowerMessage = message.toLowerCase();
-  return CONTEXT_OVERFLOW_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+  if (statusCode === 400 || statusCode === 413 || statusCode === 422) {
+    return (
+      CONTEXT_OVERFLOW_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage)) ||
+      CONTEXT_OVERFLOW_CAPACITY_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage))
+    );
+  }
+  if (statusCode === 401 || statusCode === 403) {
+    return CONTEXT_OVERFLOW_CAPACITY_MESSAGE_PATTERNS.some((pattern) =>
+      pattern.test(lowerMessage),
+    );
+  }
+  return false;
 }
 
 export function isRequestTooLargeStatusError(statusCode: number, message: string): boolean {
