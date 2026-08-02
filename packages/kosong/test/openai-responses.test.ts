@@ -2305,6 +2305,7 @@ async function runCompact(
   provider: OpenAIResponsesChatProvider,
   checkpointType: 'compaction' | 'compaction_summary',
   history: Message[],
+  tools: Tool[] = [],
 ): Promise<{ result: Awaited<ReturnType<typeof provider.compactConversation>>; body: Record<string, unknown> }> {
   let capturedBody: Record<string, unknown> | undefined;
   ((provider as any)._client.responses as unknown as Record<string, unknown>)['compact'] = vi
@@ -2314,7 +2315,7 @@ async function runCompact(
       return Promise.resolve(makeCompactResponse(checkpointType));
     });
 
-  const result = await provider.compactConversation('system prompt', [], history);
+  const result = await provider.compactConversation('system prompt', tools, history);
   if (capturedBody === undefined) {
     throw new Error('Expected compactConversation() to call responses.compact');
   }
@@ -2436,6 +2437,25 @@ describe('OpenAI Responses remote compaction', () => {
     expect(body['prompt_cache_key']).toBe('session-abc');
     // Forwarding the cache key must not drag `store` along with it.
     expect(body).not.toHaveProperty('store');
+  });
+
+  it('pins parallel_tool_calls so the fold renders the same tool preamble', async () => {
+    const provider = createCompactionProvider({ prompt_cache_key: 'session-abc' });
+    const { body } = await runCompact(provider, 'compaction', HISTORY, [ADD_TOOL, MUL_TOOL]);
+
+    // The two endpoints default this flag differently, and `/responses` matches
+    // the `false` rendering. Leaving it out bills 60 fewer input tokens than the
+    // loop request for the same body and the prefix diverges inside the tool
+    // block — 25% cached against 94%. Sending `false` makes them identical.
+    expect(body['parallel_tool_calls']).toBe(false);
+    expect(Array.isArray(body['tools'])).toBe(true);
+    expect((body['tools'] as unknown[]).length).toBe(2);
+  });
+
+  it('leaves parallel_tool_calls out when the fold carries no tools', async () => {
+    const { body } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
+    expect(body).not.toHaveProperty('parallel_tool_calls');
+    expect(body).not.toHaveProperty('tools');
   });
 
   it('omits prompt_cache_key when the host injected no session key', async () => {
