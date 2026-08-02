@@ -83,6 +83,7 @@ export {
   isAbortError,
   isContextOverflowStatusError,
   isImageFormatError,
+  isUnsupportedContentPartError,
   isProviderRateLimitError,
   isRecoverableRequestStructureError,
   isRequestTooLargeStatusError,

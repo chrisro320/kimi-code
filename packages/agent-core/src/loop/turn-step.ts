@@ -13,6 +13,7 @@ import {
   APIRequestTooLargeError,
   isImageFormatError,
   isRecoverableRequestStructureError,
+  isUnsupportedContentPartError,
   type TokenUsage,
 } from '@moonshot-ai/kosong';
 import type { Logger } from '#/logging/types';
@@ -56,6 +57,14 @@ export interface ExecuteLoopStepDeps {
   readonly buildMessagesMediaDegraded?: LoopMessageBuilder | undefined;
   /** See RunTurnInput.buildMessagesMediaStripped. */
   readonly buildMessagesMediaStripped?: LoopMessageBuilder | undefined;
+  /** See RunTurnInput.buildMessagesMediaUnsupported. */
+  readonly buildMessagesMediaUnsupported?: LoopMessageBuilder | undefined;
+  /**
+   * True when `buildMessages` already strips every media part visible now (the
+   * absolute projection), not just the ones captured in the turn's snapshot.
+   * Marks the floor: a rejection below it cannot be reduced further.
+   */
+  readonly initialMediaStripIsAbsolute?: boolean;
   readonly dispatchEvent: LoopEventDispatcher;
   readonly llm: LLM;
   readonly tools?: readonly ExecutableTool[] | undefined;
@@ -93,6 +102,13 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
    * projection for the same reason as above.
    */
   readonly mediaStrippedResendUsed?: boolean;
+  /**
+   * True when the rejection was the provider refusing the media part itself
+   * rather than its contents. No replacement copy can ever satisfy such an
+   * endpoint, so the turn loop must keep later steps on the absolute strip —
+   * the snapshot projection deliberately lets newly produced media through.
+   */
+  readonly mediaUnsupportedResendUsed?: boolean;
 }> {
   const {
     turnId,
@@ -102,6 +118,8 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
     buildMessagesStrict,
     buildMessagesMediaDegraded,
     buildMessagesMediaStripped,
+    buildMessagesMediaUnsupported,
+    initialMediaStripIsAbsolute,
     dispatchEvent,
     llm,
     tools,
@@ -206,6 +224,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
   let response: LLMChatResponse;
   let mediaDegradedResendUsed = false;
   let mediaStrippedResendUsed = false;
+  let mediaUnsupportedResendUsed = false;
   try {
     response = await chatWithRetry({ ...retryInput, params: chatParams });
   } catch (error) {
@@ -268,7 +287,8 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
             buildMessagesMediaStripped === undefined ||
             !(
               degradedError instanceof APIRequestTooLargeError ||
-              isImageFormatError(degradedError)
+              isImageFormatError(degradedError) ||
+              isUnsupportedContentPartError(degradedError)
             )
           ) {
             log?.error('media-degraded resend still rejected by provider', {
@@ -310,9 +330,10 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
           });
         }
       }
-    } else if (isImageFormatError(error)) {
-      // The provider rejected an IMAGE in the request (unsupported format or
-      // undecodable data). Unlike the 413 case — too MUCH media — the error
+    } else if (isImageFormatError(error) || isUnsupportedContentPartError(error)) {
+      // The provider rejected an IMAGE in the request — either its format/data
+      // is bad, or the endpoint's content-part schema has no image variant at
+      // all (a text-only model behind an OpenAI-shaped gateway). Unlike the 413 case — too MUCH media — the error
       // never says WHICH image is poison, and the same history is re-sent
       // every turn, so the session would stay stuck. Resend ONCE with every
       // media part replaced by a text marker: the only projection guaranteed
@@ -320,18 +341,35 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
       // and the `<image path="...">` wrappers survive so the model can
       // re-read files (getting conversion guidance for refused formats). A
       // rejection of that rebuild propagates unchanged.
+      //
+      // One exception: when the endpoint refuses the media PART, no replacement
+      // copy can ever satisfy it, so the snapshot projection is not enough — it
+      // deliberately lets newly produced media through, which is how a step that
+      // already started stripped can still carry a fresh image the model made
+      // while trying to recover. Escalate to the absolute projection, which
+      // strips everything visible now. `initialMediaStripIsAbsolute` marks the
+      // floor so this escalates at most once.
+      const providerRefusesAllMedia = isUnsupportedContentPartError(error);
+      const canEscalateToAbsolute =
+        providerRefusesAllMedia &&
+        buildMessagesMediaUnsupported !== undefined &&
+        initialMediaStripIsAbsolute !== true;
+      const stripBuilder = canEscalateToAbsolute
+        ? buildMessagesMediaUnsupported
+        : buildMessagesMediaStripped;
       if (
-        initialMediaProjection === 'media-stripped' ||
-        buildMessagesMediaStripped === undefined
+        stripBuilder === undefined ||
+        (initialMediaProjection === 'media-stripped' && !canEscalateToAbsolute)
       ) {
         throw error;
       }
       log?.warn('provider rejected an image in the request; resending with all media stripped', {
         turnStep: `${turnId}.${String(currentStep)}`,
         model: llm.modelName,
+        absolute: canEscalateToAbsolute,
       });
       try {
-        response = await chatWithMediaProjection(buildMessagesMediaStripped, 'media-stripped');
+        response = await chatWithMediaProjection(stripBuilder, 'media-stripped');
       } catch (strippedError) {
         log?.error('media-stripped resend still rejected by provider', {
           turnStep: `${turnId}.${String(currentStep)}`,
@@ -342,6 +380,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
         throw strippedError;
       }
       mediaStrippedResendUsed = true;
+      mediaUnsupportedResendUsed = mediaUnsupportedResendUsed || providerRefusesAllMedia;
       log?.info('recovered after media-stripped resend', {
         turnStep: `${turnId}.${String(currentStep)}`,
       });
@@ -465,6 +504,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
       stopTurnAfterStep && effectiveStopReason === 'tool_use' ? 'end_turn' : effectiveStopReason,
     mediaDegradedResendUsed,
     mediaStrippedResendUsed,
+    mediaUnsupportedResendUsed,
   };
 }
 

@@ -325,6 +325,37 @@ export function isImageFormatError(error: unknown): boolean {
   return false;
 }
 
+const UNSUPPORTED_CONTENT_PART_PATTERNS = [
+  /unknown variant `(?:image_url|image|input_image|video_url|audio_url)`/,
+] as const;
+
+/**
+ * Whether the provider's content-part schema has no variant for the media part
+ * we sent — a capability mismatch, not a broken image.
+ *
+ * Deliberately separate from {@link isImageFormatError}: that one means "this
+ * image is bad", every one of its patterns says so, and it is reused by
+ * {@link isRetryableGenerateError} to decide retryability. Folding a schema
+ * mismatch into it would make both harder to change.
+ *
+ * Seen from an OpenAI-shaped gateway fronting a text-only model:
+ * `Failed to deserialize the JSON body into the target type: messages[139]:
+ * unknown variant \`image_url\`, expected \`text\``. Recovery is the same as for a
+ * bad image — resend once with media stripped — and without it the offending
+ * message poisons every later turn identically, since 400 is not retryable.
+ *
+ * Anchored on the variant name, not the `expected …` tail: that tail is far too
+ * broad and would misfire on unrelated enum rejections.
+ */
+export function isUnsupportedContentPartError(error: unknown): boolean {
+  if (!(error instanceof APIStatusError)) return false;
+  if (error instanceof APIContextOverflowError) return false;
+  if (error instanceof APIRequestTooLargeError) return false;
+  if (error.statusCode !== 400 && error.statusCode !== 422) return false;
+  const lowerMessage = error.message.toLowerCase();
+  return UNSUPPORTED_CONTENT_PART_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
 // `terminated` is the undici signature for an SSE/HTTP body stream that is
 // dropped mid-flight (common with Node's native fetch on long reasoning
 // streams). It surfaces as a raw `TypeError: terminated`, so it must be

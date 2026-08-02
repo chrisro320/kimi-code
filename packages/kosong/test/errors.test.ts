@@ -13,6 +13,7 @@ import {
   isRecoverableRequestStructureError,
   isRetryableGenerateError,
   isToolExchangeAdjacencyError,
+  isUnsupportedContentPartError,
   normalizeAPIStatusError,
 } from '#/errors';
 import { describe, expect, it } from 'vitest';
@@ -689,6 +690,72 @@ describe('isImageFormatError', () => {
     ).toBe(false);
     expect(
       isRetryableGenerateError(new APIStatusError(400, 'unsupported image format')),
+    ).toBe(false);
+  });
+});
+
+// Verbatim from a 2026-08-02 session: an OpenAI-shaped gateway in front of a
+// text-only model. Kept whole because recovery hinges on matching what the
+// provider actually sends, not a paraphrase of it.
+const UNSUPPORTED_VARIANT_MESSAGE =
+  '400 Error from provider (Console Go): Upstream request failed: ' +
+  '[invalid_request_error] Failed to deserialize the JSON body into the target type: ' +
+  'messages[139]: unknown variant `image_url`, expected `text` at line 1 column 438509';
+
+describe('isUnsupportedContentPartError', () => {
+  it('matches a provider whose content-part schema has no media variant', () => {
+    expect(isUnsupportedContentPartError(new APIStatusError(400, UNSUPPORTED_VARIANT_MESSAGE))).toBe(
+      true,
+    );
+    expect(isUnsupportedContentPartError(new APIStatusError(422, UNSUPPORTED_VARIANT_MESSAGE))).toBe(
+      true,
+    );
+    expect(
+      isUnsupportedContentPartError(new APIStatusError(400, 'unknown variant `input_image`')),
+    ).toBe(true);
+    expect(
+      isUnsupportedContentPartError(new APIStatusError(400, 'unknown variant `video_url`')),
+    ).toBe(true);
+  });
+
+  it('does not match unrelated statuses, overflow/413 subclasses, or non-status errors', () => {
+    expect(isUnsupportedContentPartError(new APIStatusError(429, UNSUPPORTED_VARIANT_MESSAGE))).toBe(
+      false,
+    );
+    expect(isUnsupportedContentPartError(new APIStatusError(500, UNSUPPORTED_VARIANT_MESSAGE))).toBe(
+      false,
+    );
+    expect(
+      isUnsupportedContentPartError(new APIContextOverflowError(400, UNSUPPORTED_VARIANT_MESSAGE)),
+    ).toBe(false);
+    expect(
+      isUnsupportedContentPartError(new APIRequestTooLargeError(413, UNSUPPORTED_VARIANT_MESSAGE)),
+    ).toBe(false);
+    expect(isUnsupportedContentPartError(new ChatProviderError(UNSUPPORTED_VARIANT_MESSAGE))).toBe(
+      false,
+    );
+    expect(isUnsupportedContentPartError(new Error(UNSUPPORTED_VARIANT_MESSAGE))).toBe(false);
+  });
+
+  it('anchors on the variant name so unrelated enum rejections do not misfire', () => {
+    expect(
+      isUnsupportedContentPartError(
+        new APIStatusError(400, 'unknown variant `sonnet`, expected one of `text`, `json`'),
+      ),
+    ).toBe(false);
+    expect(
+      isUnsupportedContentPartError(new APIStatusError(400, 'max_tokens must be positive')),
+    ).toBe(false);
+  });
+
+  it('keeps the two media rejections semantically apart', () => {
+    // The schema mismatch is not an image-format problem...
+    expect(isImageFormatError(new APIStatusError(400, UNSUPPORTED_VARIANT_MESSAGE))).toBe(false);
+    // ...and a malformed image is not a schema mismatch.
+    expect(
+      isUnsupportedContentPartError(
+        new APIStatusError(400, 'The image data you provided does not represent a valid image'),
+      ),
     ).toBe(false);
   });
 });

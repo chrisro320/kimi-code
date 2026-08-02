@@ -59,6 +59,16 @@ export interface RunTurnInput {
    * this projection directly.
    */
   readonly buildMessagesMediaStripped?: LoopMessageBuilder | undefined;
+  /**
+   * Optional absolute media strip: every media part visible *now*, not just the
+   * ones in the turn's snapshot. `buildMessagesMediaStripped` intentionally
+   * lets media produced after the snapshot survive, so the model can retry with
+   * a smaller or converted copy — the right move when the provider rejected an
+   * image's format or size. It is the wrong move when the provider has no media
+   * content-part at all: there, a fresh copy is just another rejection. Used
+   * only for that case.
+   */
+  readonly buildMessagesMediaUnsupported?: LoopMessageBuilder | undefined;
   readonly dispatchEvent: LoopEventDispatcher;
   readonly tools?: readonly ExecutableTool[] | undefined;
   /**
@@ -95,6 +105,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     buildMessagesStrict,
     buildMessagesMediaDegraded,
     buildMessagesMediaStripped,
+    buildMessagesMediaUnsupported,
     dispatchEvent,
     tools,
     buildTools,
@@ -121,6 +132,11 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   // second 413: the rejected media is still in history, so later steps stay
   // stripped.
   let mediaStrippedActive = false;
+  // A provider that refuses the media PART cannot be satisfied by any
+  // replacement copy, so once that happens the turn drops to the absolute
+  // projection — the snapshot one deliberately lets newly produced media
+  // through, which would hand the same endpoint a fresh image every step.
+  let mediaUnsupportedActive = false;
   const recordStepUsage = async (
     stepUsage: TokenUsage,
   ): Promise<RecordStepUsageResult | void> => {
@@ -147,19 +163,24 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         turnId,
         signal,
         buildMessages:
-          mediaStrippedActive && buildMessagesMediaStripped !== undefined
-            ? buildMessagesMediaStripped
-            : mediaDegradedActive && buildMessagesMediaDegraded !== undefined
-              ? buildMessagesMediaDegraded
-              : buildMessages,
+          mediaUnsupportedActive && buildMessagesMediaUnsupported !== undefined
+            ? buildMessagesMediaUnsupported
+            : mediaStrippedActive && buildMessagesMediaStripped !== undefined
+              ? buildMessagesMediaStripped
+              : mediaDegradedActive && buildMessagesMediaDegraded !== undefined
+                ? buildMessagesMediaDegraded
+                : buildMessages,
         initialMediaProjection: mediaStrippedActive
           ? 'media-stripped'
           : mediaDegradedActive
             ? 'media-degraded'
             : 'normal',
+        initialMediaStripIsAbsolute:
+          mediaUnsupportedActive && buildMessagesMediaUnsupported !== undefined,
         buildMessagesStrict,
         buildMessagesMediaDegraded,
         buildMessagesMediaStripped,
+        buildMessagesMediaUnsupported,
         dispatchEvent,
         llm,
         tools,
@@ -179,6 +200,8 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       activeStep = undefined;
       mediaDegradedActive = mediaDegradedActive || stepResult.mediaDegradedResendUsed === true;
       mediaStrippedActive = mediaStrippedActive || stepResult.mediaStrippedResendUsed === true;
+      mediaUnsupportedActive =
+        mediaUnsupportedActive || stepResult.mediaUnsupportedResendUsed === true;
 
       if (stepResult.stopReason === 'tool_use') {
         continue;

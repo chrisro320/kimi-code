@@ -392,6 +392,130 @@ describe('Agent turn flow', () => {
       ).toBe(true);
     });
 
+    it('strips all media and retries once when the provider has no image variant', async () => {
+      // Verbatim from a 2026-08-02 session: an OpenAI-shaped gateway in front
+      // of a text-only model rejects the content-part variant itself. 400 is
+      // not retryable and the image stays in history, so without recovery every
+      // later turn died on the same message index.
+      let attempts = 0;
+      const histories: Message[][] = [];
+      const generate: GenerateFn = async (_p, _s, _t, history) => {
+        attempts += 1;
+        histories.push(structuredClone(history));
+        if (attempts === 1) {
+          throw new APIStatusError(
+            400,
+            '400 Error from provider (Console Go): Upstream request failed: ' +
+              '[invalid_request_error] Failed to deserialize the JSON body into the target type: ' +
+              'messages[139]: unknown variant `image_url`, expected `text` at line 1 column 438509',
+          );
+        }
+        return okResponse();
+      };
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: { type: 'kimi', apiKey: 'test-key', model: 'kimi-code' },
+        modelCapabilities: IMAGE_CAPABLE,
+      });
+      plantPoisonedImage(ctx);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'continue' }] });
+      await ctx.untilTurnEnd();
+
+      expect(attempts).toBe(2);
+      expect(histories[0]!.flatMap((m) => m.content).some((p) => p.type === 'image_url')).toBe(true);
+      expect(histories[1]!.flatMap((m) => m.content).some((p) => p.type === 'image_url')).toBe(false);
+    });
+
+    it('escalates to an absolute strip when the provider refuses the media part', async () => {
+      // The snapshot projection lets media produced after the first strip
+      // through on purpose, so the model can retry with a smaller or converted
+      // copy. An endpoint with no image content-part cannot be satisfied that
+      // way: the copy is just another rejection, and by then the step already
+      // started stripped, which used to kill the turn outright.
+      const unsupportedVariant = (): APIStatusError =>
+        new APIStatusError(
+          400,
+          'Failed to deserialize the JSON body into the target type: ' +
+            'messages[7]: unknown variant `image_url`, expected `text`',
+        );
+      const recoveryCall: ToolCall = {
+        type: 'function',
+        id: 'call-inspect-recovery',
+        name: 'InspectRecovery',
+        arguments: '{}',
+      };
+      let attempts = 0;
+      const histories: Message[][] = [];
+      let ctxRef: ReturnType<typeof testAgent> | undefined;
+      const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+        attempts += 1;
+        histories.push(structuredClone(history));
+        // Model the endpoint faithfully: it rejects any request carrying an
+        // image part, whichever one it is.
+        if (history.flatMap((m) => m.content).some((p) => p.type === 'image_url')) {
+          throw unsupportedVariant();
+        }
+        if (attempts === 2) {
+          // The first strip worked. Now a second image lands mid-turn — in the
+          // real session this was the model re-reading the file to convert it.
+          // Its content identity is new, so the turn's snapshot does not cover
+          // it and the snapshot projection ships it straight back to the
+          // endpoint that just refused the first one.
+          ctxRef!.agent.context.appendUserMessage(
+            [
+              { type: 'text', text: '<image path="/workspace/converted.jpg">' },
+              { type: 'image_url', imageUrl: { id: 'converted', url: 'data:image/jpeg;base64,Q09OVg==' } },
+              { type: 'text', text: '</image>' },
+            ],
+            { kind: 'user' },
+          );
+          return {
+            id: 'mock-media-recovery-tool-call',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: 'converting and re-reading' }],
+              toolCalls: [recoveryCall],
+            },
+            usage: { inputOther: 1, output: 1, inputCacheRead: 0, inputCacheCreation: 0 },
+            finishReason: 'tool_calls',
+            rawFinishReason: 'tool_calls',
+          };
+        }
+        return okResponse();
+      };
+      const ctx = testAgent({ generate });
+      ctxRef = ctx;
+      ctx.configure({
+        provider: { type: 'kimi', apiKey: 'test-key', model: 'kimi-code' },
+        modelCapabilities: IMAGE_CAPABLE,
+      });
+      await ctx.rpc.setPermission({ mode: 'auto' });
+      await ctx.rpc.registerTool({
+        name: 'InspectRecovery',
+        description: 'Return a model-visible recovery image.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      });
+      plantPoisonedImage(ctx);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'continue' }] });
+      await ctx.untilToolCall({ output: [{ type: 'text', text: 'converted' }] });
+      await ctx.untilTurnEnd();
+
+      const hasImage = (messages: Message[]): boolean =>
+        messages.flatMap((m) => m.content).some((p) => p.type === 'image_url');
+      // The turn reached the end instead of dying on the second image.
+      expect(hasImage(histories.at(-1)!)).toBe(false);
+      // Only the first request ever carried an image. Once the turn knows the
+      // endpoint refuses media parts outright it drops to the absolute
+      // projection proactively, so the second image never gets a chance to earn
+      // its own rejection — turn-step can still escalate reactively, but on
+      // this path it never has to.
+      expect(histories.map(hasImage)).toEqual([true, false, false]);
+      // Read-side only: the real history keeps both images.
+      expect(hasImage(ctx.agent.context.history as Message[])).toBe(true);
+    });
+
     it('strips all media and retries once on kosong client-side image error', async () => {
       let attempts = 0;
       const generate: GenerateFn = async () => {

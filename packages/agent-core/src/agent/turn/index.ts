@@ -850,6 +850,10 @@ export class TurnFlow {
           buildMessagesStrict: () => this.agent.context.strictMessages,
           buildMessagesMediaDegraded: () => this.agent.context.mediaDegradedMessages,
           buildMessagesMediaStripped,
+          // Absolute strip: used only when the provider refuses the media part
+          // itself, where letting a newly produced copy through (which the
+          // snapshot projection does on purpose) just earns another rejection.
+          buildMessagesMediaUnsupported: () => this.agent.context.mediaStrippedMessages,
           dispatchEvent: this.buildDispatchEvent(turnId),
           // Re-read per step (not snapshotted per turn) so a select_tools load
           // is dispatchable on the very next step of the same turn.
