@@ -2452,6 +2452,22 @@ describe('OpenAI Responses remote compaction', () => {
     expect((body['tools'] as unknown[]).length).toBe(2);
   });
 
+  it('strips deferred tools from the fold request like generate() does', async () => {
+    // One extra top-level tool voids the prompt cache outright (measured:
+    // cached_tokens 42,752 -> 0), and deferred schemas travel via
+    // message-level declarations — the fold must strip them exactly like
+    // generate()'s single strip point.
+    const deferredTool = { ...ADD_TOOL, name: 'deferred_extra', deferred: true } as Tool;
+    const { body } = await runCompact(
+      createCompactionProvider(),
+      'compaction',
+      HISTORY,
+      [ADD_TOOL, deferredTool],
+    );
+    const names = (body['tools'] as Array<{ name: string }>).map((tool) => tool.name);
+    expect(names).toEqual([ADD_TOOL.name]);
+  });
+
   it('leaves parallel_tool_calls out when the fold carries no tools', async () => {
     const { body } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
     expect(body).not.toHaveProperty('parallel_tool_calls');
@@ -2466,7 +2482,7 @@ describe('OpenAI Responses remote compaction', () => {
     expect(body).not.toHaveProperty('prompt_cache_key');
   });
 
-  it('forwards no generation kwargs beyond the cache key', async () => {
+  it('forwards no generation kwargs beyond the cache key and reasoning', async () => {
     const provider = createCompactionProvider({
       prompt_cache_key: 'session-abc',
       max_output_tokens: 4096,
@@ -2479,7 +2495,30 @@ describe('OpenAI Responses remote compaction', () => {
       'instructions',
       'model',
       'prompt_cache_key',
+      'reasoning',
     ]);
+  });
+
+  it('mirrors the loop reasoning field so the fold reads the loop cache', async () => {
+    // Measured on a real 118k-token replay: a compact request without
+    // `reasoning` reads 0% of the loop's cache while the mirrored request
+    // hits 99.4%. The endpoint rejects `include` ("Unknown parameter"), so
+    // only `reasoning` is mirrored, never `include`.
+    const provider = createCompactionProvider({ reasoning_effort: 'high' });
+    const { body } = await runCompact(provider, 'compaction', HISTORY);
+    const generateBody = await captureGenerateBody(
+      createCompactionProvider({ reasoning_effort: 'high' }),
+      HISTORY,
+    );
+    expect(body['reasoning']).toEqual(generateBody['reasoning']);
+    expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+    expect(body).not.toHaveProperty('include');
+  });
+
+  it('omits reasoning when the loop has no thinking effort configured', async () => {
+    const { body } = await runCompact(createCompactionProvider(), 'compaction', HISTORY);
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('include');
   });
 
   it('replays a checkpoint back as a top-level item, byte for byte', async () => {

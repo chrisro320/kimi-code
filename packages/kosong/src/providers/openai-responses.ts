@@ -1368,8 +1368,13 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       if (systemPrompt) {
         params['instructions'] = systemPrompt;
       }
-      if (tools.length > 0) {
-        params['tools'] = tools.map((tool) => convertTool(tool));
+      // Mirror the deferred strip generate() applies (generate.ts): deferred
+      // tool schemas travel via message-level declarations, and one extra
+      // top-level tool voids the prompt cache outright — measured: a single
+      // extra tool drops cached_tokens from 42,752 to 0.
+      const wireTools = tools.filter((tool) => tool.deferred !== true);
+      if (wireTools.length > 0) {
+        params['tools'] = wireTools.map((tool) => convertTool(tool));
         // Prefix alignment: the two endpoints render a tool-calling preamble
         // from different defaults for this flag, and `/responses` (which never
         // sends it either) matches the `false` rendering. Omitting it here bills
@@ -1394,6 +1399,18 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       const promptCacheKey = this._generationKwargs['prompt_cache_key'];
       if (promptCacheKey !== undefined) {
         params['prompt_cache_key'] = promptCacheKey;
+      }
+      // Reasoning-field alignment: the loop path sends
+      // `reasoning: {effort, summary:'auto'}` whenever `reasoning_effort` is
+      // configured (see generate()), and the provider's prompt-cache entry is
+      // keyed on that request shape. A compact request without `reasoning`
+      // misses the loop's cache outright — measured 0% cached on a real
+      // 118k-token replay (loop warm 99.4%), while mirroring the field
+      // restores the full hit. Only `reasoning` is mirrored: the endpoint
+      // rejects `include` outright ("Unknown parameter: 'include'").
+      const reasoningEffort = this._generationKwargs['reasoning_effort'] as string | undefined;
+      if (reasoningEffort !== undefined) {
+        params['reasoning'] = { effort: reasoningEffort, summary: 'auto' };
       }
 
       options?.onRequestSent?.();
