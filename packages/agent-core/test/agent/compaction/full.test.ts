@@ -748,6 +748,58 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
+  it('strips media and retries when a text-only provider rejects the image_url variant', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts === 1) {
+        throw new APIStatusError(
+          400,
+          'Failed to deserialize the JSON body into the target type: messages[1]: ' +
+            'unknown variant `image_url`, expected `text` at line 1 column 438509',
+        );
+      }
+      return textResult('Compacted without media.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.agent.context.appendUserMessage(
+      [
+        { type: 'text', text: '<image path="/workspace/shot.png">' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } },
+        { type: 'text', text: '</image>' },
+      ],
+      { kind: 'user' },
+    );
+    const compacted = ctx.once('context.apply_compaction');
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await compacted;
+    await completed;
+
+    expect(attempts).toBe(2);
+    const firstParts = histories[0]!.flatMap((message) => message.content);
+    expect(firstParts.some((part) => part.type === 'image_url')).toBe(true);
+    const retryParts = histories[1]!.flatMap((message) => message.content);
+    expect(retryParts.some((part) => part.type !== 'text' && part.type !== 'think')).toBe(false);
+    const retryText = retryParts
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n');
+    expect(retryText).toContain('[image]');
+    expect(retryText).toContain('<image path="/workspace/shot.png">');
+    expect(histories[1]!.length).toBe(histories[0]!.length);
+    const keptParts = ctx.agent.context.history.flatMap((message) => message.content);
+    expect(keptParts.some((part) => part.type === 'image_url')).toBe(true);
+    await ctx.expectResumeMatches();
+  });
+
   it('shrinks the history when the summarizer request stays too large after media stripping', async () => {
     let attempts = 0;
     const histories: Message[][] = [];

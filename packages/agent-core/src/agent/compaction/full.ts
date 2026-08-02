@@ -18,6 +18,7 @@ import {
   APIStatusError,
   createUserMessage,
   isImageFormatError,
+  isUnsupportedContentPartError,
 } from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
@@ -525,8 +526,10 @@ export class FullCompaction {
           if (statusError?.traceId !== null && statusError?.traceId !== undefined) {
             this.activeSummarizerTrace?.capture(statusError.traceId);
           }
-          // A request-body-size rejection (HTTP 413) or an image-format
-          // rejection is first retried with media parts replaced by text
+          // A request-body-size rejection (HTTP 413), an image-format
+          // rejection, or a content-part schema mismatch (a text-only
+          // provider whose schema has no `image_url` variant at all) is
+          // first retried with media parts replaced by text
           // markers: accumulated base64 payloads are the usual 413 culprit,
           // a poisoned image the format-rejection culprit, and a text summary
           // needs neither — the conversation already narrates what was seen,
@@ -534,10 +537,12 @@ export class FullCompaction {
           // Only the summarizer input copy is rewritten; the real history
           // keeps its media. A rejection after the strip (or with no media to
           // strip) falls through to the overflow shrink below for a 413, and
-          // propagates for a format error — dropping oldest messages cannot
-          // fix a poisoned image's format.
+          // propagates for a format or schema error — dropping oldest
+          // messages cannot fix either.
           const mediaRejected =
-            error instanceof APIRequestTooLargeError || isImageFormatError(error);
+            error instanceof APIRequestTooLargeError ||
+            isImageFormatError(error) ||
+            isUnsupportedContentPartError(error);
           if (mediaRejected && !mediaStripAttempted) {
             mediaStripAttempted = true;
             const stripped = replaceMediaPartsWithMarkers(historyForModel);
