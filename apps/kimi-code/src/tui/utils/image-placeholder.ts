@@ -94,7 +94,18 @@ export function extractMediaAttachments(
       if (attachment.original !== undefined) {
         pushText(parts, captionForCompressedImage(attachment));
       }
+      // Wrap the inline image in the same `<image path="…">` tags ReadMediaFile
+      // already produces, so the path survives when the engine has to strip the
+      // image part: a provider that rejects the `image_url` variant outright
+      // (text-only model behind an OpenAI-shaped gateway) gets the media
+      // replaced by a placeholder mid-turn, and without the path the model is
+      // left with nothing to hand an external image-analysis CLI. Uncompressed
+      // pastes carried no path at all before this — `ImageAttachment` holds
+      // bytes, and only the compression caption ever mentioned a file.
+      const diskPath = imagePathForAttachment(attachment);
+      if (diskPath !== undefined) pushText(parts, `<image path="${escapeAttribute(diskPath)}">`);
       parts.push(imagePartForAttachment(attachment));
+      if (diskPath !== undefined) pushText(parts, '</image>');
       imageAttachmentIds.push(id);
     }
     hasMedia = true;
@@ -251,6 +262,28 @@ function materializeImageToCache(att: ImageAttachment): string {
   const target = join(cacheDir, `${randomUUID()}.${ext}`);
   writeFileSync(target, att.bytes);
   return target;
+}
+
+/**
+ * Where this attachment can be read back from disk, or undefined when it
+ * cannot be persisted.
+ *
+ * Prefers the pre-compression original the paste handler already wrote — it is
+ * the full-fidelity copy and costs no second write. Otherwise the bytes we are
+ * about to send are materialized into the shared cache.
+ *
+ * Best effort by contract: the caller is on the synchronous submit path, and a
+ * failed cache write must never cost the user their message. On failure the
+ * image is still sent inline, just without a readback path.
+ */
+function imagePathForAttachment(att: ImageAttachment): string | undefined {
+  const originalPath = att.original?.path;
+  if (typeof originalPath === 'string' && originalPath.length > 0) return originalPath;
+  try {
+    return materializeImageToCache(att);
+  } catch {
+    return undefined;
+  }
 }
 
 function captionForCompressedImage(att: ImageAttachment): string {

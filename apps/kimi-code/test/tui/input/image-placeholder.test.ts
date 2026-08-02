@@ -41,6 +41,28 @@ function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'kimi-src-'));
 }
 
+/**
+ * Inline images are wrapped in `<image path="…">` … `</image>` so the path
+ * survives a mid-turn media strip. The path is a fresh cache file per submit,
+ * so tests asserting part *ordering* strip the wrapper and keep the rest.
+ * `pushText` merges adjacent text, so the tags have to come out from inside the
+ * surrounding text rather than as standalone parts.
+ */
+function withoutImagePathTags(parts: readonly unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const part of parts) {
+    const p = part as { type: string; text?: string };
+    if (p.type !== 'text' || p.text === undefined) {
+      out.push(part);
+      continue;
+    }
+    const text = p.text.replaceAll(/<image path="[^"]*">/g, '').replaceAll('</image>', '');
+    if (text.length === 0) continue;
+    out.push({ ...p, text });
+  }
+  return out;
+}
+
 type VideoUrlPart = { type: 'video_url'; videoUrl: { url: string } };
 
 // Prompt-attached videos are emitted as a `video_url` part whose url is a
@@ -65,31 +87,41 @@ describe('extractMediaAttachments', () => {
   });
 
   it('extracts a single matching placeholder into an image content part', () => {
-    const { store, placeholder } = storeWith(new Uint8Array([0xaa, 0xbb]));
-    const r = extractMediaAttachments(`describe ${placeholder} please`, store);
-    expect(r.hasMedia).toBe(true);
-    expect(r.imageAttachmentIds).toEqual([1]);
-    expect(r.parts).toEqual([
-      { type: 'text', text: 'describe ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
-      { type: 'text', text: ' please' },
-    ]);
+    const { cleanup } = setupTempCache();
+    try {
+      const { store, placeholder } = storeWith(new Uint8Array([0xaa, 0xbb]));
+      const r = extractMediaAttachments(`describe ${placeholder} please`, store);
+      expect(r.hasMedia).toBe(true);
+      expect(r.imageAttachmentIds).toEqual([1]);
+      expect(withoutImagePathTags(r.parts)).toEqual([
+        { type: 'text', text: 'describe ' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        { type: 'text', text: ' please' },
+      ]);
+    } finally {
+      cleanup();
+    }
   });
 
   it('keeps matched-placeholder order with multiple images', () => {
-    const store = new ImageAttachmentStore();
-    const a = store.addImage(new Uint8Array([1]), 'image/png', 10, 10);
-    const b = store.addImage(new Uint8Array([2]), 'image/png', 20, 20);
-    const text = `first ${a.placeholder} then ${b.placeholder} end`;
-    const r = extractMediaAttachments(text, store);
-    expect(r.imageAttachmentIds).toEqual([1, 2]);
-    expect(r.parts).toEqual([
-      { type: 'text', text: 'first ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AQ==' } },
-      { type: 'text', text: ' then ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,Ag==' } },
-      { type: 'text', text: ' end' },
-    ]);
+    const { cleanup } = setupTempCache();
+    try {
+      const store = new ImageAttachmentStore();
+      const a = store.addImage(new Uint8Array([1]), 'image/png', 10, 10);
+      const b = store.addImage(new Uint8Array([2]), 'image/png', 20, 20);
+      const text = `first ${a.placeholder} then ${b.placeholder} end`;
+      const r = extractMediaAttachments(text, store);
+      expect(r.imageAttachmentIds).toEqual([1, 2]);
+      expect(withoutImagePathTags(r.parts)).toEqual([
+        { type: 'text', text: 'first ' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AQ==' } },
+        { type: 'text', text: ' then ' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,Ag==' } },
+        { type: 'text', text: ' end' },
+      ]);
+    } finally {
+      cleanup();
+    }
   });
 
   it('keeps matched-placeholder order with mixed image and video attachments', () => {
@@ -105,8 +137,9 @@ describe('extractMediaAttachments', () => {
       const r = extractMediaAttachments(text, store);
       expect(r.imageAttachmentIds).toEqual([1]);
       expect(r.videoAttachmentIds).toEqual([2]);
-      expect(r.parts[0]).toEqual({ type: 'text', text: 'first ' });
-      expect(r.parts[1]).toEqual({
+      const bare = withoutImagePathTags(r.parts);
+      expect(bare[0]).toEqual({ type: 'text', text: 'first ' });
+      expect(bare[1]).toEqual({
         type: 'image_url',
         imageUrl: { url: 'data:image/png;base64,AQ==' },
       });
@@ -127,14 +160,20 @@ describe('extractMediaAttachments', () => {
   });
 
   it('uses pasted image bytes in data URLs', () => {
-    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const { store, placeholder } = storeWith(bytes);
-    const r = extractMediaAttachments(placeholder, store);
-    expect(r.parts).toHaveLength(1);
-    expect(r.parts[0]).toEqual({
-      type: 'image_url',
-      imageUrl: { url: 'data:image/png;base64,iVBORw==' },
-    });
+    const { cleanup } = setupTempCache();
+    try {
+      const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const { store, placeholder } = storeWith(bytes);
+      const r = extractMediaAttachments(placeholder, store);
+      const bare = withoutImagePathTags(r.parts);
+      expect(bare).toHaveLength(1);
+      expect(bare[0]).toEqual({
+        type: 'image_url',
+        imageUrl: { url: 'data:image/png;base64,iVBORw==' },
+      });
+    } finally {
+      cleanup();
+    }
   });
 
   it('keeps the video label (including special chars) in the cache path', () => {
@@ -194,22 +233,87 @@ describe('extractMediaAttachments', () => {
 
     const r = extractMediaAttachments(`look ${att.placeholder}`, store);
 
-    expect(r.parts).toHaveLength(2);
-    const caption = r.parts[0];
+    const bare = withoutImagePathTags(r.parts) as { type: string; text?: string }[];
+    expect(bare).toHaveLength(2);
+    const caption = bare[0];
     if (caption?.type !== 'text') throw new Error('expected leading text part');
     expect(caption.text).toContain('Image compressed');
     expect(caption.text).toContain('2600x2600');
     expect(caption.text).toContain('/tmp/kimi-code-original-images/abc.png');
-    expect(r.parts[1]).toEqual({
+    expect(bare[1]).toEqual({
       type: 'image_url',
       imageUrl: { url: 'data:image/png;base64,AQID' },
     });
   });
 
   it('notes an unpreserved original when persistence failed at paste time', () => {
+    const { cleanup } = setupTempCache();
+    try {
+      const store = new ImageAttachmentStore();
+      const att = store.addImage(new Uint8Array([1]), 'image/png', 2000, 2000, {
+        path: null,
+        width: 2600,
+        height: 2600,
+        byteLength: 123456,
+        mime: 'image/png',
+      });
+
+      const r = extractMediaAttachments(att.placeholder, store);
+
+      const caption = r.parts[0];
+      if (caption?.type !== 'text') throw new Error('expected leading text part');
+      expect(caption.text).toMatch(/not preserved/i);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('adds no caption for an uncompressed image attachment', () => {
+    const { cleanup } = setupTempCache();
+    try {
+      const { store, placeholder } = storeWith(new Uint8Array([0xaa]));
+      const r = extractMediaAttachments(placeholder, store);
+      const bare = withoutImagePathTags(r.parts) as { type: string }[];
+      expect(bare).toHaveLength(1);
+      expect(bare[0]?.type).toBe('image_url');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('wraps the inline image in a readable-back path so a media strip keeps it', () => {
+    const { cleanup } = setupTempCache();
+    try {
+      const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const { store, placeholder } = storeWith(bytes);
+
+      const r = extractMediaAttachments(`look ${placeholder} ok`, store);
+
+      expect(r.parts).toHaveLength(3);
+      const opening = r.parts[0];
+      const closing = r.parts[2];
+      if (opening?.type !== 'text' || closing?.type !== 'text') {
+        throw new Error('expected the image to be wrapped in text parts');
+      }
+      const match = /<image path="([^"]+)">/.exec(opening.text);
+      if (match?.[1] === undefined) throw new Error(`no path tag in: ${opening.text}`);
+      const path = match[1];
+      expect(path.startsWith(getCacheDir())).toBe(true);
+      expect(new Uint8Array(readFileSync(path))).toEqual(bytes);
+      expect(closing.text).toContain('</image>');
+      // Everything the model needs stays outside the image part, so stripping
+      // the media still leaves the path behind.
+      expect(opening.text).toContain('look ');
+      expect(closing.text).toContain(' ok');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reuses the pre-compression original instead of writing a second copy', () => {
     const store = new ImageAttachmentStore();
-    const att = store.addImage(new Uint8Array([1]), 'image/png', 2000, 2000, {
-      path: null,
+    const att = store.addImage(new Uint8Array([1, 2, 3]), 'image/png', 2000, 2000, {
+      path: '/tmp/kimi-code-original-images/abc.png',
       width: 2600,
       height: 2600,
       byteLength: 123456,
@@ -218,16 +322,9 @@ describe('extractMediaAttachments', () => {
 
     const r = extractMediaAttachments(att.placeholder, store);
 
-    const caption = r.parts[0];
-    if (caption?.type !== 'text') throw new Error('expected leading text part');
-    expect(caption.text).toMatch(/not preserved/i);
-  });
-
-  it('adds no caption for an uncompressed image attachment', () => {
-    const { store, placeholder } = storeWith(new Uint8Array([0xaa]));
-    const r = extractMediaAttachments(placeholder, store);
-    expect(r.parts).toHaveLength(1);
-    expect(r.parts[0]?.type).toBe('image_url');
+    const opening = r.parts[0];
+    if (opening?.type !== 'text') throw new Error('expected leading text part');
+    expect(opening.text).toContain('<image path="/tmp/kimi-code-original-images/abc.png">');
   });
 });
 

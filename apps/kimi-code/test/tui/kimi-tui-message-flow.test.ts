@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -20,7 +21,7 @@ import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel'
 import { ChoicePickerComponent } from '#/tui/components/dialogs/choice-picker';
 import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
 import { ProviderManagerComponent } from '#/tui/components/dialogs/provider-manager';
-import { KIMI_CODE_PLUGIN_MARKETPLACE_URL } from '#/constant/app';
+import { KIMI_CODE_HOME_ENV, KIMI_CODE_PLUGIN_MARKETPLACE_URL } from '#/constant/app';
 import { MOON_SPINNER_FRAMES } from '#/tui/constant/rendering';
 import {
   AgentSwarmProgressComponent,
@@ -1738,24 +1739,53 @@ command = "vim"
   });
 
 
+  /**
+   * Pasted images are now materialized into the cache dir so the path survives
+   * a mid-turn media strip. Point the cache at a throwaway home so the suite
+   * never writes into the developer's real one.
+   */
+  function withTempCacheHome(): () => void {
+    const home = mkdtempSync(join(tmpdir(), 'kimi-tui-home-'));
+    const previous = process.env[KIMI_CODE_HOME_ENV];
+    process.env[KIMI_CODE_HOME_ENV] = home;
+    return () => {
+      if (previous === undefined) delete process.env[KIMI_CODE_HOME_ENV];
+      else process.env[KIMI_CODE_HOME_ENV] = previous;
+      rmSync(home, { recursive: true, force: true });
+    };
+  }
+
+  /** The `<image path="…">` opening tag `extractMediaAttachments` prepends. */
+  const IMAGE_OPEN_TAG = /<image path="[^"]+">$/;
+
   it('sends pasted image placeholders as image content parts', async () => {
-    const { driver, session } = await makeDriver();
-    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
-    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    const restoreHome = withTempCacheHome();
+    try {
+      const { driver, session } = await makeDriver();
+      const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+      const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
 
-    driver.handleUserInput(`describe ${attachment.placeholder}`);
+      driver.handleUserInput(`describe ${attachment.placeholder}`);
 
-    expect(session.prompt).toHaveBeenCalledWith([
-      { type: 'text', text: 'describe ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
-    ]);
-    expect(driver.state.transcriptEntries).toEqual([
-      expect.objectContaining({
-        kind: 'user',
-        content: `describe ${attachment.placeholder}`,
-        imageAttachmentIds: [attachment.id],
-      }),
-    ]);
+      // The image is wrapped in `<image path="…">` … `</image>` so the readback
+      // path outlives the image part when a provider forces a media strip.
+      expect(session.prompt).toHaveBeenCalledWith([
+        { type: 'text', text: expect.stringMatching(IMAGE_OPEN_TAG) },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        { type: 'text', text: '</image>' },
+      ]);
+      const sent = session.prompt.mock.calls[0]?.[0] as { text?: string }[];
+      expect(sent[0]?.text).toContain('describe ');
+      expect(driver.state.transcriptEntries).toEqual([
+        expect.objectContaining({
+          kind: 'user',
+          content: `describe ${attachment.placeholder}`,
+          imageAttachmentIds: [attachment.id],
+        }),
+      ]);
+    } finally {
+      restoreHome();
+    }
   });
 
   it('queues editor input instead of prompting while a turn is already streaming', async () => {
@@ -2017,45 +2047,56 @@ command = "vim"
   });
 
   it('drains a queued image message with its media parts', async () => {
-    const session = makeSession();
-    const { driver } = await makeDriver(session);
-    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
-    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
-    driver.state.appState.streamingPhase = 'waiting';
+    const restoreHome = withTempCacheHome();
+    try {
+      const session = makeSession();
+      const { driver } = await makeDriver(session);
+      const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+      const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+      driver.state.appState.streamingPhase = 'waiting';
 
-    driver.handleUserInput(`describe ${attachment.placeholder}`);
+      driver.handleUserInput(`describe ${attachment.placeholder}`);
 
-    expect(session.prompt).not.toHaveBeenCalled();
-    const queued = driver.state.queuedMessages[0];
-    expect(queued?.parts).toEqual([
-      { type: 'text', text: 'describe ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
-    ]);
+      expect(session.prompt).not.toHaveBeenCalled();
+      const queued = driver.state.queuedMessages[0];
+      const expected = [
+        { type: 'text', text: expect.stringMatching(IMAGE_OPEN_TAG) },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        { type: 'text', text: '</image>' },
+      ];
+      expect(queued?.parts).toEqual(expected);
 
-    driver.sendQueuedMessage(session, queued!);
+      driver.sendQueuedMessage(session, queued!);
 
-    expect(session.prompt).toHaveBeenCalledWith([
-      { type: 'text', text: 'describe ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
-    ]);
+      // Queued parts are replayed verbatim, path tag included.
+      expect(session.prompt).toHaveBeenCalledWith(expected);
+    } finally {
+      restoreHome();
+    }
   });
 
   it('steers editor image input as media parts', async () => {
-    const session = makeSession();
-    const { driver } = await makeDriver(session);
-    driver.state.appState.model = 'k2';
-    driver.state.appState.streamingPhase = 'waiting';
-    driver.streamingUI.setTurnId('1');
-    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
-    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
-    driver.state.editor.setText(`check ${attachment.placeholder}`);
+    const restoreHome = withTempCacheHome();
+    try {
+      const session = makeSession();
+      const { driver } = await makeDriver(session);
+      driver.state.appState.model = 'k2';
+      driver.state.appState.streamingPhase = 'waiting';
+      driver.streamingUI.setTurnId('1');
+      const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+      const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+      driver.state.editor.setText(`check ${attachment.placeholder}`);
 
-    driver.state.editor.onCtrlS?.();
+      driver.state.editor.onCtrlS?.();
 
-    expect(session.steer).toHaveBeenCalledWith([
-      { type: 'text', text: 'check ' },
-      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
-    ]);
+      expect(session.steer).toHaveBeenCalledWith([
+        { type: 'text', text: expect.stringMatching(IMAGE_OPEN_TAG) },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        { type: 'text', text: '</image>' },
+      ]);
+    } finally {
+      restoreHome();
+    }
   });
 
   it('steers queued image messages with their media parts', async () => {
