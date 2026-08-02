@@ -53,6 +53,7 @@ import {
   isImageFormatError,
   isRecoverableRequestStructureError,
   isRetryableGenerateError,
+  isUnsupportedContentPartError,
 } from '#/kosong/contract/errors';
 import { type Message } from '#/kosong/contract/message';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
@@ -476,7 +477,17 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           }
           continue;
         }
-        if (projection !== 'media-stripped' && isImageFormatError(raw)) {
+        // Two different rejections land here: a malformed image
+        // (`isImageFormatError`) and a provider whose content-part schema has
+        // no variant for the part at all (`isUnsupportedContentPartError`).
+        // Both are fixed by the same move — replace the media with its text
+        // placeholder and resend — and neither is retryable, so without this
+        // the offending message stays in history and every later turn fails
+        // identically on the same message index.
+        if (
+          projection !== 'media-stripped' &&
+          (isImageFormatError(raw) || isUnsupportedContentPartError(raw))
+        ) {
           signal?.throwIfAborted();
           this.log.warn(
             'provider rejected an image in the request; resending with rejected media stripped',

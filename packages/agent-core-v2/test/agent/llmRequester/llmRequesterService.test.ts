@@ -347,6 +347,44 @@ describe('AgentLLMRequesterService media-stripped resend', () => {
     expect(strippedCalls).toBe(1);
   });
 
+  // Verbatim from a 2026-08-02 session: an OpenAI-shaped gateway in front of a
+  // text-only model rejects the content-part variant itself, not the image.
+  const UNSUPPORTED_CONTENT_PART_400 = new APIStatusError(
+    400,
+    '400 Error from provider (Console Go): Upstream request failed: ' +
+      '[invalid_request_error] Failed to deserialize the JSON body into the target type: ' +
+      'messages[139]: unknown variant `image_url`, expected `text` at line 1 column 438509',
+  );
+
+  it('resends once with the media-stripped projection after an unsupported-content-part 400', async () => {
+    const calls = { value: 0 };
+    let projectCalls = 0;
+    let strictCalls = 0;
+    let strippedCalls = 0;
+    const { service } = createService(createRequester(calls, UNSUPPORTED_CONTENT_PART_400), {
+      project: (messages: readonly ContextMessage[]) => {
+        projectCalls += 1;
+        return messages;
+      },
+      projectStrict: (messages: readonly ContextMessage[]) => {
+        strictCalls += 1;
+        return messages;
+      },
+      projectMediaStripped: (messages: readonly ContextMessage[]) => {
+        strippedCalls += 1;
+        return messages;
+      },
+    });
+
+    const result = await service.request();
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'ok' }]);
+    expect(calls.value).toBe(2);
+    expect(projectCalls).toBe(1);
+    expect(strictCalls).toBe(0);
+    expect(strippedCalls).toBe(1);
+  });
+
   it('keeps later steps of the same turn on the stripped projection', async () => {
     const calls = { value: 0 };
     let projectCalls = 0;

@@ -205,6 +205,38 @@ export function isImageFormatError(error: unknown): boolean {
   return false;
 }
 
+const UNSUPPORTED_CONTENT_PART_PATTERNS = [
+  /unknown variant `(?:image_url|image|input_image|video_url|audio_url)`/,
+] as const;
+
+/**
+ * A provider whose content-part schema has no variant for the media part we
+ * sent — not a malformed image, a capability mismatch.
+ *
+ * Kept separate from {@link isImageFormatError}: that one means "this image is
+ * broken", so its patterns all describe bad pixels or a bad data url, and it is
+ * reused by {@link isRetryableGenerateError} to decide retryability. Folding a
+ * schema mismatch into it would make both harder to change and would couple an
+ * unrelated failure to the retry decision.
+ *
+ * Seen in the wild from an OpenAI-shaped gateway fronting a text-only model:
+ * `Failed to deserialize the JSON body into the target type: messages[139]:
+ * unknown variant \`image_url\`, expected \`text\``. Without this the bad message
+ * stays in history and every later turn fails identically on the same index.
+ *
+ * The pattern deliberately anchors on the variant name rather than the
+ * `expected ...` tail, which is far too broad and would misfire on unrelated
+ * enum errors.
+ */
+export function isUnsupportedContentPartError(error: unknown): boolean {
+  if (!(error instanceof APIStatusError)) return false;
+  if (error instanceof APIContextOverflowError) return false;
+  if (error instanceof APIRequestTooLargeError) return false;
+  if (error.statusCode !== 400 && error.statusCode !== 422) return false;
+  const lowerMessage = error.message.toLowerCase();
+  return UNSUPPORTED_CONTENT_PART_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
 export function isRetryableGenerateError(error: unknown): boolean {
   if (error instanceof APIConnectionError || error instanceof APITimeoutError) {
     return true;
