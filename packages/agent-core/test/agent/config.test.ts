@@ -1,5 +1,5 @@
 import type { ModelCapability, ProviderConfig, ToolCall } from '@moonshot-ai/kosong';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { FLAG_DEFINITIONS, FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
@@ -124,6 +124,55 @@ describe('Agent config', () => {
     flags.setConfigOverrides({ 'compact-skill-listing': false });
     ctx.agent.useProfile(profile);
     expect(ctx.agent.config.systemPrompt).toBe('compact=false');
+  });
+
+  it('pins the system-prompt timestamp to session start across re-renders', () => {
+    const ctx = testAgent();
+    ctx.configure();
+    const profile: ResolvedAgentProfile = {
+      name: 'timestamp-profile',
+      systemPrompt: (context) => `now=${String(context.now)}`,
+      tools: [],
+    };
+
+    ctx.agent.useProfile(profile);
+    const first = ctx.agent.config.systemPrompt;
+    expect(first).toMatch(/^now=\d{4}-\d{2}-\d{2}T/);
+
+    // The stamp sits near the top of the prompt, so re-stamping it on every
+    // render voids the provider's prompt cache for everything after it. Jump
+    // the clock to prove the second render reuses the session-start value.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2099-01-01T00:00:00.000Z'));
+      ctx.agent.useProfile(profile);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(ctx.agent.config.systemPrompt).toBe(first);
+    expect(ctx.agent.config.systemPrompt).not.toContain('2099');
+  });
+
+  it('refreshSystemPrompt reproduces an unchanged prompt byte for byte', async () => {
+    const ctx = testAgent();
+    ctx.configure();
+    const profile: ResolvedAgentProfile = {
+      name: 'refresh-profile',
+      // Mirrors the builtin renderer's fallback (`profile/resolve.ts`): when the
+      // agent supplies no `now`, the template stamps render time instead, and a
+      // refresh silently rewrites the prompt.
+      systemPrompt: (context) => `now=${String(context.now ?? new Date().toISOString())}`,
+      tools: [],
+    };
+
+    ctx.agent.useProfile(profile);
+    const before = ctx.agent.config.systemPrompt;
+    expect(before).toMatch(/^now=\d{4}-\d{2}-\d{2}T/);
+
+    await ctx.agent.refreshSystemPrompt();
+
+    expect(ctx.agent.config.systemPrompt).toBe(before);
   });
 
   it('useProfile injects enabled plugin system-prompt sections', async () => {

@@ -197,6 +197,19 @@ export class Agent {
   private readonly systemPromptContextProvider?: (() => Promise<PreparedSystemPromptContext>) | undefined;
   /** Set by `requestSystemPromptRefresh`, drained on the next turn boundary. */
   private pendingSystemPromptRefresh = false;
+  /**
+   * Session-start timestamp rendered into the system prompt as `KIMI_NOW`.
+   *
+   * Captured once so that re-rendering an unchanged runtime context yields a
+   * byte-identical prompt. Stamping the render time instead moves a line near
+   * the top of a ~37k-char prompt, which voids the provider's prompt cache
+   * from that line onward: a fold that landed right after a mid-turn refresh
+   * read 17% cached against 99% on the loop requests either side of it. The
+   * template also tells the model this value "was captured when the session
+   * started and does not update as the session continues", so a moving stamp
+   * made the prompt contradict itself.
+   */
+  private readonly sessionStartedAt = new Date().toISOString();
 
   constructor(options: AgentOptions) {
     this.type = options.type ?? 'main';
@@ -535,6 +548,7 @@ export class Agent {
     const systemPrompt = profile.systemPrompt({
       osEnv: this.kaos.osEnv,
       cwd: this.config.cwd,
+      now: this.sessionStartedAt,
       skills: this.skills?.registry,
       compactSkillListing: this.experimentalFlags.enabled('compact-skill-listing'),
       pluginSections: pluginSections.content,
