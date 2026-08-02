@@ -14,12 +14,18 @@ import {
   type Message,
   type StreamedMessage,
   type StreamedMessagePart,
+  type TokenUsage,
   type ToolCall,
 } from '@moonshot-ai/kosong';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { KimiConfig } from '../../../src/config';
 import type { AgentOptions } from '../../../src/agent';
+import {
+  InMemoryAgentRecordPersistence,
+  type AgentRecordOf,
+} from '../../../src/agent/records';
+import type { Logger } from '../../../src/logging';
 import {
   COMPACTION_SUMMARY_PREFIX,
   DefaultCompactionStrategy,
@@ -2858,7 +2864,7 @@ describe('remote compaction', () => {
    */
   function stubCompactConversation(
     ctx: TestAgentContext,
-    impl: () => Promise<{ messages: Message[]; usage: null }>,
+    impl: () => Promise<{ messages: Message[]; usage: TokenUsage | null }>,
   ): ReturnType<typeof vi.fn> {
     const spy = vi.fn().mockImplementation(impl);
     const proto = Object.getPrototypeOf(ctx.agent.config.provider) as Record<string, unknown>;
@@ -2998,6 +3004,97 @@ describe('remote compaction', () => {
       properties: expect.objectContaining({ implementation: 'local' }),
     });
     expect(records.some((record) => record.event === 'compaction_remote_fallback')).toBe(true);
+  });
+
+  it('writes a remote_compaction llm.request record alongside the summarizer trace', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const ctx = testAgent({ persistence });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    stubCompactConversation(ctx, () =>
+      Promise.resolve({
+        messages: [{ role: 'assistant', content: [CHECKPOINT], toolCalls: [] }],
+        usage: null,
+      }),
+    );
+
+    ctx.mockNextResponse({ type: 'text', text: 'Portable summary.' });
+    await runManualCompaction(ctx);
+
+    // The remote fold runs first, the local summarizer second — and the two
+    // are now distinguishable on the wire instead of both reading as (or the
+    // remote one not reading at all) plain usage records.
+    const requests = persistence.records.filter(
+      (record): record is AgentRecordOf<'llm.request'> => record.type === 'llm.request',
+    );
+    expect(requests.map((request) => request.kind)).toEqual([
+      'remote_compaction',
+      'compaction',
+    ]);
+  });
+
+  it('warns when the remote fold reads far less cache than the local summarizer', async () => {
+    const warn = vi.fn();
+    const logger: Logger = {
+      error: vi.fn(),
+      warn,
+      info: vi.fn(),
+      debug: vi.fn(),
+      createChild: () => logger,
+    };
+    // Summarizer hits 90% (900/1000)...
+    const generate: GenerateFn = async () => ({
+      ...textResult('Portable summary.'),
+      usage: { inputOther: 100, output: 10, inputCacheRead: 900, inputCacheCreation: 0 },
+    });
+    const ctx = testAgent({ generate, log: logger });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    // ...while the remote fold on the same history reads nothing.
+    stubCompactConversation(ctx, () =>
+      Promise.resolve({
+        messages: [{ role: 'assistant', content: [CHECKPOINT], toolCalls: [] }],
+        usage: { inputOther: 1000, output: 100, inputCacheRead: 0, inputCacheCreation: 0 },
+      }),
+    );
+
+    await runManualCompaction(ctx);
+
+    expect(warn).toHaveBeenCalledWith(
+      'remote compaction cache hit far below the local summarizer',
+      expect.objectContaining({ remoteCacheRead: 0, summarizerCacheRead: 900 }),
+    );
+  });
+
+  it('stays quiet when the remote fold and the summarizer hit alike', async () => {
+    const warn = vi.fn();
+    const logger: Logger = {
+      error: vi.fn(),
+      warn,
+      info: vi.fn(),
+      debug: vi.fn(),
+      createChild: () => logger,
+    };
+    const generate: GenerateFn = async () => ({
+      ...textResult('Portable summary.'),
+      usage: { inputOther: 100, output: 10, inputCacheRead: 900, inputCacheCreation: 0 },
+    });
+    const ctx = testAgent({ generate, log: logger });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: REMOTE_CAPABILITIES });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    stubCompactConversation(ctx, () =>
+      Promise.resolve({
+        messages: [{ role: 'assistant', content: [CHECKPOINT], toolCalls: [] }],
+        usage: { inputOther: 150, output: 100, inputCacheRead: 950, inputCacheCreation: 0 },
+      }),
+    );
+
+    await runManualCompaction(ctx);
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

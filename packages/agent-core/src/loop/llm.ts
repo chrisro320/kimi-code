@@ -32,7 +32,7 @@ export interface LLMRequestLogFields {
   readonly turnStep?: string;
   readonly attempt?: string;
   /** Request purpose; absent means a regular loop step. */
-  readonly kind?: 'loop' | 'compaction';
+  readonly kind?: 'loop' | 'compaction' | 'remote_compaction';
   /** Set when the messages are a fallback resend projection: the strict
    * wire-compliant rebuild, the media-degraded rebuild after a
    * request-too-large rejection, or the media-stripped rebuild after an

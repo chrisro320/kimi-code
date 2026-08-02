@@ -163,7 +163,7 @@ export interface AgentRecordEvents {
    * reconstructable from the wire log at the logical-request level.
    */
   'llm.request': {
-    kind: 'loop' | 'compaction';
+    kind: 'loop' | 'compaction' | 'remote_compaction';
     provider: string;
     model: string;
     modelAlias?: string;

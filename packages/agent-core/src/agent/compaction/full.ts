@@ -467,8 +467,10 @@ export class FullCompaction {
       // model-native state the text summary cannot, but it is never required:
       // anything short of success falls through to the summarizer below.
       const remote = await this.tryRemoteCompaction(signal, historyForModel, data);
+      let remoteUsage: TokenUsage | null = null;
       if (remote !== undefined) {
         checkpoint = remote.checkpoint;
+        remoteUsage = remote.usage;
         if (remote.usage !== null) {
           this.agent.usage.record(model, remote.usage);
         }
@@ -609,6 +611,24 @@ export class FullCompaction {
         this.agent.usage.record(model, usage);
       }
 
+      // The cache-cliff signature: the remote fold reads far less of the
+      // prompt cache than the local summarizer running on the same history
+      // moments later (measured 0% vs 98% on real folds). Both usages are in
+      // hand here, so warn with both numbers instead of letting the miss
+      // hide inside aggregate token stats.
+      if (remoteUsage !== null && usage !== null) {
+        const remoteHit = remoteUsage.inputCacheRead / Math.max(1, inputTotal(remoteUsage));
+        const summarizerHit = usage.inputCacheRead / Math.max(1, inputTotal(usage));
+        if (summarizerHit - remoteHit > 0.2) {
+          this.agent.log.warn('remote compaction cache hit far below the local summarizer', {
+            remoteCacheRead: remoteUsage.inputCacheRead,
+            remoteInput: inputTotal(remoteUsage),
+            summarizerCacheRead: usage.inputCacheRead,
+            summarizerInput: inputTotal(usage),
+          });
+        }
+      }
+
       const newHistory = this.agent.context.history;
       for (let i = 0; i < originalHistory.length; i++) {
         if (newHistory[i] !== originalHistory[i]) {
@@ -736,6 +756,21 @@ export class FullCompaction {
     });
 
     try {
+      // Wire-record the remote request too: without it a remote fold leaves
+      // only a bare `usage.record`, and the tell-tale cache numbers of a
+      // remote cache miss cannot be attributed to the compaction request
+      // (the local summarizer's `kind: 'compaction'` trace looks identical).
+      // Mirror the Agent.generate choke point's pre-flight convention: an
+      // already-aborted call never reaches the wire and must not be traced.
+      if (signal.aborted !== true) {
+        this.agent.llmRequestRecorder.record({
+          provider,
+          systemPrompt: this.agent.config.systemPrompt,
+          tools: [...this.agent.tools.loopTools],
+          messages,
+          fields: { kind: 'remote_compaction' },
+        });
+      }
       const result = await provider.compactConversation(
         this.agent.config.systemPrompt,
         [...this.agent.tools.loopTools],
