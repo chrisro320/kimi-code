@@ -350,7 +350,10 @@ async function collectDeltas(kaos: Kaos, ctx: WorktreeContext): Promise<Delta[]>
     const after = workerFinal.get(relPath)!;
     if (!snapshotsEqual(before, after)) deltas.push({ relPath, before, after });
   }
-  return deltas.sort((left, right) => left.relPath.localeCompare(right.relPath));
+  // Code unit order, matching canonicalizePathSet: the manifest's path order
+  // is a contract the integrity check re-derives with a plain sort, and
+  // localeCompare disagrees with it on case and punctuation.
+  return deltas.sort((left, right) => (left.relPath < right.relPath ? -1 : left.relPath > right.relPath ? 1 : 0));
 }
 
 function createEditingCandidateDraft(ctx: WorktreeContext, deltas: readonly Delta[]): EditingCandidateDraft {

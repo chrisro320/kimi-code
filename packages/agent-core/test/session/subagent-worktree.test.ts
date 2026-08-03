@@ -10,6 +10,7 @@ import {
   __testing,
   acquireSubagentWorktree,
   applySubagentWorktreeCandidate,
+  assertSubagentWorktreeCandidateIntegrity,
   isSubagentWorktreeUnsupported,
   type EditingCandidateDraft,
   type SubagentWorktreeHandle,
@@ -291,6 +292,31 @@ describe('acquireSubagentWorktree (real git integration)', () => {
 
     await result.acknowledgePersisted();
     expect(git(repoDir, ['worktree', 'list'])).not.toContain(worktreeCwd);
+  });
+
+  // The manifest's path order is a contract shared with `canonicalizePathSet`,
+  // which sorts by UTF-16 code unit. Ordering the deltas by collation instead
+  // disagrees with it for names that collation treats specially, and the
+  // integrity check then rejects the candidate as corrupt. It only bit
+  // intermittently because most path sets happen to sort the same either way.
+  it('orders candidate paths by code unit, not by collation', async () => {
+    const handle = await acquireHandle(kaos, repoDir, { scope: ['a.txt'] });
+    expect(handle).not.toBeNull();
+
+    // Uppercase before lowercase, and `-` before `_`: collation inverts both.
+    const written = ['w_x.txt', 'q.txt', 'w-x.txt', 'Z.txt'];
+    for (const name of written) await writeFile(join(handle!.cwd, name), `${name}\n`);
+
+    // Guard the fixture: were collation to stop disagreeing here, the test
+    // would keep passing while covering nothing.
+    expect([...written].sort((left, right) => left.localeCompare(right)))
+      .not.toEqual([...written].sort());
+
+    const result = await handle!.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
+
+    expect(result.candidate.paths.map((path) => path.relPath)).toEqual([...written].sort());
+    expect(() => assertSubagentWorktreeCandidateIntegrity(result.candidate!)).not.toThrow();
   });
 
   it('replays an approved candidate after unrelated HEAD drift but rejects candidate-path divergence', async () => {
