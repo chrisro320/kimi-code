@@ -1,6 +1,7 @@
 import type { Logger } from '#/logging/types';
 import type { ProviderConfig as KosongProviderConfig, ModelCapability, ProviderRequestAuth } from '@moonshot-ai/kosong';
 import {
+  APIContextOverflowError,
   APIStatusError,
   classifyKimiQuotaError,
   getModelCapability,
@@ -215,6 +216,13 @@ export class ProviderManager implements ModelProvider {
         try {
           return await request(auth);
         } catch (error) {
+          // A capacity rejection mislabeled with an auth status (the managed
+          // gateway answers `401 <model> supports only <N>K context`) is not a
+          // credential problem. kosong already classifies it as a context
+          // overflow; forcing a token refresh here would strip that type on
+          // the rethrow below and leave the turn unable to recover through
+          // compaction. Let it pass through untouched.
+          if (error instanceof APIContextOverflowError) throw error;
           if (!(error instanceof APIStatusError) || error.statusCode !== 401) throw error;
           if (refreshed) {
             const reason = error.message.replaceAll('\r', '');

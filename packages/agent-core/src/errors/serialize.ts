@@ -1,5 +1,6 @@
 import {
   APIConnectionError,
+  APIContextOverflowError,
   APIEmptyResponseError,
   APIProviderQuotaExhaustedError,
   APIStatusError,
@@ -84,7 +85,13 @@ export function toKimiErrorPayload(error: unknown): KimiErrorPayload {
     const code: KimiErrorCode =
       error instanceof APIProviderQuotaExhaustedError
         ? ErrorCodes.PROVIDER_API_ERROR
-        : error.statusCode === 429
+        : // Checked before the status codes: a capacity rejection can carry any
+          // status, including the 401 the managed gateway answers with, and
+          // reporting it as an auth error hides the fact that compaction (not
+          // a re-login) is what resolves it.
+          error instanceof APIContextOverflowError
+          ? ErrorCodes.CONTEXT_OVERFLOW
+          : error.statusCode === 429
           ? ErrorCodes.PROVIDER_RATE_LIMIT
           : error.statusCode === 401
             ? ErrorCodes.PROVIDER_AUTH_ERROR

@@ -1580,12 +1580,18 @@ function classifyApiError(error: unknown, summary: KimiErrorPayload): ApiErrorCl
   }
   const statusCode = apiStatusCode(error) ?? summaryStatusCode(summary);
   if (statusCode !== undefined) {
-    if (statusCode === 429) return { errorType: 'rate_limit', statusCode };
-    if (statusCode === 401 || statusCode === 403) return { errorType: 'auth', statusCode };
-    if (statusCode >= 500) return { errorType: '5xx_server', statusCode };
+    // Capacity rejections come first: the managed gateway reports them with an
+    // auth status, so matching on 401/403 before the wording would file them
+    // under `auth` and hide the overflow in telemetry.
+    if (error instanceof APIContextOverflowError) {
+      return { errorType: 'context_overflow', statusCode };
+    }
     if (isContextOverflowStatusError(statusCode, summary.message)) {
       return { errorType: 'context_overflow', statusCode };
     }
+    if (statusCode === 429) return { errorType: 'rate_limit', statusCode };
+    if (statusCode === 401 || statusCode === 403) return { errorType: 'auth', statusCode };
+    if (statusCode >= 500) return { errorType: '5xx_server', statusCode };
     if (statusCode >= 400) return { errorType: '4xx_client', statusCode };
     return { errorType: 'api', statusCode };
   }

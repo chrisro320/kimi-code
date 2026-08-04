@@ -1,16 +1,22 @@
 import {
   APIConnectionError,
+  APIContextOverflowError,
   APIProviderQuotaExhaustedError,
   APIProviderRateLimitError,
   emptyUsage,
   isRetryableGenerateError,
 } from '@moonshot-ai/kosong';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { KimiConfig } from '#/config';
 import { ErrorCodes, KimiError } from '#/errors';
 import type { LLM, LLMChatParams, LLMChatResponse } from '#/loop/llm';
-import { chatWithRetry, DEFAULT_MAX_RETRY_ATTEMPTS, retryBackoffDelays } from '#/loop/retry';
+import {
+  capacityRetryDelays,
+  chatWithRetry,
+  DEFAULT_MAX_RETRY_ATTEMPTS,
+  retryBackoffDelays,
+} from '#/loop/retry';
 import { ProviderManager } from '#/session/provider-manager';
 
 function okResponse(): LLMChatResponse {
@@ -30,6 +36,89 @@ function makeInput(
     stepUuid: 'u',
   };
 }
+
+function capacityRejection(): APIContextOverflowError {
+  return new APIContextOverflowError(401, 'k3-256k supports only 256K context.');
+}
+
+describe('chatWithRetry: capacity rejections', () => {
+  it('retries on its own ramp, reporting the capacity budget to the UI', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const events: Array<{ delayMs: number; maxAttempts: number }> = [];
+      const llm: LLM = {
+        systemPrompt: '',
+        modelName: 'mock',
+        // Mirrors KosongLLM.isRetryableError for this error class.
+        isRetryableError: () => true,
+        async chat(): Promise<LLMChatResponse> {
+          calls += 1;
+          if (calls === 1) throw capacityRejection();
+          return okResponse();
+        },
+      };
+      const input = makeInput(llm, new AbortController().signal);
+      const pending = chatWithRetry({
+        ...input,
+        dispatchEvent: async (event) => {
+          if (event.type === 'step.retrying') {
+            events.push({ delayMs: event.delayMs, maxAttempts: event.maxAttempts });
+          }
+        },
+      });
+
+      await vi.runAllTimersAsync();
+      await pending;
+
+      expect(calls).toBe(2);
+      // First retry waits the ramp's base delay, and the budget reported to
+      // the UI is the capacity one, not the default 10-attempt ramp.
+      expect(events).toEqual([{ delayMs: 10_000, maxAttempts: 9 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up after the ten-minute budget and surfaces the original error', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const llm: LLM = {
+        systemPrompt: '',
+        modelName: 'mock',
+        isRetryableError: () => true,
+        async chat(): Promise<LLMChatResponse> {
+          calls += 1;
+          throw capacityRejection();
+        },
+      };
+      const input = makeInput(llm, new AbortController().signal);
+      const pending = chatWithRetry(input);
+      const assertion = expect(pending).rejects.toBeInstanceOf(APIContextOverflowError);
+
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      // 9 attempts total (8 waits summing to the 600s budget); the caller still
+      // receives the provider error so the overflow recovery downstream can
+      // decide whether to compact.
+      expect(calls).toBe(9);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('capacityRetryDelays', () => {
+  it('ramps from 10s to the 2-minute cap and sums to exactly the 600s budget', () => {
+    const delays = capacityRetryDelays();
+    expect(delays).toEqual([
+      10_000, 20_000, 40_000, 80_000, 120_000, 120_000, 120_000, 90_000,
+    ]);
+    expect(delays.reduce((a, b) => a + b, 0)).toBe(600_000);
+  });
+});
 
 describe('chatWithRetry: terminated stream drops', () => {
   it('preserves caller-set requestLogFields across attempts while owning turnStep/attempt', async () => {

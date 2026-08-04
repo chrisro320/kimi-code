@@ -1,4 +1,6 @@
 import {
+  APIContextOverflowError,
+  APIStatusError,
   emptyUsage,
   UNKNOWN_CAPABILITY,
   type ChatProvider,
@@ -291,6 +293,34 @@ describe('KosongLLM stream timing', () => {
 
     expect(response.streamTiming?.serverDecodeMs).toBeUndefined();
     expect(response.streamTiming?.clientConsumeMs).toBeUndefined();
+  });
+});
+
+describe('KosongLLM retryability', () => {
+  const llm = new KosongLLM({ provider, systemPrompt: 'system' });
+
+  it('retries a capacity rejection that carries an auth status', () => {
+    // The managed gateway answers `401 <model> supports only <N>K context`
+    // even when the context is far under the window, and the identical
+    // request succeeds moments later. Retrying costs a few seconds of
+    // backoff; letting it fall through to overflow recovery costs the whole
+    // prompt cache.
+    for (const status of [401, 403]) {
+      const error = new APIContextOverflowError(status, 'k3-256k supports only 256K context.');
+      expect(llm.isRetryableError(error)).toBe(true);
+    }
+  });
+
+  it('leaves a genuine overflow status to the recovery path', () => {
+    for (const status of [400, 413, 422]) {
+      const error = new APIContextOverflowError(status, 'context length exceeded');
+      expect(llm.isRetryableError(error)).toBe(false);
+    }
+  });
+
+  it('does not make plain auth failures retryable', () => {
+    expect(llm.isRetryableError(new APIStatusError(401, 'invalid access token'))).toBe(false);
+    expect(llm.isRetryableError(new APIStatusError(403, 'forbidden'))).toBe(false);
   });
 });
 

@@ -1,6 +1,6 @@
 import { sleep } from '@antfu/utils';
 
-import { APIStatusError } from '@moonshot-ai/kosong';
+import { APIContextOverflowError, APIStatusError } from '@moonshot-ai/kosong';
 import type { Logger } from '#/logging/types';
 
 import { abortable } from '../utils/abort';
@@ -23,6 +23,54 @@ const MAX_DELAY_MS = 32_000;
 const RETRY_FACTOR = 2;
 // Up to 25% jitter on top of the exponential base to avoid herd retries.
 const JITTER_FACTOR = 0.25;
+
+// A capacity rejection carrying an auth status — the managed gateway's
+// `401 <model> supports only <N>K context` — is a transient server-side fault
+// whose recovery runs on the order of minutes, not seconds: session c65e0b9d
+// was rejected at 09:16 and again at 09:26, and the byte-identical request
+// (same max_tokens, same message count, prompt 168,238 of a 262,144 window)
+// was accepted at 10:10. The exponential ramp above tops out around two
+// minutes of total wait and would give up long before that, handing a false
+// alarm to the overflow recovery, which compacts the context and voids the
+// prompt cache for nothing. These rejections get a flat one-minute cadence
+// and a ten-minute budget tracked separately, so a genuine 429/5xx ramp is
+// unaffected.
+// The ramp starts short because the fault may clear within seconds, and
+// stretches to a two-minute cadence once it is clearly not transient. The
+// total wait is budgeted rather than counted: what matters is riding out a
+// ten-minute outage, not how many requests that takes. No jitter — a single
+// interactive client cannot stampede a gateway, and jitter would push the
+// total past the budget.
+const CAPACITY_RETRY_BASE_DELAY_MS = 10_000;
+const CAPACITY_RETRY_MAX_DELAY_MS = 120_000;
+const CAPACITY_RETRY_BUDGET_MS = 600_000;
+
+/**
+ * Backoff schedule for capacity rejections: 10s, 20s, 40s, 80s, 120s, 120s,
+ * 120s, 90s — eight waits summing to exactly the 600s budget, so the last
+ * delay is clipped to whatever remains.
+ */
+export function capacityRetryDelays(): number[] {
+  const delays: number[] = [];
+  let waited = 0;
+  for (let i = 0; waited < CAPACITY_RETRY_BUDGET_MS; i += 1) {
+    const base = Math.min(
+      CAPACITY_RETRY_BASE_DELAY_MS * Math.pow(RETRY_FACTOR, i),
+      CAPACITY_RETRY_MAX_DELAY_MS,
+    );
+    const delay = Math.min(base, CAPACITY_RETRY_BUDGET_MS - waited);
+    delays.push(delay);
+    waited += delay;
+  }
+  return delays;
+}
+
+function isCapacityRejection(error: unknown): boolean {
+  return (
+    error instanceof APIContextOverflowError &&
+    (error.statusCode === 401 || error.statusCode === 403)
+  );
+}
 
 export interface ChatWithRetryInput {
   readonly llm: LLM;
@@ -54,6 +102,12 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
 
   const delays = retryBackoffDelays(maxAttempts);
 
+  // Capacity rejections burn their own budget so a run that mixes them with
+  // ordinary transient failures cannot exhaust either one early.
+  const capacityDelays = capacityRetryDelays();
+  const capacityMaxAttempts = capacityDelays.length + 1;
+  let capacityAttempt = 0;
+
   for (let attempt = 1; ; attempt += 1) {
     input.params.trace?.reset();
     try {
@@ -62,24 +116,31 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
       return response;
     } catch (error) {
       captureAttemptTraceId(input, error);
-      if (attempt >= maxAttempts || !input.llm.isRetryableError(error)) {
-        logRequestFailure(input, error, attempt, maxAttempts);
+      const capacity = isCapacityRejection(error);
+      if (capacity) capacityAttempt += 1;
+      const effectiveMaxAttempts = capacity ? capacityMaxAttempts : maxAttempts;
+      const attemptsUsed = capacity ? capacityAttempt : attempt;
+      if (attemptsUsed >= effectiveMaxAttempts || !input.llm.isRetryableError(error)) {
+        logRequestFailure(input, error, attemptsUsed, effectiveMaxAttempts);
         throw error;
       }
 
       // A server `Retry-After` (carried on the error) overrides the computed
       // backoff. The chosen delay is what gets reported on the
       // `step.retrying` event via `delayMs` either way.
-      const delayMs = readRetryAfterMs(error) ?? delays[attempt - 1] ?? 0;
+      const computedDelayMs = capacity
+        ? (capacityDelays[capacityAttempt - 1] ?? 0)
+        : (delays[attempt - 1] ?? 0);
+      const delayMs = readRetryAfterMs(error) ?? computedDelayMs;
       input.params.signal.throwIfAborted();
       input.dispatchEvent({
         type: 'step.retrying',
         turnId: input.turnId,
         step: input.currentStep,
         stepUuid: input.stepUuid,
-        failedAttempt: attempt,
-        nextAttempt: attempt + 1,
-        maxAttempts,
+        failedAttempt: attemptsUsed,
+        nextAttempt: attemptsUsed + 1,
+        maxAttempts: effectiveMaxAttempts,
         delayMs,
         ...retryErrorFields(error),
       });

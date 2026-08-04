@@ -1,4 +1,8 @@
-import { classifyKimiQuotaError } from '@moonshot-ai/kosong';
+import {
+  APIContextOverflowError,
+  APIStatusError,
+  classifyKimiQuotaError,
+} from '@moonshot-ai/kosong';
 import { describe, expect, it } from 'vitest';
 
 import type { KimiConfig, ModelAlias } from '../../src/config';
@@ -1076,6 +1080,59 @@ describe('ProviderManager OAuth auth', () => {
     await expect(resolveAuth!(async () => 'ok')).rejects.toMatchObject({
       code: ErrorCodes.AUTH_LOGIN_REQUIRED,
     });
+  });
+
+  it('passes a capacity rejection through untouched instead of refreshing the token', async () => {
+    // The managed gateway answers an oversized request with
+    // `401 <model> supports only 256K context`; kosong classifies it as a
+    // context overflow. Treating it as an expired credential would refresh,
+    // retry, fail identically, and rethrow it as an auth error — stripping the
+    // type the turn needs to recover through compaction.
+    const overflow = new APIContextOverflowError(401, 'k3-256k supports only 256K context.');
+    const forced: boolean[] = [];
+    const manager = new ProviderManager({
+      config: oauthConfig(),
+      resolveOAuthTokenProvider: () => ({
+        async getAccessToken(options) {
+          forced.push(options?.force === true);
+          return 'token';
+        },
+      }),
+    });
+
+    const resolveAuth = manager.resolveAuth('kimi-code/kimi-for-coding');
+    expect(resolveAuth).toBeDefined();
+
+    await expect(
+      resolveAuth!(async () => {
+        throw overflow;
+      }),
+    ).rejects.toBe(overflow);
+    // One fetch, no forced refresh: the credential was never in question.
+    expect(forced).toEqual([false]);
+  });
+
+  it('still refreshes once on a genuine 401 before reporting an auth error', async () => {
+    const forced: boolean[] = [];
+    const manager = new ProviderManager({
+      config: oauthConfig(),
+      resolveOAuthTokenProvider: () => ({
+        async getAccessToken(options) {
+          forced.push(options?.force === true);
+          return 'token';
+        },
+      }),
+    });
+
+    const resolveAuth = manager.resolveAuth('kimi-code/kimi-for-coding');
+    expect(resolveAuth).toBeDefined();
+
+    await expect(
+      resolveAuth!(async () => {
+        throw new APIStatusError(401, 'invalid access token');
+      }),
+    ).rejects.toMatchObject({ code: ErrorCodes.PROVIDER_AUTH_ERROR });
+    expect(forced).toEqual([false, true]);
   });
 });
 

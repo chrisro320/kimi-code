@@ -16,6 +16,7 @@
  */
 
 import {
+  APIContextOverflowError,
   emptyUsage,
   generate as kosongGenerate,
   isRetryableGenerateError,
@@ -165,6 +166,21 @@ export class KosongLLM implements LLM {
   }
 
   isRetryableError(error: unknown): boolean {
+    // A capacity rejection carrying an auth status — the managed gateway's
+    // `401 <model> supports only <N>K context` — has been observed as a
+    // transient server-side fault: the byte-identical request succeeds on a
+    // later attempt with the context untouched (session c65e0b9d, turn 24
+    // rejected / turn 25 accepted at prompt=168,238 of a 262,144 window).
+    // Retry it before the overflow recovery reaches for compaction, which on
+    // a false alarm shrinks the context and voids the whole prompt cache for
+    // nothing. A genuine overflow survives the retries and still lands in
+    // that recovery path.
+    if (
+      error instanceof APIContextOverflowError &&
+      (error.statusCode === 401 || error.statusCode === 403)
+    ) {
+      return true;
+    }
     return isRetryableGenerateError(error);
   }
 }
