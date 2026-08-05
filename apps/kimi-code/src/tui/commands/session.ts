@@ -29,10 +29,16 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
     return;
   }
 
-  const session = host.session;
+  let session = host.session;
   if (session === undefined) {
-    host.showError(NO_ACTIVE_SESSION_MESSAGE);
-    return;
+    if (!host.engineV2) {
+      host.showError(NO_ACTIVE_SESSION_MESSAGE);
+      return;
+    }
+    // Setting a title needs a live session; lazy-create it on first use (the
+    // bare read-only form above works session-less).
+    session = await host.ensureSession();
+    if (session === undefined) return;
   }
 
   const newTitle = title.slice(0, 200);
@@ -54,43 +60,30 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
     host.showError(NO_ACTIVE_SESSION_MESSAGE);
     return;
   }
-  const transitionGeneration = host.getSessionTransitionGeneration?.();
 
   const sourceTitle = forkSourceTitle(host, session);
-  let forked: Session;
   try {
-    forked = await host.harness.forkSession({
+    const forked = await host.harness.forkSession({
       id: session.id,
       title: `Fork: ${sourceTitle}`,
     });
+    const forkId = forked.id;
+    try {
+      await forked.close();
+    } catch (error) {
+      const msg = formatErrorMessage(error);
+      host.showError(`Session forked (${forkId}), but failed to release its runtime: ${msg}`);
+      return;
+    }
+    // Stay in the source session: switching to the fork would close the
+    // source, killing its in-flight turn and background tasks. The fork is
+    // an independent copy the user can switch to explicitly via /sessions.
+    host.showStatus(
+      `Session forked (${forkId}). Still in the original session; switch to the fork via /sessions.`,
+    );
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to fork session: ${msg}`);
-    return;
-  }
-  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) {
-    await forked.close().catch(() => undefined);
-    return;
-  }
-  if (
-    host.session !== session ||
-    (transitionGeneration !== undefined &&
-      host.getSessionTransitionGeneration?.() !== transitionGeneration)
-  ) {
-    host.showError('Fork cancelled because an Agora handoff changed the active session.');
-    await forked.close().catch(() => undefined);
-    return;
-  }
-
-  try {
-    const switched = await host.switchToSession(
-      forked,
-      `Session forked (${forked.id}). To return to the original session: kimi -r ${session.id}`,
-    );
-    if (!switched) await forked.close().catch(() => undefined);
-  } catch (error) {
-    const msg = formatErrorMessage(error);
-    host.showError(`Failed to switch to forked session: ${msg}`);
   }
 }
 
