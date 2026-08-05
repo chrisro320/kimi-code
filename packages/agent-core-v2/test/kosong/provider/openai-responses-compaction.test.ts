@@ -1,19 +1,35 @@
 /**
- * OpenAI Responses — compaction decoder groundwork.
+ * OpenAI Responses — compaction decoder groundwork and the compact endpoint.
  *
  * Covers the two parser halves of the retry contract: the streamed /
  * non-streamed generate parsers recording undecodable output item types
  * instead of dropping them silently, and `decodeCompactionResponse`'s typed
  * `CompactionResponseOutcome` (ok / empty / protocol_error / decode_error)
- * with its deterministic-vs-retryable verdict.
+ * with its deterministic-vs-retryable verdict — plus the provider's
+ * `compactConversation` / `compactionLineage` endpoint implementation:
+ * byte-for-byte checkpoint replay as a top-level input item, resolved
+ * lineage, and the same empty-response retry gate as generate.
  */
 
 import { describe, expect, it } from 'vitest';
+import type OpenAI from 'openai';
 
-import type { StreamedMessagePart } from '#/kosong/contract/message';
+import {
+  canonicalizeLineage,
+  sameOrigin,
+  type CompactionCheckpoint,
+  type ModelHistoryItem,
+} from '#/kosong/contract/compaction';
+import {
+  APIEmptyResponseError,
+  ChatProviderError,
+  isRetryableGenerateError,
+} from '#/kosong/contract/errors';
+import type { Message, StreamedMessagePart } from '#/kosong/contract/message';
 import {
   decodeCompactionResponse,
   isRetryableCompactionOutcome,
+  OpenAIResponsesChatProvider,
   OpenAIResponsesStreamedMessage,
   type CompactionResponseOutcome,
 } from '#/kosong/provider/bases/openai/openai-responses';
@@ -224,5 +240,312 @@ describe('decodeCompactionResponse', () => {
   it('decode_error: a non-object body', () => {
     expect(decodeCompactionResponse('nope').kind).toBe('decode_error');
     expect(decodeCompactionResponse(null).kind).toBe('decode_error');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// S4 — the compact endpoint itself (provider-level, AC16–AC17)
+// ---------------------------------------------------------------------------
+
+function userMessage(text: string): Message {
+  return { role: 'user', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+interface FakeCompact {
+  readonly calls: { params: Record<string, unknown>; opts: unknown }[];
+  readonly compact: (params: Record<string, unknown>, opts: unknown) => Promise<unknown>;
+}
+
+function makeEndpointProvider(options?: {
+  model?: string;
+  baseUrl?: string;
+  respond?: (params: Record<string, unknown>) => unknown;
+}): { provider: OpenAIResponsesChatProvider; fake: FakeCompact } {
+  const fake: FakeCompact = {
+    calls: [],
+    compact(params: Record<string, unknown>, opts: unknown) {
+      fake.calls.push({ params, opts });
+      const body = options?.respond?.(params) ?? {
+        id: 'resp_cmp',
+        status: 'completed',
+        output: [
+          {
+            id: 'msg_1',
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'output_text', text: 'kept' }],
+          },
+          { id: 'cmp_1', type: 'compaction', encrypted_content: 'new-payload' },
+          { id: 'ws_1', type: 'web_search_call' },
+        ],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 10,
+          total_tokens: 110,
+          input_tokens_details: { cached_tokens: 40 },
+        },
+      };
+      return Promise.resolve(body);
+    },
+  };
+  const provider = new OpenAIResponsesChatProvider({
+    model: options?.model ?? 'gpt-4.1',
+    ...(options?.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+    clientFactory: () => ({ responses: { compact: fake.compact } }) as unknown as OpenAI,
+  });
+  return { provider, fake };
+}
+
+function ownedCheckpoint(provider: OpenAIResponsesChatProvider): CompactionCheckpoint {
+  return {
+    encrypted: 'opaque-payload-±§',
+    itemType: 'compaction_summary',
+    itemId: 'cmp_9',
+    lineage: provider.compactionLineage(),
+    replayInputTokens: { kind: 'unknown' },
+  };
+}
+
+describe('OpenAIResponsesChatProvider compactionLineage', () => {
+  it('resolves the provider default base URL when the config sets none', () => {
+    const { provider } = makeEndpointProvider({ model: 'gpt-4.1' });
+
+    expect(provider.compactionLineage()).toEqual({
+      provider: 'openai-responses',
+      model: 'gpt-4.1',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+  });
+
+  it('treats two unset-baseUrl providers with different identities as foreign', () => {
+    const a = makeEndpointProvider({ model: 'gpt-4.1' }).provider;
+    const b = makeEndpointProvider({ model: 'gpt-4.1-mini' }).provider;
+
+    expect(sameOrigin(a.compactionLineage(), b.compactionLineage())).toBe(false);
+    // The v1 `?? ''` bug: an UNRESOLVED (empty) base URL must never compare
+    // owned against the resolved default.
+    expect(
+      sameOrigin(
+        a.compactionLineage(),
+        canonicalizeLineage({
+          provider: 'openai-responses',
+          model: 'gpt-4.1',
+          effectiveBaseUrl: '',
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('strips trailing slashes from a configured base URL', () => {
+    const { provider } = makeEndpointProvider({ baseUrl: 'https://gw.example.com/v1/' });
+
+    expect(provider.compactionLineage().baseUrl).toBe('https://gw.example.com/v1');
+  });
+});
+
+describe('OpenAIResponsesChatProvider compactConversation', () => {
+  it('replays an owned checkpoint byte-for-byte as a top-level input item', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+    const history: ModelHistoryItem[] = [
+      { kind: 'message', message: userMessage('hello') },
+      { kind: 'checkpoint', checkpoint: ownedCheckpoint(provider) },
+      { kind: 'message', message: userMessage('after') },
+    ];
+
+    const result = await provider.compactConversation({
+      systemPrompt: 'sys',
+      tools: [],
+      history,
+      retainedMessages: [],
+    });
+
+    expect(fake.calls).toHaveLength(1);
+    const params = fake.calls[0]!.params;
+    expect(params['model']).toBe('gpt-4.1');
+    expect(params['store']).toBe(false);
+    expect(params['instructions']).toBe('sys');
+    expect(params).not.toHaveProperty('tools');
+    expect(params['input']).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      { type: 'compaction_summary', encrypted_content: 'opaque-payload-±§', id: 'cmp_9' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'after' }] },
+    ]);
+
+    expect(result.checkpoint.encrypted).toBe('new-payload');
+    expect(result.checkpoint.itemType).toBe('compaction');
+    expect(result.checkpoint.itemId).toBe('cmp_1');
+    expect(result.checkpoint.lineage).toEqual(provider.compactionLineage());
+    expect(result.checkpoint.replayInputTokens).toEqual({ kind: 'unknown' });
+    expect(result.retainedMessages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'kept' }], toolCalls: [] },
+    ]);
+    expect(result.usage).toEqual({
+      inputOther: 60,
+      output: 10,
+      inputCacheRead: 40,
+      inputCacheCreation: 0,
+    });
+    expect(result.unknownOutputItemTypes).toEqual(['web_search_call']);
+  });
+
+  it('sends converted tools only when the caller provides them', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+
+    await provider.compactConversation({
+      systemPrompt: '',
+      tools: [
+        {
+          name: 'get_weather',
+          description: 'Read the weather.',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+      history: [{ kind: 'message', message: userMessage('hi') }],
+      retainedMessages: [],
+    });
+
+    const params = fake.calls[0]!.params;
+    expect(params).not.toHaveProperty('instructions');
+    expect(params['tools']).toEqual([
+      expect.objectContaining({ type: 'function', name: 'get_weather' }),
+    ]);
+  });
+
+  it('rejects a completed empty response with a NON-retryable APIEmptyResponseError', async () => {
+    const { provider } = makeEndpointProvider({
+      respond: () => ({ id: 'resp_e', status: 'completed', output: [] }),
+    });
+
+    const error = await provider
+      .compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(APIEmptyResponseError);
+    expect(isRetryableGenerateError(error)).toBe(false);
+  });
+
+  it('keeps a truncated empty response retryable', async () => {
+    const { provider } = makeEndpointProvider({
+      respond: () => ({
+        id: 'resp_t',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output: [],
+      }),
+    });
+
+    const error = await provider
+      .compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(APIEmptyResponseError);
+    expect(isRetryableGenerateError(error)).toBe(true);
+  });
+
+  it('rejects multiple checkpoints as a protocol error, never a guess', async () => {
+    const { provider } = makeEndpointProvider({
+      respond: () => ({
+        id: 'resp_p',
+        status: 'completed',
+        output: [
+          { id: 'cmp_1', type: 'compaction', encrypted_content: 'a' },
+          { id: 'cmp_2', type: 'compaction_summary', encrypted_content: 'b' },
+        ],
+      }),
+    });
+
+    await expect(
+      provider.compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      }),
+    ).rejects.toThrowError(/expected exactly one/);
+  });
+
+  it('rejects a malformed checkpoint field as a typed decode error', async () => {
+    const { provider } = makeEndpointProvider({
+      respond: () => ({
+        id: 'resp_d',
+        status: 'completed',
+        output: [{ id: 'cmp_1', type: 'compaction' }],
+      }),
+    });
+
+    await expect(
+      provider.compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      }),
+    ).rejects.toThrowError(/encrypted_content must be a string/);
+  });
+
+  it('rejects when the SDK has no compaction endpoint', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-4.1',
+      clientFactory: () => ({ responses: {} }) as unknown as OpenAI,
+    });
+
+    await expect(
+      provider.compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      }),
+    ).rejects.toThrowError(/does not support the Responses compaction endpoint/);
+  });
+
+  it('converts transport failures through the provider error mapping', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-4.1',
+      clientFactory: () =>
+        ({
+          responses: {
+            compact: () => Promise.reject(new Error('connection reset by peer')),
+          },
+        }) as unknown as OpenAI,
+    });
+
+    const error = await provider
+      .compactConversation({
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(ChatProviderError);
+    expect((error as Error).message).toContain('connection reset by peer');
   });
 });

@@ -18,6 +18,7 @@ import OpenAI from 'openai';
 import { Error2 } from '#/_base/errors/errors';
 import {
   APIContextOverflowError,
+  APIEmptyResponseError,
   APIProviderQuotaExhaustedError,
   APIProviderRateLimitError,
   ChatProviderError,
@@ -30,8 +31,12 @@ import type {
   ToolCall,
 } from '#/kosong/contract/message';
 import { extractText, isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
+import { canonicalizeLineage } from '#/kosong/contract/compaction';
+import type { CompactionLineage } from '#/kosong/contract/compaction';
 import type {
   ChatProvider,
+  ChatProviderCompactionInput,
+  ChatProviderCompactionResult,
   FinishReason,
   GenerateOptions,
   ProviderRequestAuth,
@@ -93,6 +98,7 @@ function normalizeResponsesFinishReason(
 }
 
 type RawObject = Record<string, unknown>;
+const OPENAI_RESPONSES_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_RESPONSES_TOOL_CALL_ID_POLICY: ToolCallIdPolicy = {
   normalize: (id) => sanitizeOpenAIResponsesCallId(id, 64),
   maxLength: 64,
@@ -985,12 +991,13 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               yield* yieldFinalArgumentsSuffix(streamIndex, item.arguments, type);
-            } else if (item.type !== 'message') {
+            } else if (item.type === 'compaction' || item.type === 'other') {
               // Text arrives via `response.output_text.delta`, so a `message`
-              // item needs nothing here. A `compaction` or unrecognized item
-              // is an output item this decoder cannot turn into content:
-              // record the type so callers can report what was lost rather
-              // than reporting an empty model response.
+              // item needs nothing here; a `function_call` without final
+              // arguments was already yielded on `added`. A `compaction` or
+              // unrecognized item is an output item this decoder cannot turn
+              // into content: record the type so callers can report what was
+              // lost rather than reporting an empty model response.
               this._droppedOutputItemTypes.add(item.rawType);
             }
             break;
@@ -1299,7 +1306,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   constructor(options: OpenAIResponsesOptions) {
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
     this._apiKey = apiKey === undefined || apiKey.length === 0 ? undefined : apiKey;
-    this._baseUrl = options.baseUrl ?? 'https://api.openai.com/v1';
+    this._baseUrl = options.baseUrl ?? OPENAI_RESPONSES_DEFAULT_BASE_URL;
     this._defaultHeaders = options.defaultHeaders;
     this._model = options.model;
     this._stream = true;
@@ -1439,6 +1446,151 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         }
       ).create(createParams, options?.signal ? { signal: options.signal } : undefined);
       return new OpenAIResponsesStreamedMessage(response, this._stream, this._convertErrorHook);
+    } catch (error: unknown) {
+      throw convertOpenAIError(error, this._convertErrorHook);
+    }
+  }
+
+  /**
+   * Lineage of checkpoints this instance produces and accepts for replay.
+   * The base URL is the ALREADY-RESOLVED one — the provider default when the
+   * config sets none — so two providers with different defaults never compare
+   * owned by accident (the v1 `?? ''` bug).
+   */
+  compactionLineage(): CompactionLineage {
+    return canonicalizeLineage({
+      provider: this.name,
+      model: this._model,
+      effectiveBaseUrl: this._baseUrl ?? OPENAI_RESPONSES_DEFAULT_BASE_URL,
+    });
+  }
+
+  /**
+   * See {@link ChatProvider.compactConversation}. Calls the Responses
+   * compaction endpoint and decodes the answer into a checkpoint plus the
+   * messages the endpoint retained.
+   *
+   * Checkpoint items in the projected history are replayed as top-level
+   * input items, byte-for-byte and in place; plain messages are converted in
+   * consecutive runs so `convertHistoryMessages`' cross-message behavior
+   * (tool-result media grouping, declaration-only skips) is preserved within
+   * each run. `retainedMessages` is advisory only: the endpoint has no
+   * parameter for it and decides retention itself.
+   */
+  async compactConversation(
+    input: ChatProviderCompactionInput,
+    options?: GenerateOptions,
+  ): Promise<ChatProviderCompactionResult> {
+    const wireInput: unknown[] = [];
+    let run: Message[] = [];
+    const flushRun = (): void => {
+      if (run.length === 0) return;
+      const normalized = normalizeToolCallIdsForProvider(
+        run,
+        OPENAI_RESPONSES_TOOL_CALL_ID_POLICY,
+      );
+      wireInput.push(
+        ...convertHistoryMessages(normalized, this._model, this._toolMessageConversion),
+      );
+      run = [];
+    };
+    for (const item of input.history) {
+      if (item.kind === 'checkpoint') {
+        flushRun();
+        // A checkpoint is a top-level input item, never folded into message
+        // content, and its payload is copied verbatim — a mutated payload is
+        // a dead checkpoint.
+        const wireItem: Record<string, unknown> = {
+          type: item.checkpoint.itemType,
+          encrypted_content: item.checkpoint.encrypted,
+        };
+        if (item.checkpoint.itemId !== undefined) {
+          wireItem['id'] = item.checkpoint.itemId;
+        }
+        wireInput.push(wireItem);
+      } else {
+        run.push(item.message);
+      }
+    }
+    flushRun();
+
+    try {
+      const client = this._createClient(options?.auth);
+      if (
+        !('responses' in client) ||
+        typeof (client as { responses?: { compact?: unknown } }).responses?.compact !== 'function'
+      ) {
+        throw new ChatProviderError(
+          'OpenAI SDK version does not support the Responses compaction endpoint.',
+        );
+      }
+
+      const params: Record<string, unknown> = {
+        model: this._model,
+        input: wireInput,
+        store: false,
+      };
+      if (input.systemPrompt) {
+        params['instructions'] = input.systemPrompt;
+      }
+      if (input.tools.length > 0) {
+        params['tools'] = input.tools.map((tool) => convertTool(tool));
+      }
+
+      options?.onRequestSent?.();
+      const response = await (
+        client.responses as {
+          compact(params: unknown, opts?: unknown): Promise<unknown>;
+        }
+      ).compact(params, options?.signal ? { signal: options.signal } : undefined);
+
+      const outcome = decodeCompactionResponse(response);
+      switch (outcome.kind) {
+        case 'ok':
+          return {
+            checkpoint: {
+              encrypted: outcome.checkpoint.encrypted,
+              itemType: outcome.checkpoint.itemType,
+              ...(outcome.checkpoint.itemId !== undefined
+                ? { itemId: outcome.checkpoint.itemId }
+                : {}),
+              lineage: this.compactionLineage(),
+              // The endpoint reports only request-level usage; the item-level
+              // replay cost is unknowable today — `unknown` is the honest
+              // state, not a fabricated `measured`.
+              replayInputTokens: { kind: 'unknown' },
+            },
+            retainedMessages: outcome.retainedMessages.map((retained) => ({
+              role: retained.role,
+              content: [{ type: 'text' as const, text: retained.text }],
+              toolCalls: [],
+            })),
+            usage: outcome.usage,
+            ...(outcome.unknownOutputItems.length > 0
+              ? {
+                  unknownOutputItemTypes: [
+                    ...new Set(outcome.unknownOutputItems.map((item) => item.rawType)),
+                  ],
+                }
+              : {}),
+          };
+        case 'empty':
+          // Same retry contract as generate: `completed` is deterministic and
+          // must NOT be retried (a retry resends a byte-identical body);
+          // anything else stays retryable. The finish reason rides on the
+          // error and `isRetryableGenerateError` decides.
+          throw new APIEmptyResponseError(
+            'The API returned an empty compaction response (no checkpoint).' +
+              ` Provider: ${this.name}, model: ${this._model}`,
+            { finishReason: outcome.finishReason, rawFinishReason: outcome.rawFinishReason },
+          );
+        case 'protocol_error':
+          throw new ChatProviderError(
+            `Responses compaction returned ${String(outcome.checkpointCount)} checkpoints; expected exactly one.`,
+          );
+        case 'decode_error':
+          throw outcome.error;
+      }
     } catch (error: unknown) {
       throw convertOpenAIError(error, this._convertErrorHook);
     }
