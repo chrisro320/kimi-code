@@ -40,6 +40,8 @@
 import { z } from 'zod';
 
 import { ErrorCodes, Error2 } from '#/errors';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 import type { ContentPart } from '#/kosong/contract/message';
 import { defineModel, type PartsTransformer } from '#/wire/model';
 import type { WireRecord } from '#/wire/record';
@@ -168,7 +170,46 @@ const contextCompactionBaseShape = {
   keptHeadUserMessageCount: z.number().optional(),
   droppedCount: z.number().optional(),
   legacyTail: z.boolean().optional(),
+  // Deliberately tolerant: wire replay safeParses the WHOLE payload, so a
+  // strict checkpoint schema here would let one malformed checkpoint kill the
+  // entire compaction record. Field-level validation happens in
+  // readOptionalCheckpoint instead.
+  checkpoint: z.unknown().optional(),
 };
+
+const compactionCheckpointSchema = z.object({
+  encrypted: z.string(),
+  itemType: z.string(),
+  itemId: z.string().optional(),
+  lineage: z.object({
+    provider: z.string(),
+    model: z.string(),
+    baseUrl: z.string(),
+  }),
+  replayInputTokens: z.union([
+    z.object({ kind: z.literal('measured'), tokens: z.number() }),
+    z.object({ kind: z.literal('unknown') }),
+  ]),
+});
+
+/**
+ * Field-level checkpoint reader for restore paths. A malformed checkpoint
+ * degrades to `undefined` (summary-only replay) WITH a diagnostic — it must
+ * never take the surrounding compaction record down with it.
+ */
+export function readOptionalCheckpoint(value: unknown): CompactionCheckpoint | undefined {
+  if (value === undefined) return undefined;
+  const parsed = compactionCheckpointSchema.safeParse(value);
+  if (!parsed.success) {
+    onUnexpectedError(
+      new Error('Invalid compaction checkpoint in context record; falling back to summary-only replay', {
+        cause: parsed.error,
+      }),
+    );
+    return undefined;
+  }
+  return parsed.data;
+}
 
 const contextApplyCompactionSchema = z.union([
   z.object({
@@ -232,6 +273,7 @@ export function readContextCompactionShapeInput(
     keptHeadUserMessageCount: readOptionalNumber(fields, 'keptHeadUserMessageCount'),
     droppedCount: readOptionalNumber(fields, 'droppedCount'),
     legacyTail: readOptionalBoolean(fields, 'legacyTail') ?? keptUserMessageCount === undefined,
+    checkpoint: readOptionalCheckpoint(fields['checkpoint']),
   };
 }
 

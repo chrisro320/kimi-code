@@ -125,6 +125,10 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
         keptUserMessageCount: result.keptUserMessageCount,
         keptHeadUserMessageCount: result.keptHeadUserMessageCount,
         droppedCount: result.droppedCount,
+        // Must be threaded explicitly — the dispatch payload is rebuilt
+        // field-by-field, so a missing line here drops the checkpoint
+        // silently with no type error.
+        checkpoint: result.checkpoint,
       }),
       tokenCountingRebased({
         length: result.messages.length,

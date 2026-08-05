@@ -1,5 +1,6 @@
 import { createDecorator } from "#/_base/di/instantiation";
 
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 import type { UndoCut } from './contextOps';
 import type { LoopRecordedEvent } from './loopEventFold';
 import type { ContextMessage } from './types';
@@ -17,6 +18,9 @@ export interface ContextCompactionInput {
   readonly keptUserMessageCount?: number;
   readonly keptHeadUserMessageCount?: number;
   readonly droppedCount?: number;
+  /** Opaque remote-compaction checkpoint bound to the summary message's
+   *  `origin`; carried through to the wire record and back. */
+  readonly checkpoint?: CompactionCheckpoint;
 }
 
 export interface ContextCompactionResult {
@@ -28,6 +32,7 @@ export interface ContextCompactionResult {
   keptUserMessageCount: number;
   keptHeadUserMessageCount?: number;
   droppedCount?: number;
+  checkpoint?: CompactionCheckpoint;
 }
 
 export interface IAgentContextMemoryService {

@@ -12,6 +12,8 @@
  */
 
 import { estimateTokens, estimateTokensForMessage, estimateTokensForMessages } from '#/kosong/contract/tokens';
+import { replayContribution, type CompactionCheckpoint } from '#/kosong/contract/compaction';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import type { ContentPart } from '#/kosong/contract/message';
 import summaryPrefixTemplate from './compaction-summary-prefix.md?raw';
 import type { ContextMessage, PromptOrigin } from './types';
@@ -58,6 +60,9 @@ export interface ContextCompactionShapeInput {
   readonly keptHeadUserMessageCount?: number;
   readonly droppedCount?: number;
   readonly legacyTail?: boolean;
+  /** Opaque remote-compaction checkpoint bound to the summary message's
+   *  `origin`; carried through to the wire record and back. */
+  readonly checkpoint?: CompactionCheckpoint;
 }
 
 export interface ContextCompactionShape {
@@ -69,6 +74,7 @@ export interface ContextCompactionShape {
   readonly keptUserMessageCount: number;
   readonly keptHeadUserMessageCount?: number;
   readonly droppedCount?: number;
+  readonly checkpoint?: CompactionCheckpoint;
   readonly messages: readonly ContextMessage[];
 }
 
@@ -91,6 +97,7 @@ export function buildContextCompactionShape(
       tokensAfter: input.tokensAfter ?? estimate.messages(messages),
       keptUserMessageCount: 0,
       droppedCount: input.droppedCount,
+      checkpoint: input.checkpoint,
       messages,
     };
   }
@@ -109,9 +116,21 @@ export function buildContextCompactionShape(
     ? [...selection.head, ...selection.tail]
     : [...selection.head, elisionMessage, ...selection.tail];
   const contextSummary = input.contextSummary ?? input.summary;
+  // A checkpoint REPLACES the summary-text contribution (measured or zero with
+  // a diagnostic) instead of adding to it: the checkpoint subsumes everything
+  // the compacted tail covered, so counting both double-charges the budget.
+  let replayTokens: number;
+  if (input.checkpoint === undefined) {
+    replayTokens = input.summaryOutputTokens ?? estimate.text(contextSummary);
+  } else {
+    const contribution = replayContribution(input.checkpoint);
+    replayTokens = contribution.tokens;
+    if (contribution.diagnostic !== undefined) {
+      onUnexpectedError(new Error(contribution.diagnostic));
+    }
+  }
   const tokensAfter =
-    input.tokensAfter ??
-    (input.summaryOutputTokens ?? estimate.text(contextSummary)) + estimate.messages(keptMessages);
+    input.tokensAfter ?? replayTokens + estimate.messages(keptMessages);
   const keptUserMessageCount =
     input.keptUserMessageCount ?? selection.head.length + selection.tail.length;
   const keptHeadUserMessageCount =
@@ -126,7 +145,8 @@ export function buildContextCompactionShape(
     keptUserMessageCount,
     keptHeadUserMessageCount,
     droppedCount: input.droppedCount,
-    messages: [...keptMessages, createCompactionSummaryMessage(contextSummary)],
+    checkpoint: input.checkpoint,
+    messages: [...keptMessages, createCompactionSummaryMessage(contextSummary, input.checkpoint)],
   };
 }
 
@@ -135,12 +155,15 @@ export function buildCompactionSummaryText(summary: string): string {
   return `${COMPACTION_SUMMARY_PREFIX}\n${suffix.length > 0 ? suffix : '(no summary available)'}`;
 }
 
-export function createCompactionSummaryMessage(text: string): ContextMessage {
+export function createCompactionSummaryMessage(
+  text: string,
+  checkpoint?: CompactionCheckpoint,
+): ContextMessage {
   return {
     role: 'user',
     content: [{ type: 'text', text }],
     toolCalls: [],
-    origin: { kind: 'compaction_summary' },
+    origin: { kind: 'compaction_summary', ...(checkpoint !== undefined ? { checkpoint } : {}) },
   };
 }
 

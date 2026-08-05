@@ -612,7 +612,7 @@ function hasDeclaredTools(message: ContextMessage): boolean {
   return message.tools !== undefined && message.tools.length > 0;
 }
 
-function toWireMessage(message: ContextMessage, content: ContentPart[]): Message {
+export function toWireMessage(message: ContextMessage, content: ContentPart[]): Message {
   return {
     role: message.role,
     name: message.name,

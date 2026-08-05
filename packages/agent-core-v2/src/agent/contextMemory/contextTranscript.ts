@@ -14,6 +14,7 @@ import {
   selectRecentUserMessages,
 } from './compactionHandoff';
 import { isPromptOwnedInjection, isUndoAnchor } from './conversationTime';
+import { readOptionalCheckpoint } from './contextOps';
 import type { LoopRecordedEvent } from './loopEventFold';
 import type { ContextMessage } from './types';
 import { isVacuousContentPart } from './vacuousContent';
@@ -203,12 +204,16 @@ export function createContextTranscriptReducer(): ContextTranscriptReducer {
         applyLoopEvent(record['event'] as LoopRecordedEvent, record.time);
         break;
       case 'context.apply_compaction': {
+        const checkpoint = readOptionalCheckpoint(record['checkpoint']);
         transcript.push({
           message: {
             role: 'user',
             content: [{ type: 'text', text: readCompactionSummaryText(record) }],
             toolCalls: [],
-            origin: { kind: 'compaction_summary' },
+            origin: {
+              kind: 'compaction_summary',
+              ...(checkpoint !== undefined ? { checkpoint } : {}),
+            },
           },
           time: record.time,
         });
