@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   APIConnectionError,
+  APIContextOverflowError,
   APIProviderRateLimitError,
   APIStatusError,
 } from '#/kosong/contract/errors';
@@ -250,6 +251,169 @@ describe('stepRetry plugin', () => {
     failing = false;
     const second = await runTurn(2);
     expect(second).toEqual({ type: 'completed', steps: 1, truncated: false });
+  });
+
+  it('retries a 401 capacity false alarm on a fixed 60s cadence with its own budget', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        if (calls <= 3) {
+          throw new APIContextOverflowError(401, 'kimi-k2 supports only 262K context');
+        }
+        return {
+          id: 'capacity-recovered',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'recovered' }],
+            toolCalls: [],
+          },
+          usage: emptyUsage(),
+          finishReason: 'completed',
+          rawFinishReason: 'stop',
+        };
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    expect(result).toEqual({ type: 'completed', steps: 4, truncated: false });
+    expect(calls).toBe(4);
+    expect(rpcEvents('turn.step.retrying')).toEqual([
+      expect.objectContaining({
+        args: expect.objectContaining({
+          failedAttempt: 1,
+          nextAttempt: 2,
+          maxAttempts: 11,
+          delayMs: 60_000,
+          errorName: 'APIContextOverflowError',
+          statusCode: 401,
+        }),
+      }),
+      expect.objectContaining({
+        args: expect.objectContaining({ failedAttempt: 2, maxAttempts: 11, delayMs: 60_000 }),
+      }),
+      expect.objectContaining({
+        args: expect.objectContaining({ failedAttempt: 3, maxAttempts: 11, delayMs: 60_000 }),
+      }),
+    ]);
+  });
+
+  it('keeps the 429 backoff curve untouched by the capacity channel', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        throw new APIStatusError(429, 'slow down');
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    expect(result.type).toBe('failed');
+    expect(calls).toBe(10);
+    const retrying = rpcEvents('turn.step.retrying');
+    expect(retrying).toHaveLength(9);
+    for (const [index, event] of retrying.entries()) {
+      const args = event.args as { failedAttempt: number; maxAttempts: number; delayMs: number };
+      // General channel numbering and budget — not the capacity channel's 11.
+      expect(args.failedAttempt).toBe(index + 1);
+      expect(args.maxAttempts).toBe(10);
+      // Exponential ramp caps at 32s + 25% jitter: always below the fixed 60s
+      // cadence a capacity retry would publish.
+      expect(args.delayMs).toBeLessThan(60_000);
+    }
+  });
+
+  it('does not spend the general attempts budget on capacity retries', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new APIContextOverflowError(401, 'kimi-k2 supports only 262K context');
+        }
+        throw new APIStatusError(429, 'slow down');
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    expect(result.type).toBe('failed');
+    // 1 capacity failure + 10 rate-limit failures: the 429s still get their
+    // full 10-attempt general budget despite the earlier capacity retry.
+    expect(calls).toBe(11);
+    const retrying = rpcEvents('turn.step.retrying');
+    expect(retrying).toHaveLength(10);
+    expect(retrying[0]).toEqual(
+      expect.objectContaining({
+        args: expect.objectContaining({
+          failedAttempt: 1,
+          maxAttempts: 11,
+          delayMs: 60_000,
+          statusCode: 401,
+        }),
+      }),
+    );
+    for (const [index, event] of retrying.slice(1).entries()) {
+      const args = event.args as { failedAttempt: number; maxAttempts: number; statusCode: number };
+      expect(args.failedAttempt).toBe(index + 1);
+      expect(args.maxAttempts).toBe(10);
+      expect(args.statusCode).toBe(429);
+    }
+  });
+
+  it('hands the error to overflow recovery once the capacity budget is spent', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    ctx = createTestAgent(
+      llmGenerateServices(async () => {
+        calls += 1;
+        if (calls <= 11) {
+          throw new APIContextOverflowError(401, 'kimi-k2 supports only 262K context');
+        }
+        if (calls === 12) {
+          // Compaction summary call from overflow recovery.
+          return {
+            id: 'compaction-summary',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: 'Compacted summary.' }],
+              toolCalls: [],
+            },
+            usage: emptyUsage(),
+            finishReason: 'completed',
+            rawFinishReason: 'stop',
+          };
+        }
+        return {
+          id: 'post-compaction',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'recovered after compaction' }],
+            toolCalls: [],
+          },
+          usage: emptyUsage(),
+          finishReason: 'completed',
+          rawFinishReason: 'stop',
+        };
+      }),
+    );
+
+    const result = await runTurn(1);
+
+    // 10 capacity retries (10 x 60s), then the 11th failure falls through to
+    // overflow recovery instead of failing the turn outright.
+    const retrying = rpcEvents('turn.step.retrying');
+    expect(retrying).toHaveLength(10);
+    for (const event of retrying) {
+      expect((event.args as { delayMs: number }).delayMs).toBe(60_000);
+    }
+    expect(rpcEvents('compaction.started')).not.toEqual([]);
+    expect(result.type).not.toBe('failed');
   });
 });
 
