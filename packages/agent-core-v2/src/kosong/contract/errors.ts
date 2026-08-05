@@ -288,6 +288,27 @@ export function isUnsupportedContentPartError(error: unknown): boolean {
   return UNSUPPORTED_CONTENT_PART_PATTERNS.some((pattern) => pattern.test(lowerMessage));
 }
 
+/**
+ * A managed gateway mislabeling a capacity rejection as 401/403 while the
+ * message is a context-overflow one (`401 <model> supports only <N>K
+ * context`). `normalizeAPIStatusError` already classifies these as
+ * `APIContextOverflowError`; the 401/403 status is what separates the false
+ * alarm from a genuine overflow (400/413).
+ *
+ * The false alarm is a minute-scale transient server fault, not an overflow:
+ * session `c65e0b9d` saw the same byte-identical request rejected at 09:16
+ * and 09:26, then accepted at 10:10 with an unchanged 168k/262k prompt. It
+ * must be retried (on a slow dedicated channel — see `stepRetry`), while a
+ * genuine overflow keeps flowing to overflow recovery, and a plain 401/403
+ * auth failure must never be retried.
+ */
+export function isCapacityMarkedContextOverflow(error: unknown): boolean {
+  return (
+    error instanceof APIContextOverflowError &&
+    (error.statusCode === 401 || error.statusCode === 403)
+  );
+}
+
 export function isRetryableGenerateError(error: unknown): boolean {
   if (error instanceof APIConnectionError || error instanceof APITimeoutError) {
     return true;
@@ -301,6 +322,9 @@ export function isRetryableGenerateError(error: unknown): boolean {
   if (error instanceof APIStatusError) {
     if (error instanceof APIProviderQuotaExhaustedError) {
       return false;
+    }
+    if (isCapacityMarkedContextOverflow(error)) {
+      return true;
     }
     return [408, 409, 429, 500, 502, 503, 504, 529].includes(error.statusCode);
   }

@@ -135,6 +135,29 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIStatusError(400, 'Bad request'))).toBe(false);
     expect(isRetryableGenerateError(new APIStatusError(401, 'Unauthorized'))).toBe(false);
   });
+
+  it('retries a 401/403 context-overflow false alarm from a capacity crunch', () => {
+    expect(
+      isRetryableGenerateError(
+        new APIContextOverflowError(401, 'kimi-k2 supports only 262K context'),
+      ),
+    ).toBe(true);
+    expect(
+      isRetryableGenerateError(
+        new APIContextOverflowError(403, 'kimi-k2 supports only 262K context'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not retry a genuine overflow or a plain auth failure', () => {
+    // Genuine overflow: must flow to overflow recovery, not the retry channel.
+    expect(
+      isRetryableGenerateError(new APIContextOverflowError(400, 'Context length exceeded')),
+    ).toBe(false);
+    // Plain auth failure with no overflow message: retrying would loop forever.
+    expect(isRetryableGenerateError(new APIStatusError(401, 'Invalid API key'))).toBe(false);
+    expect(isRetryableGenerateError(new APIStatusError(403, 'Forbidden'))).toBe(false);
+  });
 });
 
 describe('classifyApiError', () => {

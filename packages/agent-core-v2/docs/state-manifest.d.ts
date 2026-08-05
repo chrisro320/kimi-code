@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 70 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 71 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -102,6 +102,7 @@
 //     profile.emittedToolPatternWarnings              src/agent/profile/profileService.ts
 //     prompt.launching                                src/agent/prompt/promptService.ts
 //     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
+//     stepRetry.capacityAttempts                      src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.failedAttempts                        src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.lastFailedDriverId                    src/agent/stepRetry/stepRetryService.ts
 //     task.activeTaskReminderPending                  src/agent/task/taskService.ts
@@ -1137,6 +1138,7 @@ export interface AgentStateSnapshot {
   // src/agent/shellCommand/shellCommandService.ts
   'shellCommand.tasks': Map<string, string>;
   // src/agent/stepRetry/stepRetryService.ts
+  'stepRetry.capacityAttempts': number;
   'stepRetry.failedAttempts': number;
   'stepRetry.lastFailedDriverId': string | undefined;
   // src/agent/task/taskService.ts
