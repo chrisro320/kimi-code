@@ -367,6 +367,7 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
     expect(params).not.toHaveProperty('store');
     expect(params['instructions']).toBe('sys');
     expect(params).not.toHaveProperty('tools');
+    expect(params).not.toHaveProperty('parallel_tool_calls');
     expect(params['input']).toEqual([
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
       { type: 'compaction_summary', encrypted_content: 'opaque-payload-±§', id: 'cmp_9' },
@@ -411,6 +412,9 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
     expect(params['tools']).toEqual([
       expect.objectContaining({ type: 'function', name: 'get_weather' }),
     ]);
+    // Prefix alignment with the loop path: pinned exactly when tools go out.
+    expect(params['parallel_tool_calls']).toBe(false);
+    expect(fake.calls[0]!.params).not.toHaveProperty('include');
   });
 
   it('forwards the session cache key only when the caller provides one', async () => {

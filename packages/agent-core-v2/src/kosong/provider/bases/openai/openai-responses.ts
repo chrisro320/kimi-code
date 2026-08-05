@@ -1537,6 +1537,15 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
       if (input.tools.length > 0) {
         params['tools'] = input.tools.map((tool) => convertTool(tool));
+        // Prefix alignment: the two endpoints render a tool-calling preamble
+        // from different defaults for this flag, and `/responses` (which
+        // never sends it either) matches the `false` rendering. Omitting it
+        // here breaks the prefix partway through the tool block and the
+        // request misses the loop's prompt cache. No behavioural cost: this
+        // endpoint compacts, it never calls a tool. The alignment is
+        // empirical, not a documented guarantee — if fold-time requests ever
+        // drop back to a partial hit, re-check this flag first.
+        params['parallel_tool_calls'] = false;
       }
       // Session affinity: the loop path sends `prompt_cache_key` (injected
       // per session by the host), and the provider-side cache buckets by that
