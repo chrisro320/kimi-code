@@ -260,6 +260,8 @@ interface FakeCompact {
 function makeEndpointProvider(options?: {
   model?: string;
   baseUrl?: string;
+  thinkingEffort?: 'low' | 'medium' | 'high';
+  offEffort?: string;
   respond?: (params: Record<string, unknown>) => unknown;
 }): { provider: OpenAIResponsesChatProvider; fake: FakeCompact } {
   const fake: FakeCompact = {
@@ -292,6 +294,8 @@ function makeEndpointProvider(options?: {
   const provider = new OpenAIResponsesChatProvider({
     model: options?.model ?? 'gpt-4.1',
     ...(options?.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+    ...(options?.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    ...(options?.offEffort !== undefined ? { offEffort: options.offEffort } : {}),
     clientFactory: () => ({ responses: { compact: fake.compact } }) as unknown as OpenAI,
   });
   return { provider, fake };
@@ -566,5 +570,113 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
 
     expect(error).toBeInstanceOf(ChatProviderError);
     expect((error as Error).message).toContain('connection reset by peer');
+  });
+});
+
+
+describe('compactConversation request body (S5 combination + branch matrix)', () => {
+  const normalTool = {
+    name: 'get_weather',
+    description: 'Read the weather.',
+    parameters: { type: 'object', properties: {} },
+  };
+  const deferredTool = { ...normalTool, name: 'deferred_probe', deferred: true as const };
+
+  it('assembles the full body: stripped tools + pinned flag + cache key + mirrored reasoning', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+    const history: ModelHistoryItem[] = [
+      { kind: 'message', message: userMessage('hello') },
+      { kind: 'checkpoint', checkpoint: ownedCheckpoint(provider) },
+      { kind: 'message', message: userMessage('after') },
+    ];
+
+    await provider.compactConversation(
+      {
+        systemPrompt: 'sys',
+        tools: [normalTool, deferredTool],
+        history,
+        retainedMessages: [],
+      },
+      { cacheKey: 'session-7', thinking: { effort: 'high' } },
+    );
+
+    const params = fake.calls[0]!.params;
+    expect(params).toEqual({
+      model: 'gpt-4.1',
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+        { type: 'compaction_summary', encrypted_content: 'opaque-payload-±§', id: 'cmp_9' },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'after' }] },
+      ],
+      instructions: 'sys',
+      tools: [expect.objectContaining({ type: 'function', name: 'get_weather' })],
+      parallel_tool_calls: false,
+      prompt_cache_key: 'session-7',
+      reasoning: { effort: 'high', summary: 'auto' },
+    });
+  });
+
+  it('omits the tool block entirely when every tool is deferred', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+
+    await provider.compactConversation({
+      systemPrompt: '',
+      tools: [deferredTool],
+      history: [{ kind: 'message', message: userMessage('hi') }],
+      retainedMessages: [],
+    });
+
+    const params = fake.calls[0]!.params;
+    expect(params).not.toHaveProperty('tools');
+    expect(params).not.toHaveProperty('parallel_tool_calls');
+  });
+
+  it('mirrors the provider-level thinking effort when the request sets none', async () => {
+    const { provider, fake } = makeEndpointProvider({ thinkingEffort: 'high' });
+
+    await provider.compactConversation({
+      systemPrompt: '',
+      tools: [],
+      history: [{ kind: 'message', message: userMessage('hi') }],
+      retainedMessages: [],
+    });
+
+    expect(fake.calls[0]!.params['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+    expect(fake.calls[0]!.params).not.toHaveProperty('include');
+  });
+
+  it('maps thinking off through the provider offEffort', async () => {
+    const { provider, fake } = makeEndpointProvider({ offEffort: 'minimal' });
+
+    await provider.compactConversation(
+      {
+        systemPrompt: '',
+        tools: [],
+        history: [{ kind: 'message', message: userMessage('hi') }],
+        retainedMessages: [],
+      },
+      { thinking: { effort: 'off' } },
+    );
+
+    expect(fake.calls[0]!.params['reasoning']).toEqual({ effort: 'minimal', summary: 'auto' });
+  });
+
+  it('sends no reasoning field for thinking on, or off without an offEffort', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+    const input = {
+      systemPrompt: '',
+      tools: [],
+      history: [{ kind: 'message', message: userMessage('hi') }] as ModelHistoryItem[],
+      retainedMessages: [],
+    };
+
+    await provider.compactConversation(input, { thinking: { effort: 'on' } });
+    await provider.compactConversation(input, { thinking: { effort: 'off' } });
+    await provider.compactConversation(input);
+
+    for (const call of fake.calls) {
+      expect(call.params).not.toHaveProperty('reasoning');
+      expect(call.params).not.toHaveProperty('include');
+    }
   });
 });

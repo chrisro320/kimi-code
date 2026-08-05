@@ -1535,8 +1535,13 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       if (input.systemPrompt) {
         params['instructions'] = input.systemPrompt;
       }
-      if (input.tools.length > 0) {
-        params['tools'] = input.tools.map((tool) => convertTool(tool));
+      // Mirror the deferred strip the loop path applies before a request
+      // reaches the wire (`providerVisibleTools` in llmRequesterService):
+      // deferred tool schemas travel via message-level declarations, and one
+      // extra top-level tool voids the prompt cache outright.
+      const wireTools = input.tools.filter((tool) => tool.deferred !== true);
+      if (wireTools.length > 0) {
+        params['tools'] = wireTools.map((tool) => convertTool(tool));
         // Prefix alignment: the two endpoints render a tool-calling preamble
         // from different defaults for this flag, and `/responses` (which
         // never sends it either) matches the `false` rendering. Omitting it
@@ -1555,6 +1560,26 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       // rest are unverified against it.
       if (options?.cacheKey !== undefined) {
         params['prompt_cache_key'] = options.cacheKey;
+      }
+      // Reasoning-field alignment: the loop path sends
+      // `reasoning: {effort, summary:'auto'}` whenever a reasoning effort is
+      // configured (see generate()), and the provider's prompt-cache entry is
+      // keyed on that request shape. A compact request without `reasoning`
+      // misses the loop's cache outright. Only `reasoning` is mirrored: the
+      // endpoint rejects `include` outright ("Unknown parameter: 'include'").
+      const thinking =
+        options?.thinking ??
+        (this._thinkingEffort !== undefined ? { effort: this._thinkingEffort } : undefined);
+      if (thinking !== undefined) {
+        const effort =
+          thinking.effort === 'off'
+            ? this._offEffort
+            : thinking.effort === 'on'
+              ? undefined
+              : thinking.effort;
+        if (effort !== undefined) {
+          params['reasoning'] = { effort, summary: 'auto' };
+        }
       }
 
       options?.onRequestSent?.();
