@@ -19,6 +19,13 @@ export interface ModelCapability {
   readonly max_context_tokens: number;
   readonly max_input_tokens?: number;
   readonly dynamically_loaded_tools?: boolean;
+  /**
+   * The model's endpoint can compact a conversation server-side and hand back
+   * an opaque checkpoint to replay later. Opt-in by explicit declaration only
+   * — no protocol-level probe can tell whether a backend serves the compaction
+   * endpoint, so a wrong guess costs a failed request every compaction.
+   */
+  readonly remote_compaction?: boolean;
 }
 
 const UNKNOWN_CAPABILITY_MARKER = Symbol.for('moonshot-ai.kosong.UNKNOWN_CAPABILITY');
@@ -33,6 +40,7 @@ export const UNKNOWN_CAPABILITY: ModelCapability = Object.freeze(
       tool_use: false,
       max_context_tokens: 0,
       dynamically_loaded_tools: false,
+      remote_compaction: false,
     },
     UNKNOWN_CAPABILITY_MARKER,
     { value: true },
@@ -51,6 +59,7 @@ export function isUnknownCapability(capability: ModelCapability): boolean {
     !capability.thinking &&
     !capability.tool_use &&
     capability.dynamically_loaded_tools !== true &&
+    capability.remote_compaction !== true &&
     capability.max_context_tokens === 0
   );
 }

@@ -25,7 +25,7 @@ import { isErrorCode } from '#/_base/errors/codes';
 import { isError2 } from '#/_base/errors/errors';
 import { IConfigService } from '#/app/config/config';
 import { ConfigErrors } from '#/app/config/errors';
-import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
+import { isUnknownCapability, UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import type { ChatProvider } from '#/kosong/contract/provider';
 import { emptyUsage } from '#/kosong/contract/usage';
 import { IProtocolAdapterRegistry } from '#/kosong/protocol/protocol';
@@ -1413,5 +1413,97 @@ describe('ModelCatalog setDefaultModel', () => {
     } finally {
       host.dispose();
     }
+  });
+});
+
+describe('remote_compaction capability', () => {
+  const withCapabilities = (capabilities?: string[]): Record<string, unknown> => ({
+    providers: kimiSections['providers'],
+    models: {
+      k1: {
+        provider: 'kimi',
+        model: 'kimi-k2',
+        maxContextSize: 262144,
+        ...(capabilities === undefined ? {} : { capabilities }),
+      },
+    },
+  });
+
+  // Resolution must be exercised through the REAL config → catalog path:
+  // `resolveModelCapabilities` rebuilds the capability object field by field,
+  // so a forgotten line there is not a type error (the field is optional and
+  // simply reads back `undefined`). A hand-built capability fixture would pass
+  // while the feature never switches on in production.
+  it('resolves to true when the model config declares it', () => {
+    const { host, catalog } = createHost(withCapabilities(['remote_compaction']));
+    try {
+      expect(catalog.get('k1').capabilities.remote_compaction).toBe(true);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('resolves to false when the model config stays silent', () => {
+    const { host, catalog } = createHost(withCapabilities());
+    try {
+      expect(catalog.get('k1').capabilities.remote_compaction).toBe(false);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('declares other capabilities without switching remote compaction on', () => {
+    const { host, catalog } = createHost(withCapabilities(['tool_use', 'image_in']));
+    try {
+      const capabilities = catalog.get('k1').capabilities;
+      expect(capabilities.tool_use).toBe(true);
+      expect(capabilities.image_in).toBe(true);
+      expect(capabilities.remote_compaction).toBe(false);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  // The load-bearing one: every OTHER field in `resolveModelCapabilities` is
+  // `declared.has(x) || detected.x`, so copying that shape is the natural
+  // thing to write. Nothing in the protocol reveals whether a backend serves
+  // `/responses/compact`, which makes a detected value a guess — and a wrong
+  // guess costs a failed request on every compaction. Declared is the ONLY
+  // source; this pins it against a detected value that says otherwise.
+  it('ignores a detected value — declaration is the only source', () => {
+    const { host, models, providers } = createHost(withCapabilities(), stubModelOAuthTokens());
+    try {
+      const registry = {
+        _serviceBrand: undefined,
+        supportedProtocols: () => [],
+        resolveAdapterIdentity: () => ({ base: 'openai', wireName: 'kimi-k2' }),
+        resolveProviderBaseId: () => 'openai',
+        resolveCapability: () => UNKNOWN_CAPABILITY,
+        explainCapability: () => ({
+          capability: { ...UNKNOWN_CAPABILITY, remote_compaction: true, tool_use: true },
+          source: { kind: 'none' as const },
+        }),
+        createChatProvider: () => {
+          throw new Error('not exercised');
+        },
+      } as unknown as IProtocolAdapterRegistry;
+      const catalog = new ModelCatalog(providers, models, stubModelOAuthTokens(), registry, {
+        headers: {},
+        thirdPartyHeaders: {},
+      });
+      const capabilities = catalog.get('k1').capabilities;
+      // `tool_use` proves the detected capability really did reach the
+      // resolver — so `remote_compaction: false` is the opt-in rule holding,
+      // not a stub that never got consulted.
+      expect(capabilities.tool_use).toBe(true);
+      expect(capabilities.remote_compaction).toBe(false);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('does not count as a known capability on its own', () => {
+    expect(UNKNOWN_CAPABILITY.remote_compaction).toBe(false);
+    expect(isUnknownCapability({ ...UNKNOWN_CAPABILITY, remote_compaction: true })).toBe(false);
   });
 });

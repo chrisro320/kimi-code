@@ -265,6 +265,7 @@ const CAPABILITY_KEYS = [
   'thinking',
   'tool_use',
   'dynamically_loaded_tools',
+  'remote_compaction',
 ] as const;
 
 export function assembleModelInspection(args: {
