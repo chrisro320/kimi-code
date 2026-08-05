@@ -1525,10 +1525,12 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         );
       }
 
+      // No `store`: unlike `/responses`, the compaction endpoint rejects it
+      // outright ("Unknown parameter: 'store'"). Compaction is stateless here
+      // either way — the checkpoint comes back in the response body.
       const params: Record<string, unknown> = {
         model: this._model,
         input: wireInput,
-        store: false,
       };
       if (input.systemPrompt) {
         params['instructions'] = input.systemPrompt;

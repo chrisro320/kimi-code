@@ -363,7 +363,8 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
     expect(fake.calls).toHaveLength(1);
     const params = fake.calls[0]!.params;
     expect(params['model']).toBe('gpt-4.1');
-    expect(params['store']).toBe(false);
+    // The compaction endpoint rejects `store` outright — never sent.
+    expect(params).not.toHaveProperty('store');
     expect(params['instructions']).toBe('sys');
     expect(params).not.toHaveProperty('tools');
     expect(params['input']).toEqual([
