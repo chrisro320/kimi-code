@@ -35,12 +35,16 @@ class FakeStreamedMessage implements StreamedMessage {
     private readonly parts: readonly StreamedMessagePart[],
     init: {
       readonly traceId?: string | null;
+      readonly droppedOutputItemTypes?: readonly string[];
       readonly onBeforeYield?: (index: number) => void;
     } = {},
   ) {
     this.traceId = init.traceId;
+    this.droppedOutputItemTypes = init.droppedOutputItemTypes;
     this.onBeforeYield = init.onBeforeYield;
   }
+
+  readonly droppedOutputItemTypes?: readonly string[];
 
   private readonly onBeforeYield?: (index: number) => void;
 
@@ -206,6 +210,27 @@ describe('generate() stream normalization', () => {
     await expect(generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY)).rejects.toBeInstanceOf(
       APIEmptyResponseError,
     );
+  });
+
+  it('names undecodable output items on think-only APIEmptyResponseError', async () => {
+    // The provider decoded the response fine and reported a clean finish, but
+    // some of the output arrived in a shape this client cannot turn into
+    // content. Without naming it the message blames the provider for sending
+    // nothing, which points every investigation the wrong way.
+    const stream = new FakeStreamedMessage([{ type: 'think', think: 'Planning the edit...' }], {
+      droppedOutputItemTypes: ['local_shell_call'],
+    });
+    const { provider } = createFakeProvider(stream);
+
+    let caught: unknown;
+    try {
+      await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(APIEmptyResponseError);
+    expect((caught as Error).message).toContain('local_shell_call');
   });
 
   it('forwards the trace id to onTraceId and the result', async () => {

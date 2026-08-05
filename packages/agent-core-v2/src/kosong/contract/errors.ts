@@ -314,7 +314,14 @@ export function isRetryableGenerateError(error: unknown): boolean {
     return true;
   }
   if (error instanceof APIEmptyResponseError) {
-    return true;
+    // A `completed` finish reason means the provider considered the response
+    // finished and successful — nothing was interrupted and no budget ran
+    // out. Emptiness is then a property of this request, and retries resend
+    // a byte-identical body, so every attempt reproduces it: the budget just
+    // burns wall-clock and upstream calls before failing anyway. Every other
+    // finish reason (an interrupted stream leaves it `null`, an exhausted
+    // output budget normalizes to `truncated`) stays retryable.
+    return error.finishReason !== 'completed';
   }
   if (error instanceof APIProviderOverloadedError) {
     return true;

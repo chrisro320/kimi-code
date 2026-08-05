@@ -102,6 +102,8 @@ type ResponseOutputItemView =
   | {
       type: 'message';
       content: RawObject[];
+      /** Wire role, present on compaction output items. */
+      role?: string;
     }
   | {
       type: 'function_call';
@@ -116,7 +118,25 @@ type ResponseOutputItemView =
       summary: RawObject[];
     }
   | {
+      type: 'compaction';
+      /**
+       * Native wire type this checkpoint arrived as. The SDK declares
+       * `compaction`; gateways may speak `compaction_summary`. Preserved so
+       * the item is echoed back in the dialect the endpoint expects.
+       */
+      rawType: string;
+      itemId?: string;
+      encryptedContent?: string;
+    }
+  | {
       type: 'other';
+      /**
+       * The wire `type` we did not recognize. Preserved so a dropped output
+       * item can be named in diagnostics instead of vanishing silently — the
+       * Responses API is extensible, so an unrecognized item means model
+       * output we failed to decode, not model output that does not exist.
+       */
+      rawType: string;
     };
 
 function asRawObject(value: unknown): RawObject | null {
@@ -191,6 +211,20 @@ function readResponseOutputItem(value: unknown, context: string): ResponseOutput
     return {
       type,
       content: readObjectArrayField(item, 'content') ?? [],
+      role: readStringField(item, 'role'),
+    };
+  }
+
+  // Compaction checkpoint. `compaction` is the SDK-declared type; gateways in
+  // the wild answer `/responses/compact` with `compaction_summary`. Both carry
+  // the same opaque `encrypted_content`, so decode either and remember which
+  // dialect it was so replay echoes it back unchanged.
+  if (type === 'compaction' || type === 'compaction_summary') {
+    return {
+      type: 'compaction',
+      rawType: type,
+      itemId: readStringField(item, 'id'),
+      encryptedContent: readStringField(item, 'encrypted_content'),
     };
   }
 
@@ -212,7 +246,7 @@ function readResponseOutputItem(value: unknown, context: string): ResponseOutput
     };
   }
 
-  return { type: 'other' };
+  return { type: 'other', rawType: type };
 }
 
 function responseStreamIndex(
@@ -685,6 +719,7 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   private _usage: TokenUsage | null = null;
   private _finishReason: FinishReason | null = null;
   private _rawFinishReason: string | null = null;
+  private readonly _droppedOutputItemTypes = new Set<string>();
   private readonly _iter: AsyncGenerator<StreamedMessagePart>;
 
   constructor(
@@ -715,6 +750,11 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
 
   get rawFinishReason(): string | null {
     return this._rawFinishReason;
+  }
+
+  /** See {@link StreamedMessage.droppedOutputItemTypes}. */
+  get droppedOutputItemTypes(): readonly string[] {
+    return [...this._droppedOutputItemTypes];
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
@@ -797,6 +837,11 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           }
           yield thinkPart;
         }
+      } else {
+        // 'compaction' / 'other' — an output item this decoder cannot turn
+        // into content. Record the wire type so callers can report what was
+        // lost rather than reporting an empty model response.
+        this._droppedOutputItemTypes.add(outputItem.rawType);
       }
     }
   }
@@ -940,6 +985,13 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               yield* yieldFinalArgumentsSuffix(streamIndex, item.arguments, type);
+            } else if (item.type !== 'message') {
+              // Text arrives via `response.output_text.delta`, so a `message`
+              // item needs nothing here. A `compaction` or unrecognized item
+              // is an output item this decoder cannot turn into content:
+              // record the type so callers can report what was lost rather
+              // than reporting an empty model response.
+              this._droppedOutputItemTypes.add(item.rawType);
             }
             break;
           }
@@ -1023,6 +1075,208 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
       throw convertOpenAIError(error, this._convertErrorHook);
     }
   }
+}
+
+/** Read the usage block of a `/responses/compact` response. */
+function readCompactionUsage(response: RawObject): TokenUsage | null {
+  const usage = readObjectField(response, 'usage');
+  if (usage === undefined) return null;
+  const inputTokens = readNumberField(usage, 'input_tokens') ?? 0;
+  const outputTokens = readNumberField(usage, 'output_tokens') ?? 0;
+  const details = readObjectField(usage, 'input_tokens_details');
+  const cached = details ? (readNumberField(details, 'cached_tokens') ?? 0) : 0;
+  return {
+    inputOther: inputTokens - cached,
+    output: outputTokens,
+    inputCacheRead: cached,
+    inputCacheCreation: 0,
+  };
+}
+
+/** Concatenate the text of a compaction output message's content blocks. */
+function compactionMessageText(content: RawObject[]): string {
+  let text = '';
+  for (const block of content) {
+    const value = readStringField(block, 'text');
+    if (value !== undefined) text += value;
+  }
+  return text;
+}
+
+/**
+ * Allowlisted diagnostics for an output item the compact decoder could not
+ * use. Only the raw wire type, the output index, and the item id are kept —
+ * never the raw item itself, which may carry opaque provider state that does
+ * not belong in logs.
+ */
+export interface UnknownCompactionOutputItem {
+  readonly rawType: string;
+  readonly index: number;
+  readonly id?: string;
+}
+
+/** A usable checkpoint decoded from a `/responses/compact` response. */
+export interface DecodedCompactionCheckpoint {
+  readonly encrypted: string;
+  /** Native wire type the checkpoint arrived as (`compaction` or `compaction_summary`). */
+  readonly itemType: string;
+  readonly itemId?: string;
+}
+
+/** A user/assistant message the endpoint retained verbatim. */
+export interface CompactionRetainedMessage {
+  readonly role: 'user' | 'assistant';
+  readonly text: string;
+}
+
+/**
+ * The typed verdict of decoding a `/responses/compact` response body
+ * (design D-E4):
+ *
+ * - `ok` — exactly one usable checkpoint; unknown NONessential items ride
+ *   along as `unknownOutputItems` instead of failing the decode.
+ * - `empty` — zero usable checkpoints. Retryability is decided by the finish
+ *   reason: `completed` is deterministic (the provider stands by the
+ *   response, and a retry resends a byte-identical body), anything else
+ *   (`truncated`, an interrupted stream) stays retryable —
+ *   see {@link isRetryableCompactionOutcome}.
+ * - `protocol_error` — multiple usable checkpoints; never guessed, never
+ *   retried.
+ * - `decode_error` — a malformed required field (typed `ChatProviderError`).
+ */
+export type CompactionResponseOutcome =
+  | {
+      readonly kind: 'ok';
+      readonly checkpoint: DecodedCompactionCheckpoint;
+      readonly retainedMessages: readonly CompactionRetainedMessage[];
+      readonly usage: TokenUsage | null;
+      readonly unknownOutputItems: readonly UnknownCompactionOutputItem[];
+    }
+  | {
+      readonly kind: 'empty';
+      readonly finishReason: FinishReason | null;
+      readonly rawFinishReason: string | null;
+      readonly usage: TokenUsage | null;
+      readonly unknownOutputItems: readonly UnknownCompactionOutputItem[];
+    }
+  | {
+      readonly kind: 'protocol_error';
+      readonly reason: 'multiple_checkpoints';
+      readonly checkpointCount: number;
+      readonly unknownOutputItems: readonly UnknownCompactionOutputItem[];
+    }
+  | { readonly kind: 'decode_error'; readonly error: ChatProviderError };
+
+/**
+ * Bounded-retry verdict for a compact outcome. Only `empty` can be retried,
+ * and only when the provider did NOT report the response as completed —
+ * mirroring the `APIEmptyResponseError` gate in `isRetryableGenerateError`.
+ */
+export function isRetryableCompactionOutcome(outcome: CompactionResponseOutcome): boolean {
+  return outcome.kind === 'empty' && outcome.finishReason !== 'completed';
+}
+
+/**
+ * Decode a `/responses/compact` response body into a typed outcome.
+ *
+ * Kept: real user and assistant messages, plus the checkpoint itself.
+ * Dropped silently: `developer`/`system` prefixes (the caller re-sends its
+ * own instructions) and reasoning / tool traffic, which the endpoint has
+ * already folded into the checkpoint. Dropped WITH a diagnostic: output item
+ * types this decoder does not know — the API is extensible, so an unknown
+ * item must never silently become "no checkpoint".
+ *
+ * Never throws for decode problems — they are reported as typed outcomes.
+ */
+export function decodeCompactionResponse(body: unknown): CompactionResponseOutcome {
+  const response = asRawObject(body);
+  if (response === null) {
+    return {
+      kind: 'decode_error',
+      error: new ChatProviderError(
+        'OpenAI Responses compact decode error: response must be an object.',
+      ),
+    };
+  }
+
+  const status = readNullableStringField(response, 'status');
+  const incomplete = readObjectField(response, 'incomplete_details');
+  const incompleteReason = incomplete ? readStringField(incomplete, 'reason') : null;
+  const { finishReason, rawFinishReason } = normalizeResponsesFinishReason(
+    status,
+    incompleteReason,
+  );
+  const usage = readCompactionUsage(response);
+
+  const output = readObjectArrayField(response, 'output') ?? [];
+  const checkpoints: DecodedCompactionCheckpoint[] = [];
+  const retainedMessages: CompactionRetainedMessage[] = [];
+  const unknownOutputItems: UnknownCompactionOutputItem[] = [];
+
+  try {
+    for (const [index, value] of output.entries()) {
+      const item = readResponseOutputItem(value, `response.output[${String(index)}]`);
+      if (item.type === 'message') {
+        const role = item.role;
+        if (role !== 'user' && role !== 'assistant') continue;
+        const text = compactionMessageText(item.content);
+        if (text.length === 0) continue;
+        retainedMessages.push({ role, text });
+        continue;
+      }
+      if (item.type === 'compaction') {
+        if (item.encryptedContent === undefined) {
+          return {
+            kind: 'decode_error',
+            error: new ChatProviderError(
+              `OpenAI Responses compact decode error: response.output[${String(index)}].encrypted_content must be a string.`,
+            ),
+          };
+        }
+        checkpoints.push({
+          encrypted: item.encryptedContent,
+          itemType: item.rawType,
+          ...(item.itemId !== undefined ? { itemId: item.itemId } : {}),
+        });
+        continue;
+      }
+      if (item.type === 'other') {
+        const rawItem = asRawObject(value);
+        const id = rawItem === null ? undefined : readStringField(rawItem, 'id');
+        unknownOutputItems.push({
+          rawType: item.rawType,
+          index,
+          ...(id !== undefined ? { id } : {}),
+        });
+      }
+      // 'reasoning' / 'function_call' — known-nonessential: the endpoint has
+      // already folded them into the checkpoint.
+    }
+  } catch (error) {
+    if (error instanceof ChatProviderError) {
+      return { kind: 'decode_error', error };
+    }
+    throw error;
+  }
+
+  if (checkpoints.length === 1) {
+    return {
+      kind: 'ok',
+      checkpoint: checkpoints[0]!,
+      retainedMessages,
+      usage,
+      unknownOutputItems,
+    };
+  }
+  if (checkpoints.length === 0) {
+    return { kind: 'empty', finishReason, rawFinishReason, usage, unknownOutputItems };
+  }
+  return {
+    kind: 'protocol_error',
+    reason: 'multiple_checkpoints',
+    checkpointCount: checkpoints.length,
+    unknownOutputItems,
+  };
 }
 
 export class OpenAIResponsesChatProvider implements ChatProvider {

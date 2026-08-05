@@ -55,6 +55,17 @@ export interface StreamedMessage {
   readonly finishReason: FinishReason | null;
   readonly rawFinishReason: string | null;
   readonly traceId?: string | null;
+  /**
+   * Wire `type` values of output items the provider decoder recognized as
+   * output items but could not turn into any {@link StreamedMessagePart}.
+   *
+   * The provider protocols are extensible, so an item type added upstream
+   * decodes to nothing here and the response looks like the model produced
+   * less than it did — or nothing at all. Recording the names keeps that
+   * loss reportable instead of silent. Empty (or absent) when every output
+   * item was consumed.
+   */
+  readonly droppedOutputItemTypes?: readonly string[];
 }
 
 export interface ProviderRequestAuth {
