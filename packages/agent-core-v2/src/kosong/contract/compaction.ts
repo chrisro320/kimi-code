@@ -126,12 +126,17 @@ export type ModelHistoryItem =
   | { readonly kind: 'checkpoint'; readonly checkpoint: CompactionCheckpoint };
 
 /**
- * The provider endpoint a history is projected for. The capability flag and
- * the lineage are supplied by the caller (provider-side resolution lives in
- * the provider batch that adopts this contract) — the projection layer only
- * compares.
+ * The provider endpoint a history is projected for. The caller supplies both
+ * the capability answer and, when replay is possible, the endpoint's lineage
+ * (provider-side resolution lives in the provider batch) — the projection
+ * layer only compares.
+ *
+ * Discriminated rather than a flag beside an always-present lineage: a
+ * caller that cannot replay has no lineage to give, and forcing one makes it
+ * invent a value. Such a stand-in is read by nothing today only because the
+ * projection short-circuits on the flag first; reorder that condition and
+ * the invented lineage silently starts deciding ownership.
  */
-export interface CheckpointTarget {
-  readonly supportsCheckpointReplay: boolean;
-  readonly lineage: CompactionLineage;
-}
+export type CheckpointTarget =
+  | { readonly supportsCheckpointReplay: false }
+  | { readonly supportsCheckpointReplay: true; readonly lineage: CompactionLineage };

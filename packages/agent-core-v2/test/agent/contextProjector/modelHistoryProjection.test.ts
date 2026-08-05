@@ -43,10 +43,9 @@ const supportingTarget: CheckpointTarget = {
   lineage: { ...OWNING_LINEAGE },
 };
 
-const incapableTarget: CheckpointTarget = {
-  supportsCheckpointReplay: false,
-  lineage: { ...OWNING_LINEAGE },
-};
+// No lineage: an endpoint that cannot replay has none to offer, and the type
+// no longer lets the caller invent one.
+const incapableTarget: CheckpointTarget = { supportsCheckpointReplay: false };
 
 describe('projectModelHistory', () => {
   it('replaces an owned compaction summary with its checkpoint when the target supports replay', () => {

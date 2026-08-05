@@ -95,7 +95,6 @@ import {
   projectModelHistory,
   type CheckpointTarget,
 } from '#/agent/contextProjector/modelHistoryProjection';
-import { canonicalizeLineage } from '#/kosong/contract/compaction';
 import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import {
   LlmRequestTraceModel,
@@ -266,19 +265,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
     const requester = this.modelCatalog.getRequester(resolved.modelAlias);
     const lineage = requester.compactionLineage();
-    const target: CheckpointTarget = {
-      supportsCheckpointReplay:
-        resolved.modelCapabilities.remote_compaction === true && lineage !== undefined,
-      // When replay is unsupported the lineage is never consulted by the
-      // projection; the model record supplies a deterministic stand-in.
-      lineage:
-        lineage ??
-        canonicalizeLineage({
-          provider: requester.model.providerType ?? requester.model.protocol,
-          model: requester.model.name,
-          effectiveBaseUrl: requester.model.baseUrl ?? '',
-        }),
-    };
+    // Both gates in one place: the model must declare the capability AND the
+    // provider must report a lineage. Either missing and there is nothing to
+    // replay against, so the target carries no lineage at all.
+    const target: CheckpointTarget =
+      resolved.modelCapabilities.remote_compaction === true && lineage !== undefined
+        ? { supportsCheckpointReplay: true, lineage }
+        : { supportsCheckpointReplay: false };
     const history = input.history ?? this.context.get();
     const projected = projectModelHistory(history, target);
     this.log.info('llm compact request', {

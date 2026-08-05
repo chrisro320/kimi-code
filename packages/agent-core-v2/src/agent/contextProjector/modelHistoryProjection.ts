@@ -44,6 +44,8 @@ export function projectModelHistory(
       target.supportsCheckpointReplay &&
       sameOrigin(target.lineage, checkpoint.lineage)
     ) {
+      // `target.lineage` narrows off the discriminant above — an
+      // unsupported target carries no lineage to consult.
       items.push({ kind: 'checkpoint', checkpoint });
     } else {
       items.push({ kind: 'message', message: toWireMessage(message, [...message.content]) });
