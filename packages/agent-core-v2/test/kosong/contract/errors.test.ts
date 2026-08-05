@@ -136,6 +136,23 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIStatusError(401, 'Unauthorized'))).toBe(false);
   });
 
+  it('retries an empty response unless the provider reported it as completed', () => {
+    expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'truncated' })),
+    ).toBe(true);
+  });
+
+  it('does not retry an empty response the provider reported as completed', () => {
+    // `completed` means the provider finished successfully and stands by the
+    // response: nothing was cut short, so emptiness is a property of this
+    // request. Retries resend a byte-identical body, so every attempt
+    // reproduces it and the whole budget burns before failing anyway.
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'completed' })),
+    ).toBe(false);
+  });
+
   it('retries a 401/403 context-overflow false alarm from a capacity crunch', () => {
     expect(
       isRetryableGenerateError(

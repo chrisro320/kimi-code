@@ -597,6 +597,11 @@ function resolveModelCapabilities(
     dynamically_loaded_tools:
       declared.has('dynamically_loaded_tools') ||
       detected.dynamically_loaded_tools === true,
+    // Declared-only, deliberately breaking the `declared || detected` shape of
+    // every field above: nothing in the protocol reveals whether a backend
+    // serves `/responses/compact`, so a detected value would be a guess, and
+    // guessing wrong costs a failed request on every compaction.
+    remote_compaction: declared.has('remote_compaction'),
   };
 }
 

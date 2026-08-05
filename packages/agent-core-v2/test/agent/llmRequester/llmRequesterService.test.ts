@@ -44,11 +44,14 @@ import {
 } from '#/kosong/contract/errors';
 import { emptyUsage, type TokenUsage } from '#/kosong/contract/usage';
 import type { Message } from '#/kosong/contract/message';
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 import type { ThinkingEffort } from '#/kosong/contract/provider';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
 import {
+  type ModelCompactionInput,
+  type ModelCompactionOutcome,
   type ModelRequestEvent,
   type ModelRequestInput,
   type ModelRequester,
@@ -115,6 +118,8 @@ function createRequester(
         id: 'resp-1',
       };
     },
+    compactConversation: async () => ({ kind: 'unsupported' }),
+    compactionLineage: () => undefined,
   };
 }
 
@@ -141,14 +146,16 @@ function createService(
     | undefined,
   options: {
     readonly thinkingLevel?: ThinkingEffort;
+    readonly capabilitiesOverride?: ModelCapability;
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
   const thinkingLevel = options.thinkingLevel ?? 'off';
+  const caps = options.capabilitiesOverride ?? capabilities;
   const profile: Partial<IAgentProfileService> = {
     resolveModelContext: () => ({
       modelAlias: 'm',
-      modelCapabilities: capabilities,
+      modelCapabilities: caps,
       maxOutputSize: undefined,
       alwaysThinking: undefined,
       thinkingLevel,
@@ -160,7 +167,7 @@ function createService(
     data: () => ({
       cwd: '',
       modelAlias: 'm',
-      modelCapabilities: capabilities,
+      modelCapabilities: caps,
       thinkingLevel,
       systemPrompt: 'system',
     }),
@@ -719,6 +726,8 @@ describe('AgentLLMRequesterService trace id', () => {
           traceId: traceId ?? undefined,
         };
       },
+      compactConversation: async () => ({ kind: 'unsupported' }),
+      compactionLineage: () => undefined,
     };
   }
 
@@ -840,5 +849,106 @@ describe('AgentLLMRequesterService trace id', () => {
     expect(
       telemetryRecords.find((record) => record.event === 'api_error')?.properties?.['trace_id'],
     ).toBeUndefined();
+  });
+});
+
+describe('AgentLLMRequesterService compact', () => {
+  const LINEAGE = { provider: 'p', model: 'wire-model', baseUrl: 'https://example.test' };
+
+  function checkpoint(overrides: Partial<CompactionCheckpoint> = {}): CompactionCheckpoint {
+    return {
+      encrypted: 'opaque-payload',
+      itemType: 'compaction',
+      lineage: { ...LINEAGE },
+      replayInputTokens: { kind: 'unknown' },
+      ...overrides,
+    };
+  }
+
+  function historyWithCheckpoint(cp: CompactionCheckpoint): ContextMessage[] {
+    return [
+      { role: 'user', content: [{ type: 'text', text: 'kept' }], toolCalls: [] },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'readable summary' }],
+        toolCalls: [],
+        origin: { kind: 'compaction_summary', checkpoint: cp },
+      },
+    ];
+  }
+
+  function compactCapableRequester(
+    captured: { input?: ModelCompactionInput },
+    outcome: ModelCompactionOutcome,
+  ): ModelRequester {
+    const requester = createRequester({ value: 0 });
+    requester.compactConversation = async (input) => {
+      captured.input = input;
+      return outcome;
+    };
+    requester.compactionLineage = () => ({ ...LINEAGE });
+    return requester;
+  }
+
+  const OK_OUTCOME: ModelCompactionOutcome = {
+    kind: 'ok',
+    result: {
+      checkpoint: checkpoint(),
+      retainedMessages: [],
+      usage: emptyUsage(),
+      traceId: 'trace-cmp',
+    },
+  };
+
+  it('projects history against capability+lineage and drives the requester boundary', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
+    const cp = checkpoint();
+
+    const outcome = await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(outcome).toBe(OK_OUTCOME);
+    const input = captured.input!;
+    expect(input.systemPrompt).toBe('system');
+    expect(input.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    const checkpointItem = input.history[1];
+    expect(checkpointItem).toEqual({ kind: 'checkpoint', checkpoint: cp });
+  });
+
+  it('degrades checkpoints to portable summary text when the capability is off', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service } = createService(requester, undefined);
+
+    await service.compact({ history: historyWithCheckpoint(checkpoint()) });
+
+    const input = captured.input!;
+    expect(input.history.every((item) => item.kind === 'message')).toBe(true);
+    expect(JSON.stringify(input.history)).not.toContain('opaque-payload');
+  });
+
+  it('returns the typed unsupported outcome as-is', async () => {
+    const requester = createRequester({ value: 0 });
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
+
+    await expect(service.compact()).resolves.toEqual({ kind: 'unsupported' });
+  });
+
+  it('passes retainedMessages through untouched', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service } = createService(requester, undefined);
+    const retained: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'keep me' }], toolCalls: [] },
+    ];
+
+    await service.compact({ retainedMessages: retained });
+
+    expect(captured.input!.retainedMessages).toEqual(retained);
   });
 });

@@ -1113,6 +1113,7 @@ export interface AgentStateSnapshot {
         readonly max_context_tokens: number;
         readonly max_input_tokens?: number;
         readonly dynamically_loaded_tools?: boolean;
+        readonly remote_compaction?: boolean;
       };
       readonly maxOutputSize: number | undefined;
       readonly alwaysThinking: boolean | undefined;
