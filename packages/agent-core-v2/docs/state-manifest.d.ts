@@ -763,6 +763,22 @@ export interface AgentStateSnapshot {
         readonly isError?: boolean;
       } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'compaction_summary';
+        readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly encrypted: string;
+          readonly itemType: string;
+          readonly itemId?: string;
+          readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly provider: string;
+            readonly model: string;
+            readonly baseUrl: string;
+          };
+          readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly kind: 'measured';
+            readonly tokens: number;
+          } | {
+            readonly kind: 'unknown';
+          };
+        };
       } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'system_trigger';
         readonly name: string;
@@ -893,6 +909,22 @@ export interface AgentStateSnapshot {
       readonly isError?: boolean;
     } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'compaction_summary';
+      readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+        readonly encrypted: string;
+        readonly itemType: string;
+        readonly itemId?: string;
+        readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly provider: string;
+          readonly model: string;
+          readonly baseUrl: string;
+        };
+        readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly kind: 'measured';
+          readonly tokens: number;
+        } | {
+          readonly kind: 'unknown';
+        };
+      };
     } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'system_trigger';
       readonly name: string;
@@ -955,6 +987,22 @@ export interface AgentStateSnapshot {
         readonly isError?: boolean;
       } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'compaction_summary';
+        readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly encrypted: string;
+          readonly itemType: string;
+          readonly itemId?: string;
+          readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly provider: string;
+            readonly model: string;
+            readonly baseUrl: string;
+          };
+          readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly kind: 'measured';
+            readonly tokens: number;
+          } | {
+            readonly kind: 'unknown';
+          };
+        };
       } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'system_trigger';
         readonly name: string;

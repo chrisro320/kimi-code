@@ -1,4 +1,5 @@
 import type { ContentPart, Message } from '#/kosong/contract/message';
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 
 import type { AgentTaskStatus } from '#/agent/task/task';
 
@@ -52,6 +53,14 @@ export interface ShellCommandOrigin {
 
 export interface CompactionSummaryOrigin {
   readonly kind: 'compaction_summary';
+  /**
+   * Opaque remote-compaction state bound to this summary message, if the
+   * compaction produced one. Lives ONLY here — the `origin` sidecar — so it
+   * is stripped by the default `toWireMessage()` projection and can reach a
+   * provider solely through the explicit target-aware projection. See
+   * `kosong/contract/compaction.ts`.
+   */
+  readonly checkpoint?: CompactionCheckpoint;
 }
 
 export interface SystemTriggerOrigin {
