@@ -413,6 +413,20 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
     ]);
   });
 
+  it('forwards the session cache key only when the caller provides one', async () => {
+    const { provider, fake } = makeEndpointProvider({});
+    const history: ModelHistoryItem[] = [{ kind: 'message', message: userMessage('hi') }];
+
+    await provider.compactConversation(
+      { systemPrompt: '', tools: [], history, retainedMessages: [] },
+      { cacheKey: 'session-42' },
+    );
+    await provider.compactConversation({ systemPrompt: '', tools: [], history, retainedMessages: [] });
+
+    expect(fake.calls[0]!.params['prompt_cache_key']).toBe('session-42');
+    expect(fake.calls[1]!.params).not.toHaveProperty('prompt_cache_key');
+  });
+
   it('rejects a completed empty response with a NON-retryable APIEmptyResponseError', async () => {
     const { provider } = makeEndpointProvider({
       respond: () => ({ id: 'resp_e', status: 'completed', output: [] }),
