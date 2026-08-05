@@ -63,6 +63,7 @@ import { ILogService, type LogContext } from '#/_base/log/log';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import {
   effectiveMaxCompletionTokens,
+  type ModelCompactionOutcome,
   type ModelRequestEvent,
   type ModelRequestParams,
   type ModelRequester,
@@ -81,6 +82,7 @@ import type { PayloadOf } from '#/wire/types';
 
 import {
   IAgentLLMRequesterService,
+  type AgentCompactionInput,
   type AgentLLMRequestFinish,
   type AgentLLMRequestLogFields,
   type AgentLLMRequestOverrides,
@@ -89,6 +91,11 @@ import {
   type AgentLLMRequestTask,
   type PreparedTurnRequestConfig,
 } from './llmRequester';
+import {
+  projectModelHistory,
+  type CheckpointTarget,
+} from '#/agent/contextProjector/modelHistoryProjection';
+import { canonicalizeLineage } from '#/kosong/contract/compaction';
 import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import {
   LlmRequestTraceModel,
@@ -238,6 +245,69 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       trace,
       result: this.requestWithTrace(trace, overrides, onPart, signal),
     };
+  }
+
+  async compact(
+    input: AgentCompactionInput = {},
+    signal?: AbortSignal,
+  ): Promise<ModelCompactionOutcome> {
+    signal?.throwIfAborted();
+    const startedAt = Date.now();
+    const resolved = this.profile.resolveModelContext();
+    const budgetParams = completionBudgetParams({
+      budget: resolveCompletionBudget({
+        maxOutputSize: resolved.maxOutputSize,
+        reservedContextSize: resolved.reservedContextSize,
+        maxCompletionTokensCap:
+          this.config.get<ModelOverrides>('modelOverrides')?.maxCompletionTokens,
+      }),
+      capability: resolved.modelCapabilities,
+      usedContextTokens: this.tokenCounting.get().measured,
+    });
+    const requester = this.modelCatalog.getRequester(resolved.modelAlias);
+    const lineage = requester.compactionLineage();
+    const target: CheckpointTarget = {
+      supportsCheckpointReplay:
+        resolved.modelCapabilities.remote_compaction === true && lineage !== undefined,
+      // When replay is unsupported the lineage is never consulted by the
+      // projection; the model record supplies a deterministic stand-in.
+      lineage:
+        lineage ??
+        canonicalizeLineage({
+          provider: requester.model.providerType ?? requester.model.protocol,
+          model: requester.model.name,
+          effectiveBaseUrl: requester.model.baseUrl ?? '',
+        }),
+    };
+    const history = input.history ?? this.context.get();
+    const projected = projectModelHistory(history, target);
+    this.log.info('llm compact request', {
+      ...logFieldsForSource(input.source),
+      model: resolved.modelAlias ?? 'unknown',
+      historyItems: projected.length,
+      checkpointItems: projected.filter((item) => item.kind === 'checkpoint').length,
+    });
+    const outcome = await requester.compactConversation(
+      {
+        systemPrompt: input.systemPrompt ?? this.profile.getSystemPrompt(),
+        tools: [...this.defaultTools()],
+        history: projected,
+        retainedMessages: [...(input.retainedMessages ?? [])],
+      },
+      signal,
+      {
+        ...this.profile.resolveRequestParams(),
+        ...budgetParams,
+      },
+    );
+    if (outcome.kind === 'ok') {
+      this.usage.record(resolved.modelAlias, outcome.result.usage ?? emptyUsage(), input.source);
+      return outcome;
+    }
+    if (outcome.kind === 'error') {
+      this.trackApiError(outcome.error, startedAt, signal, input.source);
+    }
+    return outcome;
   }
 
   private async requestWithTrace(

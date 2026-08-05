@@ -1417,6 +1417,7 @@ function createTimingRequester(): IAgentLLMRequesterService {
     start(overrides, onPart, signal) {
       return { trace: { traceId: undefined }, result: this.request(overrides, onPart, signal) };
     },
+    compact: async () => ({ kind: 'unsupported' }),
   };
   return requester;
 }

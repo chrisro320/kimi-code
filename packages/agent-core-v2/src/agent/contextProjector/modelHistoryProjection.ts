@@ -14,28 +14,17 @@
 
 import {
   sameOrigin,
-  type CompactionCheckpoint,
-  type CompactionLineage,
+  type CheckpointTarget,
+  type ModelHistoryItem,
 } from '#/kosong/contract/compaction';
-import type { Message } from '#/kosong/contract/message';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 
 import { toWireMessage } from './contextProjectorService';
 
-/** One entry of the projected model-facing history. */
-export type ModelHistoryItem =
-  | { readonly kind: 'message'; readonly message: Message }
-  | { readonly kind: 'checkpoint'; readonly checkpoint: CompactionCheckpoint };
-
-/**
- * The provider endpoint a history is projected for. The capability flag and
- * the lineage are supplied by the caller (provider-side resolution lives in
- * the provider batch that adopts this contract) — this layer only compares.
- */
-export interface CheckpointTarget {
-  readonly supportsCheckpointReplay: boolean;
-  readonly lineage: CompactionLineage;
-}
+// The item/target types live in `kosong/contract/compaction` so the kosong
+// compaction request can share them; re-exported here for the projector's
+// existing consumers.
+export type { CheckpointTarget, ModelHistoryItem };
 
 /**
  * Project stored history into model-facing items. `target` is REQUIRED — a

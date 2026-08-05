@@ -98,6 +98,8 @@ function requester(opts: {
       throw new Error('unused');
     },
     uploadVideo: opts.uploadVideo,
+    compactConversation: async () => ({ kind: 'unsupported' }),
+    compactionLineage: () => undefined,
   };
 }
 

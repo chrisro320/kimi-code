@@ -19,6 +19,8 @@
  * test, not the type checker.
  */
 
+import type { Message } from './message';
+
 /** Who wrote the checkpoint. Ownership is decided by exact-field comparison. */
 export interface CompactionLineage {
   readonly provider: string;
@@ -110,4 +112,26 @@ export function replayContribution(checkpoint: CompactionCheckpoint): ReplayCont
       'post-compaction token count is an underestimate until the provider reports ' +
       'item-level replay usage)',
   };
+}
+
+/**
+ * One entry of a model-facing history after target-aware projection: either a
+ * portable wire message or an opaque checkpoint to replay verbatim.
+ * (Declared at contract level so both the agent-side projector and the kosong
+ * compaction request can share the type — see
+ * `agent/contextProjector/modelHistoryProjection.ts`.)
+ */
+export type ModelHistoryItem =
+  | { readonly kind: 'message'; readonly message: Message }
+  | { readonly kind: 'checkpoint'; readonly checkpoint: CompactionCheckpoint };
+
+/**
+ * The provider endpoint a history is projected for. The capability flag and
+ * the lineage are supplied by the caller (provider-side resolution lives in
+ * the provider batch that adopts this contract) — the projection layer only
+ * compares.
+ */
+export interface CheckpointTarget {
+  readonly supportsCheckpointReplay: boolean;
+  readonly lineage: CompactionLineage;
 }

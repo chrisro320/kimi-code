@@ -22,6 +22,7 @@
 
 import { AsyncEventQueue } from '#/_base/asyncEventQueue';
 import type { VideoURLPart } from '#/kosong/contract/message';
+import type { CompactionLineage } from '#/kosong/contract/compaction';
 import { APIStatusError, isAbortError, VideoUploadUnsupportedError } from '#/kosong/contract/errors';
 import { generate, type GenerateResult } from '#/kosong/contract/generate';
 import type {
@@ -36,6 +37,9 @@ import type { IProtocolAdapterRegistry } from '#/kosong/protocol/protocol';
 
 import type { AuthProvider, Model } from './catalog';
 import type {
+  ModelCompactionInput,
+  ModelCompactionOutcome,
+  ModelCompactionParams,
   ModelRequestEvent,
   ModelRequestInput,
   ModelRequestParams,
@@ -92,6 +96,50 @@ export class ModelRequesterImpl implements ModelRequester {
     return this.runWithAuthRefresh((auth) =>
       uploadVideo(input, { signal: options?.signal, auth }),
     );
+  }
+
+  async compactConversation(
+    input: ModelCompactionInput,
+    signal?: AbortSignal,
+    params?: ModelCompactionParams,
+  ): Promise<ModelCompactionOutcome> {
+    signal?.throwIfAborted();
+    const provider = this.resolveChatProvider();
+    if (provider.compactConversation === undefined) {
+      // The provider-method gate, typed: callers only reason about the
+      // capability gate. Never an exception.
+      return { kind: 'unsupported' };
+    }
+    const compact = provider.compactConversation.bind(provider);
+    const options: GenerateOptions = {
+      signal,
+      cacheKey: params?.cacheKey,
+      sampling: params?.sampling,
+      thinking:
+        params?.thinkingEffort === undefined
+          ? undefined
+          : { effort: params.thinkingEffort, keep: params.thinkingKeep },
+      maxCompletionTokens: params?.maxCompletionTokens,
+      usedContextTokens: params?.usedContextTokens,
+      maxContextTokens: params?.maxContextTokens,
+      onTraceId: params?.onTraceId,
+    };
+    try {
+      // Same plumbing as `request`: auth refresh on 401, error translation —
+      // never bypassed.
+      const result = await this.runWithAuthRefresh((auth) =>
+        compact(input, { ...options, auth }),
+      );
+      return { kind: 'ok', result };
+    } catch (error) {
+      // Aborts propagate as abort errors — never an `error` outcome.
+      if (isAbortError(error) || signal?.aborted === true) throw error;
+      return { kind: 'error', error: translateProviderError(error) };
+    }
+  }
+
+  compactionLineage(): CompactionLineage | undefined {
+    return this.resolveChatProvider().compactionLineage?.();
   }
 
   private async runRequest(

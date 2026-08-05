@@ -16,6 +16,7 @@
  * Pure types only — no other domain, no I/O, no SDKs.
  */
 
+import type { CompactionCheckpoint, CompactionLineage, ModelHistoryItem } from './compaction';
 import type { Message, StreamedMessagePart, VideoURLPart } from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
@@ -127,4 +128,44 @@ export interface ChatProvider {
     options?: GenerateOptions,
   ): Promise<StreamedMessage>;
   uploadVideo?(input: string | VideoUploadInput, options?: GenerateOptions): Promise<VideoURLPart>;
+  /**
+   * OPTIONAL remote-compaction endpoint. Providers without a compaction
+   * endpoint simply do not implement it — the `ModelRequester` boundary
+   * answers `{ kind: 'unsupported' }` for them, so behavior is unchanged.
+   */
+  compactConversation?(
+    input: ChatProviderCompactionInput,
+    options?: GenerateOptions,
+  ): Promise<ChatProviderCompactionResult>;
+  /**
+   * OPTIONAL lineage of checkpoints this provider instance produces and
+   * accepts for replay, built via `canonicalizeLineage()` with the ALREADY
+   * RESOLVED base URL (the provider's default when the config sets none).
+   * Present exactly when `compactConversation` is.
+   */
+  compactionLineage?(): CompactionLineage;
+}
+
+/** Input of a remote-compaction request at the provider boundary. */
+export interface ChatProviderCompactionInput {
+  readonly systemPrompt: string;
+  readonly tools: readonly Tool[];
+  /** Checkpoint-aware projected history (see `projectModelHistory`). */
+  readonly history: readonly ModelHistoryItem[];
+  /**
+   * Messages the caller keeps verbatim regardless of the endpoint's own
+   * retention decision — the provider may use them to bound what must
+   * survive compaction.
+   */
+  readonly retainedMessages: readonly Message[];
+}
+
+/** Result of a successful remote compaction. */
+export interface ChatProviderCompactionResult {
+  readonly checkpoint: CompactionCheckpoint;
+  readonly retainedMessages: readonly Message[];
+  readonly usage: TokenUsage | null;
+  /** Allowlisted wire types of output items dropped as unknown-nonessential. */
+  readonly unknownOutputItemTypes?: readonly string[];
+  readonly traceId?: string | null;
 }
