@@ -918,10 +918,27 @@ describe('AgentLLMRequesterService compact', () => {
     expect(checkpointItem).toEqual({ kind: 'checkpoint', checkpoint: cp });
   });
 
-  it('degrades checkpoints to portable summary text when the capability is off', async () => {
+  it('never calls the provider when the model does not declare remote_compaction', async () => {
+    let calls = 0;
+    const requester = createRequester({ value: 0 });
+    requester.compactConversation = async () => {
+      calls += 1;
+      return OK_OUTCOME;
+    };
+    requester.compactionLineage = () => ({ ...LINEAGE });
+    const { service } = createService(requester, undefined);
+
+    await expect(service.compact()).resolves.toEqual({ kind: 'unsupported' });
+    expect(calls).toBe(0);
+  });
+
+  it('degrades checkpoints to portable summary text when the provider reports no lineage', async () => {
     const captured: { input?: ModelCompactionInput } = {};
     const requester = compactCapableRequester(captured, OK_OUTCOME);
-    const { service } = createService(requester, undefined);
+    requester.compactionLineage = () => undefined;
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
 
     await service.compact({ history: historyWithCheckpoint(checkpoint()) });
 
@@ -942,7 +959,9 @@ describe('AgentLLMRequesterService compact', () => {
   it('passes retainedMessages through untouched', async () => {
     const captured: { input?: ModelCompactionInput } = {};
     const requester = compactCapableRequester(captured, OK_OUTCOME);
-    const { service } = createService(requester, undefined);
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
     const retained: Message[] = [
       { role: 'user', content: [{ type: 'text', text: 'keep me' }], toolCalls: [] },
     ];

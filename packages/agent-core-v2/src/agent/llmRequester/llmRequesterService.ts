@@ -253,6 +253,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     signal?.throwIfAborted();
     const startedAt = Date.now();
     const resolved = this.profile.resolveModelContext();
+    // Capability gate: a model that does not declare remote_compaction never
+    // reaches the endpoint, even when the provider happens to implement
+    // compactConversation — without this the request below fires blind.
+    if (resolved.modelCapabilities.remote_compaction !== true) {
+      return { kind: 'unsupported' };
+    }
     const budgetParams = completionBudgetParams({
       budget: resolveCompletionBudget({
         maxOutputSize: resolved.maxOutputSize,
@@ -265,11 +271,11 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
     const requester = this.modelCatalog.getRequester(resolved.modelAlias);
     const lineage = requester.compactionLineage();
-    // Both gates in one place: the model must declare the capability AND the
-    // provider must report a lineage. Either missing and there is nothing to
-    // replay against, so the target carries no lineage at all.
+    // The capability gate above already established replay support; lineage is
+    // the second gate — without it there is nothing to replay against, so the
+    // target carries no lineage at all.
     const target: CheckpointTarget =
-      resolved.modelCapabilities.remote_compaction === true && lineage !== undefined
+      lineage !== undefined
         ? { supportsCheckpointReplay: true, lineage }
         : { supportsCheckpointReplay: false };
     const history = input.history ?? this.context.get();
