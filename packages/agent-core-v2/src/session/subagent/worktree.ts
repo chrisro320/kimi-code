@@ -1,5 +1,5 @@
 /**
- * `subagent` domain -- editing-subagent worktree isolation.
+ * `subagent` domain — editing-subagent worktree isolation.
  *
  * Runs editing-capable subagents in a temporary detached git worktree seeded
  * from the repository's uncommitted state, then applies the worker's delta
@@ -22,6 +22,13 @@
  * into the real workspace, a later Read following the link leaves the repo
  * and the declared scope. Only relative targets that resolve back inside the
  * repo are applied; absolute or escaping targets fail closed.
+ *
+ * State comparison only reads what git itself tracks: content hash, file
+ * type, and the owner-exec bit. The remaining permission bits are umask
+ * noise that would falsely flag an untouched file as diverged whenever one
+ * side of the comparison comes from a HEAD blob (mode 644/755) and the other
+ * from a stat (e.g. 664 under umask 002). Symlinks compare by target alone,
+ * their modes being neither portable nor reliably settable.
  *
  * Isolation can never work in some workspaces (non-POSIX backend, not a git
  * repository, no commit to base a worktree on); that is a property of the
@@ -1136,15 +1143,10 @@ function stateEqual(left: PathState, right: PathState): boolean {
   if (left.kind !== right.kind) return false;
   switch (left.kind) {
     case 'regular':
-      // Git only tracks the owner-exec bit; other permission bits are umask
-      // noise that would falsely flag an untouched file as diverged when one
-      // side of the comparison comes from a HEAD blob (mode 644/755) and the
-      // other from a stat (e.g. 664 under umask 002).
       return left.sha256 === (right as typeof left).sha256 &&
         (left.mode & 0o170000) === ((right as typeof left).mode & 0o170000) &&
         (left.mode & 0o100) === ((right as typeof left).mode & 0o100);
     case 'symlink':
-      // Symlink modes are not portable or reliably settable; the target is the state.
       return left.target === (right as typeof left).target;
     case 'absent':
     case 'special':

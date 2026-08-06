@@ -1,5 +1,5 @@
 /**
- * `workspaceContext` domain -- per-scope workspace context view factory.
+ * `workspaceContext` domain — per-scope workspace context view factory.
  *
  * Builds an `ISessionWorkspaceContext`-shaped view over a fixed work
  * directory plus a shared additional-dirs set. The Session-scoped
