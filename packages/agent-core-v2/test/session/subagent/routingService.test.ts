@@ -4,12 +4,20 @@ import type { IConfigService } from '#/app/config/config';
 import { MODELS_SECTION } from '#/app/kosongConfig/configSection';
 
 import { SUBAGENT_SECTION } from '#/session/subagent/configSection';
+import { SessionSubagentCircuitService } from '#/session/subagent/circuitService';
 import { SessionSubagentRoutingService } from '#/session/subagent/routingService';
 
 function stubConfig(sections: Record<string, unknown>): IConfigService {
   return {
     get: ((domain: string) => sections[domain]) as IConfigService['get'],
   } as unknown as IConfigService;
+}
+
+function createService(
+  sections: Record<string, unknown>,
+  circuit = new SessionSubagentCircuitService(),
+): { service: SessionSubagentRoutingService; circuit: SessionSubagentCircuitService } {
+  return { service: new SessionSubagentRoutingService(stubConfig(sections), circuit), circuit };
 }
 
 const models = {
@@ -19,36 +27,31 @@ const models = {
 
 describe('SessionSubagentRoutingService', () => {
   it('returns undefined when neither pool nor routing hits', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({ [MODELS_SECTION]: models }),
-    );
+    const { service } = createService({ [MODELS_SECTION]: models });
     await expect(service.resolveSpawnRoute('reviewer')).resolves.toBeUndefined();
   });
 
   it('resolves the static routing entry without a pool slot', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({
-        [MODELS_SECTION]: models,
-        [SUBAGENT_SECTION]: {
-          routing: { coder: { model: 'fast', thinkingEffort: 'high' } },
-        },
-      }),
-    );
+    const { service } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        routing: { coder: { model: 'fast', thinkingEffort: 'high' } },
+      },
+    });
     await expect(service.resolveSpawnRoute('coder')).resolves.toEqual({
       route: { kind: 'internal', modelAlias: 'fast', thinkingEffort: 'high' },
+      circuitKey: 'kimi::fast',
     });
   });
 
   it('prefers the pool over the static routing entry', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({
-        [MODELS_SECTION]: models,
-        [SUBAGENT_SECTION]: {
-          routing: { coder: { model: 'precise' } },
-          pools: { coder: [{ backend: 'kimi', model: 'fast' }] },
-        },
-      }),
-    );
+    const { service } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        routing: { coder: { model: 'precise' } },
+        pools: { coder: [{ backend: 'kimi', model: 'fast' }] },
+      },
+    });
     const resolved = await service.resolveSpawnRoute('coder');
     expect(resolved?.route.modelAlias).toBe('fast');
     expect(resolved?.releasePoolSlot).toBeDefined();
@@ -56,19 +59,17 @@ describe('SessionSubagentRoutingService', () => {
   });
 
   it('rotates pool routes across spawns on the same service instance', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({
-        [MODELS_SECTION]: models,
-        [SUBAGENT_SECTION]: {
-          pools: {
-            coder: [
-              { backend: 'kimi', model: 'fast', weight: 3 },
-              { backend: 'kimi', model: 'precise', weight: 1 },
-            ],
-          },
+    const { service } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        pools: {
+          coder: [
+            { backend: 'kimi', model: 'fast', weight: 3 },
+            { backend: 'kimi', model: 'precise', weight: 1 },
+          ],
         },
-      }),
-    );
+      },
+    });
     const picks: Array<string | undefined> = [];
     for (let i = 0; i < 4; i++) {
       const resolved = await service.resolveSpawnRoute('coder');
@@ -81,14 +82,12 @@ describe('SessionSubagentRoutingService', () => {
   });
 
   it('queues behind a saturated pool and grants the slot on release', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({
-        [MODELS_SECTION]: models,
-        [SUBAGENT_SECTION]: {
-          pools: { coder: [{ backend: 'kimi', model: 'fast', maxConcurrency: 1 }] },
-        },
-      }),
-    );
+    const { service } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        pools: { coder: [{ backend: 'kimi', model: 'fast', maxConcurrency: 1 }] },
+      },
+    });
     const first = await service.resolveSpawnRoute('coder');
     let granted = false;
     const pending = service.resolveSpawnRoute('coder').then((resolved) => {
@@ -106,14 +105,12 @@ describe('SessionSubagentRoutingService', () => {
   });
 
   it('releases the pool slot when route resolution fails', async () => {
-    const service = new SessionSubagentRoutingService(
-      stubConfig({
-        [MODELS_SECTION]: models,
-        [SUBAGENT_SECTION]: {
-          pools: { coder: [{ backend: 'kimi', model: 'missing', maxConcurrency: 1 }] },
-        },
-      }),
-    );
+    const { service } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        pools: { coder: [{ backend: 'kimi', model: 'missing', maxConcurrency: 1 }] },
+      },
+    });
     await expect(service.resolveSpawnRoute('coder')).rejects.toThrow(
       'not defined in config.models',
     );
@@ -122,5 +119,59 @@ describe('SessionSubagentRoutingService', () => {
     await expect(service.resolveSpawnRoute('coder')).rejects.toThrow(
       'not defined in config.models',
     );
+  });
+
+  it('takes the fallback chain when the resolved route is circuit-open', async () => {
+    const { service, circuit } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        routing: { coder: { model: 'fast' } },
+        fallbackChain: [{ backend: 'kimi', model: 'precise' }],
+      },
+    });
+    circuit.openCircuit('kimi::fast', 'kimi::fast', 'provider.auth_error');
+
+    await expect(service.resolveSpawnRoute('coder')).resolves.toEqual({
+      route: { kind: 'internal', modelAlias: 'precise', thinkingEffort: undefined },
+      circuitKey: 'kimi::precise',
+    });
+  });
+
+  it('skips circuit-open fallback candidates and reports the full attempt history', async () => {
+    const { service, circuit } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        routing: { coder: { model: 'fast' } },
+        fallbackChain: [{ backend: 'kimi', model: 'precise' }],
+      },
+    });
+    circuit.openCircuit('kimi::fast', 'kimi::fast', 'provider.auth_error');
+    circuit.openCircuit('kimi::precise', 'kimi::precise', 'model.config_invalid');
+
+    await expect(service.resolveSpawnRoute('coder')).rejects.toThrow(
+      'Dispatch rejected (circuit-open): every route in the fallback chain is circuit-open: ' +
+        'kimi::fast (provider.auth_error) -> kimi::precise (model.config_invalid)',
+    );
+  });
+
+  it('releases the pool slot when the resolved pool route is circuit-open', async () => {
+    const { service, circuit } = createService({
+      [MODELS_SECTION]: models,
+      [SUBAGENT_SECTION]: {
+        pools: { coder: [{ backend: 'kimi', model: 'fast', maxConcurrency: 1 }] },
+        fallbackChain: [{ backend: 'kimi', model: 'precise' }],
+      },
+    });
+    circuit.openCircuit('kimi::fast', 'kimi::fast', 'provider.auth_error');
+
+    // The circuit-open redirect must free the acquired slot — a leaked slot
+    // would leave this second resolve queued behind max_concurrency=1
+    // forever (test timeout).
+    await expect(service.resolveSpawnRoute('coder')).resolves.toMatchObject({
+      route: { modelAlias: 'precise' },
+    });
+    await expect(service.resolveSpawnRoute('coder')).resolves.toMatchObject({
+      route: { modelAlias: 'precise' },
+    });
   });
 });

@@ -83,6 +83,8 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
+import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
 import {
   buildSubagentModelDescriptions,
   formatSubagentTimeoutDescription,
@@ -149,6 +151,8 @@ export class SubagentTool implements ISubagentTool {
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionSubagentRoutingService
     private readonly subagentRouting: ISessionSubagentRoutingService,
+    @ISessionSubagentCircuitService
+    private readonly subagentCircuit: ISessionSubagentCircuitService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -262,6 +266,10 @@ export class SubagentTool implements ISubagentTool {
     let profileName: string;
     let promptText = args.prompt;
     let releasePoolSlot: (() => void) | undefined;
+    // R-A2 (Case 8): records a non-retryable provider/model/route failure
+    // against the resolved route's circuit (no-op for resume spawns and
+    // unrouted bindings — only routed fresh spawns carry a circuit key).
+    let recordCircuitFailure: (error: unknown) => void = () => {};
     if (isResume) {
       const target = this.lifecycle.get(resumeAgentId);
       if (target === undefined) {
@@ -309,6 +317,22 @@ export class SubagentTool implements ISubagentTool {
         controller.signal,
       );
       releasePoolSlot = spawnRoute?.releasePoolSlot;
+      // A non-retryable provider/model/route failure opens the circuit for
+      // the resolved route, so the next spawn through this key skips straight
+      // to the user-approved fallback chain. Transient failures (rate limit,
+      // connection) and user cancellations never record — see
+      // circuitOpeningErrorCode.
+      recordCircuitFailure = (error: unknown): void => {
+        if (spawnRoute === undefined) return;
+        const code = circuitOpeningErrorCode(error);
+        if (code !== undefined) {
+          this.subagentCircuit.openCircuit(
+            spawnRoute.circuitKey,
+            subagentRouteIdentity(spawnRoute.route),
+            code,
+          );
+        }
+      };
       try {
         const binding = resolveSubagentBinding(
           this.config,
@@ -349,6 +373,7 @@ export class SubagentTool implements ISubagentTool {
           log: this.log,
         });
       } catch (error) {
+        recordCircuitFailure(error);
         releasePoolSlot?.();
         releasePoolSlot = undefined;
         throw error;
@@ -371,6 +396,7 @@ export class SubagentTool implements ISubagentTool {
         { signal: controller.signal },
       );
     } catch (error) {
+      recordCircuitFailure(error);
       releasePoolSlot?.();
       releasePoolSlot = undefined;
       throw error;
@@ -383,7 +409,13 @@ export class SubagentTool implements ISubagentTool {
         controller.abort(reason);
       },
     });
-    const completion = mirrored.then((r) => ({ result: r.summary, usage: r.usage }));
+    const completion = mirrored.then(
+      (r) => ({ result: r.summary, usage: r.usage }),
+      (error: unknown) => {
+        recordCircuitFailure(error);
+        throw error;
+      },
+    );
     if (releasePoolSlot === undefined) {
       return { agentId, profileName, completion };
     }

@@ -97,6 +97,14 @@ type ActiveAttempt<T> = {
   cleanup: () => void;
   ready: boolean;
   timedOut: boolean;
+  /**
+   * Set once the launcher has returned a run handle. Attempts still inside
+   * the launcher (e.g. queued on a route-pool slot) stay in `active` for
+   * lifecycle/abort purposes but do NOT count against the concurrency
+   * capacities — otherwise a pool-queued spawn and a rate-limit retry whose
+   * pool slot it is waiting for deadlock each other across layers.
+   */
+  launched: boolean;
 };
 
 export type AgentRunBatchOptions = {
@@ -222,7 +230,25 @@ export class AgentRunBatch<T> {
   }
 
   private isAtConcurrencyLimit(): boolean {
+    // Normal phase counts every active attempt, including ones still inside
+    // the launcher (route pool queue): spawn calls in flight must not
+    // oversubscribe the batch cap. Only the rate-limit capacity checks
+    // exclude launcher-queued attempts (runningCount) to avoid the
+    // cross-layer deadlock where a saturated pool starves retry scheduling.
     return this.maxConcurrency !== undefined && this.active.size >= this.maxConcurrency;
+  }
+
+  /**
+   * Attempts that have come back from the launcher with a run handle — the
+   * ones actually occupying provider/agent capacity. Attempts still queued
+   * inside the launcher (route pool) are excluded.
+   */
+  private runningCount(): number {
+    let count = 0;
+    for (const attempt of this.active) {
+      if (attempt.launched) count += 1;
+    }
+    return count;
   }
 
   private scheduleRateLimitLaunch(): void {
@@ -231,7 +257,7 @@ export class AgentRunBatch<T> {
 
     const now = Date.now();
     this.recoverRateLimitCapacity(now);
-    if (this.active.size >= this.rateLimitCapacity) {
+    if (this.runningCount() >= this.rateLimitCapacity) {
       this.scheduleRateLimitWakeup(this.nextRateLimitCapacityRecoveryAt(), now);
       return;
     }
@@ -261,6 +287,7 @@ export class AgentRunBatch<T> {
       cleanup: () => {},
       ready: false,
       timedOut: false,
+      launched: false,
     };
     attempt.cleanup = this.linkAttemptSignals(attempt, state.task);
     this.active.add(attempt);
@@ -312,6 +339,7 @@ export class AgentRunBatch<T> {
     }
 
     attempt.state.agentId = handle.agentId;
+    attempt.launched = true;
     try {
       const completion = await handle.completion;
       return {
@@ -501,7 +529,7 @@ export class AgentRunBatch<T> {
     if (this.pending.length === 0) return;
 
     const nextWakeupAt =
-      this.active.size >= this.rateLimitCapacity
+      this.runningCount() >= this.rateLimitCapacity
         ? this.nextRateLimitCapacityRecoveryAt()
         : Math.min(
             Math.max(this.nextRateLimitLaunchAt, this.nextPendingReadyAt()),
@@ -600,8 +628,11 @@ export class AgentRunBatch<T> {
     const abortFromTask = () => {
       attempt.controller.abort(task.signal?.reason);
     };
+    // `0` means "no timeout" (print mode fills it as "effectively unbounded";
+    // v1 semantics: `0` arms no timer) — arming setTimeout with 0 would fire
+    // immediately and kill the attempt before the launcher returns.
     const timeout =
-      task.timeout === undefined
+      task.timeout === undefined || task.timeout <= 0
         ? undefined
         : setTimeout(() => {
             attempt.timedOut = true;

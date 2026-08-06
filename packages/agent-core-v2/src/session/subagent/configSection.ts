@@ -9,7 +9,10 @@
  * backend/model/thinking_effort route, and `[[subagent.pools.<profile>]]`
  * declares a pool of weighted routes rotated per spawn (resolution lives in
  * `routing.ts`; both need the deep snake_case conversion in
- * `subagentFromToml`/`subagentToToml`). While
+ * `subagentFromToml`/`subagentToToml`). `fallback_chain` declares the
+ * user-approved fallback routes tried, in order, when a route's circuit is
+ * open (R-A2/Case 8; its entries have no snake_case keys, so the shallow
+ * default conversion suffices). While
  * the env var is set, `stripEnvBoundFields` restores the env-free raw value
  * before persistence, so the override never leaks into `config.toml`. Per-run
  * timeouts resolve through `resolveSubagentTimeoutMs`, and the timeout
@@ -99,6 +102,14 @@ export const SubagentPoolRouteSchema = z.object({
 
 export type SubagentPoolRoute = z.infer<typeof SubagentPoolRouteSchema>;
 
+/** R-A2: one entry in the user-approved fallback chain tried, in order, when a route's circuit is open. */
+export const SubagentFallbackRouteSchema = z.object({
+  backend: z.string().min(1),
+  model: z.string().min(1).optional(),
+});
+
+export type SubagentFallbackRoute = z.infer<typeof SubagentFallbackRouteSchema>;
+
 export const SubagentConfigSchema = z.object({
   timeoutMs: z.number().int().min(0).optional(),
   routing: z.record(z.string().min(1), SubagentRoutingSchema).optional(),
@@ -108,6 +119,15 @@ export const SubagentConfigSchema = z.object({
    * routes instead of the single `routing` entry.
    */
   pools: z.record(z.string().min(1), z.array(SubagentPoolRouteSchema).min(1)).optional(),
+  /**
+   * Ordered list of pre-approved fallback routes tried, in sequence, when
+   * the normally-resolved route's circuit is open (R-A2/Case 8). Model
+   * replacement after a non-retryable provider/model/route failure must
+   * never be an autonomous choice made at request time — this is the user's
+   * advance approval for exactly which routes may be substituted, and in
+   * what order.
+   */
+  fallbackChain: z.array(SubagentFallbackRouteSchema).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
@@ -118,7 +138,9 @@ export const SUBAGENT_TIMEOUT_ENV = 'KIMI_SUBAGENT_TIMEOUT_MS';
 
 function parseTimeoutMsEnv(raw: string): number | undefined {
   const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
+  // `0` is meaningful ("no timeout", v1 parity) — only reject non-integers
+  // and negatives.
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 export const subagentEnvBindings: EnvBindings<SubagentConfig> = envBindings(

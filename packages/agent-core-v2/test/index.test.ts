@@ -38,6 +38,7 @@ const V1_RECORD_TYPES: ReadonlySet<string> = new Set([
   'config.update',
   'permission.set_mode',
   'permission.record_approval_result',
+  'dispatch_mode.set',
   'full_compaction.begin',
   'full_compaction.cancel',
   'full_compaction.complete',

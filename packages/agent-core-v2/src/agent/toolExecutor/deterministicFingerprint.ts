@@ -1,0 +1,166 @@
+/**
+ * `toolExecutor` domain — deterministic failure fingerprinting (ported from
+ * v1 `agent/turn/deterministic-fingerprint.ts`, including `c58df026b`'s
+ * success-invalidation).
+ *
+ * Pre-flight guard against re-running a tool call whose (toolName, args)
+ * pair already failed for a reason that cannot change between calls: the
+ * filesystem shape at the given path. Complements the tool-call deduplicator
+ * (which only suppresses same-*step* identical re-execution but still lets
+ * cross-step repeats really run); this blocks *before* execution, for the
+ * lifetime of the owning Agent — not reset each turn or step. Because a
+ * path-shape failure reflects filesystem state (which mutations can change),
+ * successful Write/Edit/Bash calls invalidate affected records via
+ * `invalidateOnSuccess`.
+ */
+
+import { resolve, sep } from 'node:path';
+
+import { canonicalTelemetryArgs, isPlainRecord } from '#/_base/utils/canonical-args';
+import type { ExecutableToolResult } from '#/tool/toolContract';
+
+export type DeterministicErrorCode = 'EISDIR' | 'ENOENT' | 'ENOTDIR';
+
+interface DeterministicPattern {
+  readonly code: DeterministicErrorCode;
+  readonly test: (output: string) => boolean;
+}
+
+/**
+ * Builtin file tools -> path-shape error patterns. `ExecutableToolResult`
+ * has no structured error-code field, so these tools'
+ * ENOENT/ENOTDIR/EISDIR-equivalent conditions are recognized from their own
+ * fixed, quoted-path error strings instead (the v2 read/write/edit/glob
+ * tools emit the same fixed strings as v1 — verified at port time). Any
+ * tool not listed here, or an error message that doesn't match, is treated
+ * as non-deterministic and is never fingerprinted — under-detecting is
+ * safe, over-detecting would wrongly block a call that could actually
+ * succeed on retry.
+ */
+const DETERMINISTIC_PATTERNS: Record<string, readonly DeterministicPattern[]> = {
+  Read: [
+    { code: 'ENOENT', test: (o) => /^".*" does not exist\.$/.test(o) },
+    { code: 'EISDIR', test: (o) => /^".*" is not a file\.$/.test(o) },
+  ],
+  Write: [{ code: 'ENOENT', test: (o) => o.endsWith('parent directory does not exist.') }],
+  Edit: [{ code: 'EISDIR', test: (o) => o.endsWith(' is not a file.') }],
+  Glob: [
+    { code: 'ENOENT', test: (o) => o.endsWith('does not exist') },
+    { code: 'ENOTDIR', test: (o) => o.endsWith('is not a directory') },
+  ],
+};
+
+function outputText(result: ExecutableToolResult): string {
+  if (typeof result.output === 'string') return result.output;
+  return result.output
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('');
+}
+
+function classifyDeterministicError(
+  toolName: string,
+  result: ExecutableToolResult,
+): DeterministicErrorCode | undefined {
+  if (result.isError !== true) return undefined;
+  const patterns = DETERMINISTIC_PATTERNS[toolName];
+  if (patterns === undefined) return undefined;
+  const text = outputText(result);
+  for (const pattern of patterns) {
+    if (pattern.test(text)) return pattern.code;
+  }
+  return undefined;
+}
+
+function makeKey(toolName: string, args: unknown): string {
+  return `${toolName} ${canonicalTelemetryArgs(args)}`;
+}
+
+interface RecordedFailure {
+  readonly code: DeterministicErrorCode;
+  readonly output: string;
+  /**
+   * Normalized absolute paths this failure depends on (e.g. the `path` arg).
+   * A successful mutation touching any of them (or their ancestors) makes the
+   * record stale. Empty when the args carry no usable path.
+   */
+  readonly paths: readonly string[];
+}
+
+/** Tools whose successful execution can create/move filesystem entries. */
+const PATH_MUTATING_TOOLS = new Set(['Write', 'Edit']);
+
+function extractPaths(args: unknown): readonly string[] {
+  if (!isPlainRecord(args)) return [];
+  const p = args['path'];
+  if (typeof p !== 'string' || p.length === 0) return [];
+  // Both record-time and invalidate-time paths go through the same base, so
+  // `./src/x` and `src/x` normalize to the same key even if the tool's real
+  // cwd differs from process.cwd().
+  return [resolve(p)];
+}
+
+function pathCovers(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
+}
+
+export class DeterministicFailureFingerprint {
+  private readonly failures = new Map<string, RecordedFailure>();
+
+  /**
+   * Called from the tool-execution pre-flight. Returns a synthetic blocked
+   * result if this exact call already produced a recorded deterministic
+   * failure; otherwise `null` so the normal execution path proceeds.
+   */
+  checkFingerprint(toolName: string, args: unknown): ExecutableToolResult | null {
+    const key = makeKey(toolName, args);
+    const prior = this.failures.get(key);
+    if (prior === undefined) return null;
+    return {
+      isError: true,
+      output:
+        `Blocked: this exact ${toolName} call already failed with a ${prior.code} condition that ` +
+        `will not change on retry (${prior.output}). Change the input instead of repeating the call.`,
+    };
+  }
+
+  /**
+   * Called on finalized error results. Records the fingerprint only when the
+   * result classifies as a deterministic path-shape failure; transient
+   * failures (EBUSY, network errors, ...) are intentionally never recorded.
+   */
+  recordIfDeterministic(toolName: string, args: unknown, result: ExecutableToolResult): void {
+    const code = classifyDeterministicError(toolName, result);
+    if (code === undefined) return;
+    this.failures.set(makeKey(toolName, args), {
+      code,
+      output: outputText(result),
+      paths: extractPaths(args),
+    });
+  }
+
+  /**
+   * Called on finalized successful results. A path-shape failure is a
+   * function of the filesystem, not of (toolName, args): once a mutation
+   * succeeds, recorded failures depending on the affected paths may no
+   * longer hold and must be dropped so a later call really runs (e.g.
+   * Read ENOENT -> Write creates the file -> Read must not stay blocked).
+   * Bash can mutate arbitrarily (mkdir/touch/mv/chmod/git), so any
+   * successful Bash call invalidates everything.
+   */
+  invalidateOnSuccess(toolName: string, args: unknown): void {
+    if (this.failures.size === 0) return;
+    if (toolName === 'Bash') {
+      this.failures.clear();
+      return;
+    }
+    if (!PATH_MUTATING_TOOLS.has(toolName)) return;
+    const targets = extractPaths(args);
+    if (targets.length === 0) return;
+    for (const [key, failure] of this.failures) {
+      if (failure.paths.some((p) => targets.some((t) => pathCovers(p, t)))) {
+        this.failures.delete(key);
+      }
+    }
+  }
+}

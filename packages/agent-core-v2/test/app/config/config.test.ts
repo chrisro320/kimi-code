@@ -1688,6 +1688,10 @@ describe('subagent config section', () => {
     env[SUBAGENT_TIMEOUT_ENV] = '3000';
     expect(resolveSubagentTimeoutMs(config)).toBe(3000);
 
+    // `0` means "no timeout" (v1 parity), not "fall back to the default".
+    env[SUBAGENT_TIMEOUT_ENV] = '0';
+    expect(resolveSubagentTimeoutMs(config)).toBe(0);
+
     disposables.dispose();
   });
 
@@ -1698,6 +1702,20 @@ describe('subagent config section', () => {
 
     env[SUBAGENT_TIMEOUT_ENV] = '7000';
     expect(resolveSubagentTimeoutMs(config)).toBe(7000);
+
+    disposables.dispose();
+  });
+
+  it('reads fallback_chain from config.toml', async () => {
+    const env: Record<string, string> = {};
+    const { config, disposables } = await createConfig(
+      env,
+      '[subagent]\nfallback_chain = [{ backend = "kimi", model = "fast" }, { backend = "kimi" }]\n',
+    );
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION)?.fallbackChain).toEqual([
+      { backend: 'kimi', model: 'fast' },
+      { backend: 'kimi' },
+    ]);
 
     disposables.dispose();
   });

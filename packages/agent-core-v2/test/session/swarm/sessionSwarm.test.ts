@@ -51,6 +51,15 @@ import {
 } from '#/session/swarm/agentRunBatch';
 import { ISessionSwarmService, type SessionSwarmSpawnTask, type SessionSwarmTask } from '#/session/swarm/sessionSwarm';
 import { Error2 } from '#/_base/errors/errors';
+import { ErrorCodes } from '#/errors';
+import type { IConfigService } from '#/app/config/config';
+import { MODELS_SECTION } from '#/app/kosongConfig/configSection';
+import { SUBAGENT_SECTION } from '#/session/subagent/configSection';
+import {
+  ISessionSubagentCircuitService,
+  SessionSubagentCircuitService,
+} from '#/session/subagent/circuitService';
+import { SessionSubagentRoutingService } from '#/session/subagent/routingService';
 import { ConfigErrors } from '#/app/config/errors';
 import { SessionSwarmService } from '#/session/swarm/sessionSwarmService';
 
@@ -1405,6 +1414,84 @@ describe('SessionSwarmService metadata compatibility', () => {
     }
   });
 
+  it('schedules the rate-limit retry while another spawn is queued on the saturated pool', async () => {
+    vi.useFakeTimers();
+    try {
+      agents['agent-pooled'] = {
+        labels: { parentAgentId: 'main' },
+      };
+      // Cross-layer deadlock (D-B5R-8): real pool maxConcurrency=1 — B is
+      // stuck in acquireQueued inside the launcher while A's rate-limit
+      // retry waits for rateLimitCapacity. Pre-fix B's attempt still counts
+      // as `active` (capacity 1), so the retry is never scheduled.
+      const pool = new SubagentRoutePool([
+        { backend: 'kimi', model: 'provider/routed', maxConcurrency: 1 },
+      ]);
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      resolveSpawnRoute.mockImplementation(async () => {
+        const acquired = await pool.acquireQueued();
+        const release = vi.fn(acquired.release);
+        releases.push(release);
+        return {
+          route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+          releasePoolSlot: release,
+        };
+      });
+      let created = 0;
+      createAgent.mockImplementation(async (opts: CreateAgentOptions = {}) => {
+        created += 1;
+        const id = created === 1 ? 'agent-pooled' : 'agent-queued';
+        const handle = agentHandle(id, lifecycle, eventBus, {
+          profileName: opts.binding?.profile ?? 'coder',
+          modelAlias: opts.binding?.model ?? 'kimi-test',
+          thinkingLevel: opts.binding?.thinking ?? 'medium',
+        });
+        handles.set(id, handle);
+        return handle;
+      });
+      const rateLimited = createControlledPromise<{ summary: string }>();
+      runAgent.mockImplementation((agentId: string, request: unknown, options: { onReady?: () => void } | undefined) => {
+        options?.onReady?.();
+        if (agentId === 'agent-pooled') {
+          const kind = (request as { kind?: string }).kind;
+          if (kind === 'retry') {
+            return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'recovered' }) };
+          }
+          return { agentId, turn: {} as never, completion: rateLimited };
+        }
+        return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'ok' }) };
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [spawnSessionTask('src/a.ts'), spawnSessionTask('src/b.ts')],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      // The slot stays held across the requeue…
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).not.toHaveBeenCalled();
+      // …the retry is still scheduled despite B queueing on the pool, A
+      // recovers and releases, B follows.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(0);
+      const results = await running;
+
+      expect(results).toMatchObject([
+        { status: 'completed', result: 'recovered' },
+        { status: 'completed', result: 'ok' },
+      ]);
+      expect(resolveSpawnRoute).toHaveBeenCalledTimes(2);
+      expect(releases).toHaveLength(2);
+      expect(releases[0]).toHaveBeenCalledOnce();
+      expect(releases[1]).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('releases the pool slot when subagents.run rejects before the run starts', async () => {
     // Real pool, maxConcurrency 1: the second spawn queues behind the first,
     // so this deadlocks without the observe() early-failure release.
@@ -1500,6 +1587,238 @@ describe('SessionSwarmService metadata compatibility', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not arm the per-task timer when the task timeout is 0 (print mode)', async () => {
+    vi.useFakeTimers();
+    try {
+      // Print mode fills `[subagent] timeout_ms = 0` as "effectively
+      // unbounded"; arming setTimeout with 0 aborts the attempt before the
+      // launcher returns ("Subagent timed out." / not_started). The stub
+      // honors the attempt signal so the abort is observable.
+      const controlled = createControlledPromise<{ summary: string }>();
+      runAgent.mockImplementation(
+        (agentId: string, _request: unknown, options: { onReady?: () => void; signal?: AbortSignal } | undefined) => {
+          options?.onReady?.();
+          const completion = new Promise<{ summary: string }>((resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => reject(new Error('Aborted')), {
+              once: true,
+            });
+            controlled.then(resolve, reject);
+          });
+          return { agentId, turn: {} as never, completion };
+        },
+      );
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [{ ...spawnSessionTask('src/a.ts'), timeout: 0 }],
+      });
+      // A real run always takes at least one macrotask; a wrongly armed 0ms
+      // timer fires here and aborts the attempt.
+      await vi.advanceTimersByTimeAsync(0);
+      controlled.resolve({ summary: 'ok' });
+      const results = await running;
+
+      expect(results).toMatchObject([{ status: 'completed' }]);
+      expect(results[0]).not.toMatchObject({ error: 'Subagent timed out.' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // R-C1 risk gate wiring: an editing-capable batch at/above the concurrency
+  // threshold is silently serialized (maxConcurrency forced to 1); below the
+  // threshold or read-only, the batch schedule is untouched. v2 tasks carry
+  // no dispatch scope yet, so only the threshold signal is live.
+  describe('risk gate (R-C1)', () => {
+    function stubEditingCapableCatalog(): void {
+      ix.stub(ISessionAgentProfileCatalog, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        get: (name: string) =>
+          name === 'coder'
+            ? normalizeAgentProfile({
+                name: 'coder',
+                tools: ['Write', 'Edit'],
+                systemPrompt: () => '',
+              })
+            : undefined,
+        getDefault: () =>
+          normalizeAgentProfile({ name: 'agent', tools: [], systemPrompt: () => '' }),
+        list: () => [],
+      });
+    }
+
+    function controlledRuns(): {
+      completions: Array<ReturnType<typeof createControlledPromise<{ summary: string }>>>;
+    } {
+      const completions: Array<ReturnType<typeof createControlledPromise<{ summary: string }>>> =
+        [];
+      runAgent.mockImplementation(
+        (agentId: string, _request: unknown, options?: { onReady?: () => void }) => {
+          options?.onReady?.();
+          const completion = createControlledPromise<{ summary: string }>();
+          completions.push(completion);
+          return { agentId, turn: {} as never, completion };
+        },
+      );
+      return { completions };
+    }
+
+    function spawnTasks(count: number): SessionSwarmSpawnTask[] {
+      return Array.from({ length: count }, (_, index) => ({
+        ...spawnSessionTask(`src/f${String(index)}.ts`),
+        swarmIndex: index + 1,
+      }));
+    }
+
+    it('serializes an editing-capable batch at the concurrency threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        stubEditingCapableCatalog();
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(4) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(1);
+
+        completions[0]!.resolve({ summary: 'one' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(2);
+
+        completions[1]!.resolve({ summary: 'two' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(3);
+
+        completions[2]!.resolve({ summary: 'three' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(4);
+
+        completions[3]!.resolve({ summary: 'four' });
+        await expect(running).resolves.toMatchObject([
+          { status: 'completed' },
+          { status: 'completed' },
+          { status: 'completed' },
+          { status: 'completed' },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not serialize an editing-capable batch below the threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        stubEditingCapableCatalog();
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(3) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(3);
+
+        for (const completion of completions) completion.resolve({ summary: 'done' });
+        await expect(running).resolves.toHaveLength(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not serialize a read-only batch even above the threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        // Default catalog stub: coder has `tools: []` — not editing-capable.
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(5) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(5);
+
+        for (const completion of completions) completion.resolve({ summary: 'done' });
+        await expect(running).resolves.toHaveLength(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // R-A2 circuit breaker, end to end across services. The unit tests on either
+  // side open the circuit by hand with a literal key, so nothing covered the
+  // seam: a real spawn failure flowing through `recordCircuitFailure` into the
+  // session-scoped circuit, and the *next* spawn resolving to the fallback
+  // chain because of it. Both services are real here — only the run fails.
+  describe('circuit breaker (R-A2) end to end', () => {
+    function realRouting(): void {
+      const config = {
+        get: ((domain: string) =>
+          ({
+            [MODELS_SECTION]: {
+              fast: { provider: 'local', model: 'fast-model' },
+              precise: { provider: 'local', model: 'precise-model' },
+            },
+            [SUBAGENT_SECTION]: {
+              routing: { coder: { model: 'fast' } },
+              fallbackChain: [{ backend: 'kimi', model: 'precise' }],
+            },
+          })[domain]) as IConfigService['get'],
+      } as unknown as IConfigService;
+      // The swarm records failures against the circuit it gets injected, while
+      // routing reads the one it was constructed with. In production the
+      // Session scope hands both the same instance; sharing it here is what
+      // makes this an integration test rather than two isolated stubs.
+      const circuit = new SessionSubagentCircuitService();
+      ix.stub(ISessionSubagentCircuitService, circuit);
+      ix.stub(
+        ISessionSubagentRoutingService,
+        new SessionSubagentRoutingService(config, circuit),
+      );
+    }
+
+    function modelOfCreateCall(index: number): unknown {
+      return (createAgent.mock.calls[index]?.[0] as { binding?: { model?: unknown } } | undefined)
+        ?.binding?.model;
+    }
+
+    it('opens the circuit from a real spawn failure and takes the fallback next time', async () => {
+      realRouting();
+      const service = ix.get(ISessionSwarmService);
+
+      // First batch: the run rejects with a non-retryable route failure.
+      runAgent.mockImplementationOnce(() => {
+        throw new Error2(ErrorCodes.PROVIDER_AUTH_ERROR, 'auth rejected');
+      });
+      const first = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(first).toMatchObject([{ status: 'failed' }]);
+      expect(modelOfCreateCall(0)).toBe('fast');
+
+      // Second batch: the circuit opened above must divert this spawn onto the
+      // fallback chain. The circuit is session-scoped, so it survives the batch.
+      const second = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(second).toMatchObject([{ status: 'completed' }]);
+      expect(modelOfCreateCall(1)).toBe('precise');
+    });
+
+    it('leaves the route intact when the failure is transient', async () => {
+      realRouting();
+      const service = ix.get(ISessionSwarmService);
+
+      runAgent.mockImplementationOnce(() => {
+        throw new APIProviderRateLimitError('rate limited');
+      });
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      // A rate limit is not a route defect: the next spawn stays on `fast`.
+      const second = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(second).toMatchObject([{ status: 'completed' }]);
+      expect(modelOfCreateCall(1)).toBe('fast');
+    });
   });
 });
 

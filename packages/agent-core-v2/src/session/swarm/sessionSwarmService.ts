@@ -17,7 +17,11 @@
  * pool slot is acquired per spawn and released when the agent's run settles,
  * held across provider-rate-limit retries of the same agent. Spawn
  * bindings are resolved through the model catalog before lifecycle allocation.
- * Resumed agents keep the model recorded in their own wire journal — with
+ * Before honoring the configured concurrency cap, the R-C1 risk gate
+ * (`subagent/risk.ts`) may silently force the batch's `maxConcurrency` to 1
+ * when the batch itself looks risky (too many concurrent editing-capable
+ * spawns; the scope-based signals stay inert until B6 adds dispatch
+ * scopes). Resumed agents keep the model recorded in their own wire journal — with
  * per-subagent models there is no "child follows the parent's current model"
  * invariant to enforce. Bound at Session scope.
  */
@@ -47,6 +51,14 @@ import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAg
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
 import { wrapSubagentModelError } from '#/session/subagent/configSection';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
+import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
+import { isEditingCapableProfile } from '#/agent/dispatch/profile';
+import {
+  DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+  resolveEffectiveMaxConcurrency,
+  type RiskCheckItem,
+} from '#/session/subagent/risk';
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
@@ -95,6 +107,13 @@ export class SessionSwarmService implements ISessionSwarmService {
    */
   private readonly poolSlots = new Map<string, () => void>();
 
+  /**
+   * R-A2 (Case 8) circuit keys of routed swarm spawns, keyed by child agent
+   * id. Unlike pool slots these are never swept: circuit state must outlive
+   * the batch so a later spawn skips the known-dead route.
+   */
+  private readonly circuitEntries = new Map<string, { readonly key: string; readonly identity: string }>();
+
   constructor(
     @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
@@ -106,7 +125,17 @@ export class SessionSwarmService implements ISessionSwarmService {
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionSubagentRoutingService
     private readonly subagentRouting: ISessionSubagentRoutingService,
+    @ISessionSubagentCircuitService
+    private readonly subagentCircuit: ISessionSubagentCircuitService,
   ) {}
+
+  /** Records `error` against the agent's circuit when it is a non-retryable route failure. */
+  private recordCircuitFailure(agentId: string, error: unknown): void {
+    const entry = this.circuitEntries.get(agentId);
+    if (entry === undefined) return;
+    const code = circuitOpeningErrorCode(error);
+    if (code !== undefined) this.subagentCircuit.openCircuit(entry.key, entry.identity, code);
+  }
 
   async getSwarmItem(args: {
     readonly callerAgentId: string;
@@ -118,7 +147,7 @@ export class SessionSwarmService implements ISessionSwarmService {
     return subagentSwarmItem(meta);
   }
 
-  run<T>(args: SessionSwarmRunArgs<T>): Promise<readonly SessionSwarmRunResult<T>[]> {
+  async run<T>(args: SessionSwarmRunArgs<T>): Promise<readonly SessionSwarmRunResult<T>[]> {
     const { callerAgentId, tasks } = args;
     const controller = new AbortController();
     this.inFlight.set(callerAgentId, controller);
@@ -141,7 +170,10 @@ export class SessionSwarmService implements ISessionSwarmService {
         });
       },
     };
-    const maxConcurrency = resolveSwarmMaxConcurrency();
+    const maxConcurrency = await this.resolveRiskAwareMaxConcurrency(
+      tasks,
+      resolveSwarmMaxConcurrency(),
+    );
     const promise = new AgentRunBatch(launcher, linkedTasks, { maxConcurrency }).run();
     void promise.finally(() => {
       for (const unlink of unlinks) unlink();
@@ -152,6 +184,49 @@ export class SessionSwarmService implements ISessionSwarmService {
       for (const agentId of batchPoolAgents) this.releasePoolSlotFor(agentId);
     });
     return promise;
+  }
+
+  /**
+   * R-C1 (Case 9) risk gate: before honoring the configured concurrency cap,
+   * check whether this batch itself looks risky (dirty scope, too many
+   * concurrent editors, or file-family overlap — see `subagent/risk.ts`) and
+   * silently force `maxConcurrency` to 1 if so. No ask, no turn interruption:
+   * the model's AgentSwarm call is unaffected, the batch just runs slower.
+   * A read-only batch (no editing-capable item) skips detection entirely.
+   *
+   * v2 has no per-task dispatch scope yet (ownership mutual exclusion lands
+   * with B6 worktree isolation), so `scope` is always `undefined` and the
+   * dirty-scope / file-family signals cannot trigger — only the concurrency
+   * threshold is live. A detector hiccup degrades to the configured value
+   * rather than failing an otherwise-legitimate dispatch (Case 10).
+   */
+  private async resolveRiskAwareMaxConcurrency<T>(
+    tasks: readonly SessionSwarmTask<T>[],
+    configured: number | undefined,
+  ): Promise<number | undefined> {
+    try {
+      await this.catalog.ready;
+      const items: RiskCheckItem[] = tasks.map((task) => {
+        const profile = this.catalog.get(task.profileName);
+        // An unresolvable profile is not this function's problem to report;
+        // treat it as non-editing (v1 parity) so risk detection degrades
+        // safely instead of throwing ahead of the spawn's own
+        // profile-resolution error. A profile without an explicit tool list
+        // inherits the full default tool set, which includes Write/Edit —
+        // editing-capable.
+        const isEditingCapable =
+          profile === undefined
+            ? false
+            : profile.tools === undefined || isEditingCapableProfile({ tools: profile.tools });
+        return { isEditingCapable, scope: undefined };
+      });
+      return await resolveEffectiveMaxConcurrency(items, configured, {
+        workspaceDir: this.sessionContext.cwd,
+        concurrencyThreshold: DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+      });
+    } catch {
+      return configured;
+    }
   }
 
   cancel({ callerAgentId }: { readonly callerAgentId: string }): void {
@@ -189,6 +264,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       options.signal,
     );
     let releasePoolSlot = spawnRoute?.releasePoolSlot;
+    let childId: string | undefined;
     try {
       const binding = options.binding ?? {
         model: callerData.modelAlias,
@@ -214,6 +290,13 @@ export class SessionSwarmService implements ISessionSwarmService {
         });
       } catch (error) {
         throw wrapSubagentModelError(error, final.model, callerData.modelAlias);
+      }
+      childId = child.id;
+      if (spawnRoute !== undefined) {
+        this.circuitEntries.set(child.id, {
+          key: spawnRoute.circuitKey,
+          identity: subagentRouteIdentity(spawnRoute.route),
+        });
       }
       child.accessor
         .get(IAgentPermissionModeService)
@@ -250,6 +333,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         options,
       );
     } catch (error) {
+      if (childId !== undefined) this.recordCircuitFailure(childId, error);
       releasePoolSlot?.();
       throw error;
     }
@@ -301,6 +385,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       // The run never started, so no completion handler will ever fire —
       // a held pool slot would leak here and eventually deadlock the batch
       // behind `acquireQueued` (the per-batch sweep only runs at settle).
+      this.recordCircuitFailure(agentId, error);
       this.releasePoolSlotFor(agentId);
       throw error;
     }
@@ -310,7 +395,17 @@ export class SessionSwarmService implements ISessionSwarmService {
       suppressRateLimitFailureEvent: options.suppressRateLimitFailureEvent,
       signal: options.signal,
     });
-    const completion = mirrored.then((r) => ({ result: r.summary, usage: r.usage }));
+    const completion = mirrored.then(
+      (r) => ({ result: r.summary, usage: r.usage }),
+      (error: unknown) => {
+        // R-A2 (Case 8): record before the rate-limit branch below — a
+        // rate-limit rejection never opens the circuit
+        // (circuitOpeningErrorCode filters it), so requeued retries are
+        // unaffected.
+        this.recordCircuitFailure(agentId, error);
+        throw error;
+      },
+    );
     if (!this.poolSlots.has(agentId)) {
       return { agentId, profileName, completion };
     }

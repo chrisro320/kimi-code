@@ -12,7 +12,12 @@
  * the spawn caller once the spawn reaches a terminal state (completion,
  * failure, or abort). When neither pool nor routing hits, resolution returns
  * `undefined` and the caller falls back to its existing binding path
- * unchanged. Bound at Session scope.
+ * unchanged. Before committing to a resolved route, the service consults the
+ * R-A2 circuit breaker (`ISessionSubagentCircuitService`): a route that
+ * already failed non-retryably is released again and replaced by the first
+ * circuit-closed entry of the user-approved `fallback_chain`; when every
+ * candidate is circuit-open the spawn is rejected with the full attempt
+ * history. Bound at Session scope.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -24,6 +29,8 @@ import {
   type SubagentConfig,
   type SubagentPoolRoute,
 } from './configSection';
+import { circuitFailureDescription, subagentRouteIdentity } from './circuit';
+import { ISessionSubagentCircuitService } from './circuitService';
 import {
   resolveRouteByNames,
   resolveSubagentRoute,
@@ -39,6 +46,13 @@ export interface ResolvedSpawnRoute {
    * settles (completion, failure, or abort) — never on every attempt.
    */
   readonly releasePoolSlot?: () => void;
+  /**
+   * R-A2 (Case 8) circuit key for this route. The spawn caller records
+   * non-retryable provider/model/route failures under this key through
+   * `ISessionSubagentCircuitService.openCircuit` so the next spawn skips
+   * straight to the fallback chain.
+   */
+  readonly circuitKey: string;
 }
 
 export interface ISessionSubagentRoutingService {
@@ -63,13 +77,60 @@ export class SessionSubagentRoutingService implements ISessionSubagentRoutingSer
 
   private readonly routePools = new Map<string, SubagentRoutePool>();
 
-  constructor(@IConfigService private readonly config: IConfigService) {}
+  constructor(
+    @IConfigService private readonly config: IConfigService,
+    @ISessionSubagentCircuitService private readonly circuit: ISessionSubagentCircuitService,
+  ) {}
 
   async resolveSpawnRoute(
     profileName: string,
     signal?: AbortSignal,
   ): Promise<ResolvedSpawnRoute | undefined> {
     const subagent = this.config.get<SubagentConfig | undefined>(SUBAGENT_SECTION);
+    const resolved = await this.resolveDefault(profileName, subagent, signal);
+    if (resolved === undefined) return undefined;
+
+    // R-A2 (Case 8): before committing to the normally-resolved route, check
+    // whether it already failed non-retryably. v2 has no dispatch-scope
+    // protocol (D-B5C-1), so the route identity doubles as the key (v1's
+    // scope-less path): a backend+model that already failed is skipped next
+    // time it comes up.
+    const resolvedIdentity = subagentRouteIdentity(resolved.route);
+    if (!this.circuit.isCircuitOpen(resolvedIdentity, resolvedIdentity)) {
+      return { ...resolved, circuitKey: resolvedIdentity };
+    }
+    resolved.releasePoolSlot?.();
+
+    const chain = subagent?.fallbackChain ?? [];
+    const attempts = [
+      circuitFailureDescription(
+        resolvedIdentity,
+        this.circuit.circuitFailure(resolvedIdentity)?.errorCode,
+      ),
+    ];
+    for (const candidate of chain) {
+      const candidateRoute = resolveRouteByNames(this.config, candidate.backend, candidate.model);
+      const candidateIdentity = subagentRouteIdentity(candidateRoute);
+      if (!this.circuit.isCircuitOpen(candidateIdentity, candidateIdentity)) {
+        return { route: candidateRoute, circuitKey: candidateIdentity };
+      }
+      attempts.push(
+        circuitFailureDescription(
+          candidateIdentity,
+          this.circuit.circuitFailure(candidateIdentity)?.errorCode,
+        ),
+      );
+    }
+    throw new Error(
+      `Dispatch rejected (circuit-open): every route in the fallback chain is circuit-open: ${attempts.join(' -> ')}`,
+    );
+  }
+
+  private async resolveDefault(
+    profileName: string,
+    subagent: SubagentConfig | undefined,
+    signal?: AbortSignal,
+  ): Promise<Omit<ResolvedSpawnRoute, 'circuitKey'> | undefined> {
     const poolRoutes = subagent?.pools?.[profileName];
     if (poolRoutes !== undefined && poolRoutes.length > 0) {
       const pool = this.getRoutePool(profileName, poolRoutes);

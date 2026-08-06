@@ -21,7 +21,7 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (48 record types)
+// Index (49 record types)
 //   config.update                      profile               persisted  src/agent/profile/profileOps.ts
 //   context.append_loop_event          contextMemory         persisted  src/agent/contextMemory/contextOps.ts
 //   context.append_message             contextMemory         persisted  src/agent/contextMemory/contextOps.ts
@@ -31,6 +31,7 @@
 //   cron.add                           cron                  transient  src/session/cron/cronOps.ts
 //   cron.cursor                        cron                  transient  src/session/cron/cronOps.ts
 //   cron.delete                        cron                  transient  src/session/cron/cronOps.ts
+//   dispatch_mode.set                  dispatchMode          persisted  src/agent/dispatch/dispatchOps.ts
 //   forked                             goal                  persisted  src/agent/goal/goalOps.ts
 //   full_compaction.begin              fullCompaction        persisted  src/agent/fullCompaction/compactionOps.ts
 //   full_compaction.cancel             fullCompaction        persisted  src/agent/fullCompaction/compactionOps.ts
@@ -198,6 +199,15 @@ interface CronCursorPayload {
 interface CronDeletePayload {
   _name: 'cron.delete';
   ids: string[];
+}
+
+/**
+ * model: dispatchMode · persisted · cross-reducers: dispatchMode.configured
+ * owner: src/agent/dispatch/dispatchOps.ts
+ */
+interface DispatchModeSetPayload {
+  _name: 'dispatch_mode.set';
+  mode: 'auto' | 'ask' | 'off';
 }
 
 /**
@@ -726,6 +736,7 @@ interface WirePayloadMap {
   "cron.add": CronAddPayload;
   "cron.cursor": CronCursorPayload;
   "cron.delete": CronDeletePayload;
+  "dispatch_mode.set": DispatchModeSetPayload;
   "forked": ForkedPayload;
   "full_compaction.begin": FullCompactionBeginPayload;
   "full_compaction.cancel": FullCompactionCancelPayload;
