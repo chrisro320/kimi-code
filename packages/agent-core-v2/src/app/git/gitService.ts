@@ -10,12 +10,19 @@
  * absolute `cwd` and already-confined repo-relative paths.
  */
 
-import type { FsDiffResponse, FsGitStatusResponse, FsPullRequest } from './git';
+import type {
+  FsDiffResponse,
+  FsGitStatusResponse,
+  FsPullRequest,
+  GitHeadEntry,
+  GitRepoInfo,
+} from './git';
 
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ErrorCodes, Error2 } from '#/errors';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
+import { isAbsolute, join, resolve } from 'pathe';
 
 import { IGitService } from './git';
 import { parseNumstat, parsePorcelain, parsePullRequest } from './gitParsers';
@@ -128,6 +135,123 @@ export class GitService implements IGitService {
     return findGitWorkTree(this.fs, cwd);
   }
 
+  async repoInfo(cwd: string): Promise<GitRepoInfo | null> {
+    const root = await this.runCommand('git', ['rev-parse', '--show-toplevel'], cwd);
+    if (root.exitCode !== 0 || root.stdout.trim().length === 0) return null;
+    const repoRoot = root.stdout.trim();
+    const common = await this.runCommand('git', ['rev-parse', '--git-common-dir'], repoRoot);
+    const commonRaw = common.stdout.trim();
+    const commonDir =
+      common.exitCode === 0 && commonRaw.length > 0
+        ? isAbsolute(commonRaw)
+          ? commonRaw
+          : resolve(repoRoot, commonRaw)
+        : join(repoRoot, '.git');
+    const head = await this.runCommand('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], repoRoot);
+    const headCommit = head.exitCode === 0 ? head.stdout.trim() : null;
+    return { repoRoot, commonDir, headCommit };
+  }
+
+  async createDetachedWorktree(
+    repoRoot: string,
+    worktreeRoot: string,
+    headCommit: string,
+  ): Promise<void> {
+    const res = await this.runCommand(
+      'git',
+      ['worktree', 'add', '--detach', worktreeRoot, headCommit],
+      repoRoot,
+    );
+    if (res.exitCode !== 0) {
+      throw this.gitUnavailable(
+        repoRoot,
+        res.stderr.trim() || `git worktree add exit ${res.exitCode}`,
+      );
+    }
+  }
+
+  async removeWorktree(repoRoot: string, worktreeRoot: string): Promise<void> {
+    const res = await this.runCommand(
+      'git',
+      ['worktree', 'remove', '--force', worktreeRoot],
+      repoRoot,
+    );
+    if (res.exitCode !== 0) {
+      await this.runCommand('git', ['worktree', 'prune'], repoRoot);
+    }
+  }
+
+  async diffChangedPaths(repoRoot: string): Promise<string[]> {
+    const res = await this.runCommand('git', ['diff', '--name-status', '-z', 'HEAD'], repoRoot);
+    if (res.exitCode !== 0) return [];
+    const tokens = res.stdout.split('\0').filter(Boolean);
+    const paths: string[] = [];
+    let index = 0;
+    while (index < tokens.length) {
+      const status = tokens[index++] ?? '';
+      const count = status.startsWith('R') || status.startsWith('C') ? 2 : 1;
+      for (let offset = 0; offset < count && index < tokens.length; offset += 1) {
+        const path = tokens[index++];
+        if (path !== undefined) paths.push(path);
+      }
+    }
+    return paths;
+  }
+
+  async untrackedPaths(repoRoot: string): Promise<string[]> {
+    const res = await this.runCommand(
+      'git',
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+      repoRoot,
+    );
+    if (res.exitCode !== 0) return [];
+    const paths: string[] = [];
+    for (const record of res.stdout.split('\0')) {
+      if (!record.startsWith('?? ')) continue;
+      const relPath = record.slice(3);
+      if (relPath.length > 0) paths.push(relPath);
+    }
+    return paths;
+  }
+
+  async trackedPaths(repoRoot: string): Promise<string[]> {
+    const res = await this.runCommand('git', ['ls-files', '-z'], repoRoot);
+    return res.exitCode === 0 ? res.stdout.split('\0').filter(Boolean) : [];
+  }
+
+  async headEntry(repoRoot: string, relPath: string): Promise<GitHeadEntry> {
+    const entry = await this.runCommand(
+      'git',
+      ['ls-files', '-s', '-z', 'HEAD', '--', relPath],
+      repoRoot,
+    );
+    if (entry.exitCode !== 0) {
+      return { kind: 'unreadable', error: `git ls-files: ${entry.stderr.trim() || 'failed'}` };
+    }
+    const record = entry.stdout.split('\0').find((token) => token.length > 0);
+    if (record === undefined) return { kind: 'absent' };
+    const match = /^(\d{6}) [0-9a-f]{40} \d\t/.exec(record);
+    if (match === null) {
+      return { kind: 'unreadable', error: `unparseable ls-files record for ${relPath}` };
+    }
+    const gitMode = match[1]!;
+    if (gitMode === '160000') {
+      return { kind: 'unreadable', error: `submodule gitlink is not supported: ${relPath}` };
+    }
+    const blob = await this.runCommandBytes('git', ['show', `HEAD:${relPath}`], repoRoot);
+    if (blob.exitCode !== 0) {
+      return { kind: 'unreadable', error: `git show: ${blob.stderr.trim() || 'failed'}` };
+    }
+    if (gitMode === '120000') {
+      return { kind: 'symlink', target: blob.stdout.toString('utf8') };
+    }
+    return {
+      kind: 'regular',
+      mode: gitMode === '100755' ? 0o100755 : 0o100644,
+      blob: blob.stdout,
+    };
+  }
+
   private async readPullRequest(cwd: string): Promise<FsPullRequest | null> {
     const cached = this.pullRequestCache.get(cwd);
     const now = Date.now();
@@ -209,11 +333,46 @@ export class GitService implements IGitService {
       details: { cwd, detail },
     });
   }
+
+  private async runCommandBytes(
+    cmd: string,
+    args: readonly string[],
+    cwd: string,
+  ): Promise<RunBytesResult> {
+    const spawned = await this.hostProcess
+      .spawn(cmd, args, { cwd })
+      .then(
+        (proc) => ({ ok: true as const, proc }),
+        () => ({ ok: false as const }),
+      );
+    if (!spawned.ok) {
+      return { exitCode: -1, stdout: Buffer.alloc(0), stderr: '' };
+    }
+    const { proc } = spawned;
+    const work = Promise.all([
+      collectBytes(proc.stdout),
+      collect(proc.stderr),
+      proc.wait().catch(() => -1),
+    ] as const);
+    work.catch(() => {});
+    try {
+      const [stdout, stderr, exitCode] = await work;
+      return { exitCode, stdout, stderr };
+    } finally {
+      proc.dispose();
+    }
+  }
 }
 
 interface RunResult {
   readonly exitCode: number;
   readonly stdout: string;
+  readonly stderr: string;
+}
+
+interface RunBytesResult {
+  readonly exitCode: number;
+  readonly stdout: Buffer;
   readonly stderr: string;
 }
 
@@ -230,6 +389,14 @@ async function collect(stream: AsyncIterable<Uint8Array | string>): Promise<stri
   }
   out += decoder.decode();
   return out;
+}
+
+async function collectBytes(stream: AsyncIterable<Uint8Array | string>): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  }
+  return Buffer.concat(chunks);
 }
 
 registerScopedService(LifecycleScope.App, IGitService, GitService, ScopeActivation.OnScopeCreated, 'git');
