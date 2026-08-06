@@ -13,6 +13,7 @@ import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile'
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
+import { IFlagService } from '#/app/flag/flag';
 import { normalizeAgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { APIProviderRateLimitError } from '#/kosong/contract/errors';
@@ -877,6 +878,14 @@ describe('SessionSwarmService metadata compatibility', () => {
       _serviceBrand: undefined,
       resolveSpawnRoute,
     } as unknown as ISessionSubagentRoutingService);
+    ix.stub(IFlagService, {
+      _serviceBrand: undefined,
+      // Worktree isolation is exercised by its own dedicated tests; these
+      // swarm tests must not be at the mercy of the ambient experimental
+      // environment (e.g. KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION
+      // inherited into the test process).
+      enabled: () => false,
+    } as unknown as IFlagService);
     ix.stub(IAgentLifecycleService, lifecycle);
     ix.stub(ISessionSubagentService, subagents);
     ix.stub(ISessionAgentProfileCatalog, {

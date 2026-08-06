@@ -17,7 +17,9 @@ export type TaskState =
   | 'failed'
   | 'timed_out'
   | 'killed'
-  | 'lost';
+  | 'lost'
+  | 'input_required'
+  | 'expansion_denied';
 
 export interface TranscriptTask {
   readonly taskId: TaskId;

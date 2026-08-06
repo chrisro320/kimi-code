@@ -790,7 +790,7 @@ export interface AgentStateSnapshot {
       } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'task';
         readonly taskId: string;
-        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
         readonly notificationId: string;
       } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'cron_job';
@@ -936,7 +936,7 @@ export interface AgentStateSnapshot {
     } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'task';
       readonly taskId: string;
-      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
       readonly notificationId: string;
     } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'cron_job';
@@ -1014,7 +1014,7 @@ export interface AgentStateSnapshot {
       } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'task';
         readonly taskId: string;
-        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
         readonly notificationId: string;
       } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'cron_job';
@@ -1203,7 +1203,7 @@ export interface AgentStateSnapshot {
     readonly toolCallId?: string;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1214,9 +1214,14 @@ export interface AgentStateSnapshot {
     readonly kind: 'agent';
     readonly agentId?: string;
     readonly subagentType?: string;
+    readonly candidate?: {
+      readonly hash: string;
+      readonly requestedScope: readonly string[];
+      readonly paths: readonly string[];
+    };
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1230,7 +1235,7 @@ export interface AgentStateSnapshot {
     readonly exitCode: number | null;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;

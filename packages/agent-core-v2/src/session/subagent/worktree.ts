@@ -1135,15 +1135,22 @@ function snapshotsEqual(left: PathSnapshot, right: PathSnapshot): boolean {
 function stateEqual(left: PathState, right: PathState): boolean {
   if (left.kind !== right.kind) return false;
   switch (left.kind) {
+    case 'regular':
+      // Git only tracks the owner-exec bit; other permission bits are umask
+      // noise that would falsely flag an untouched file as diverged when one
+      // side of the comparison comes from a HEAD blob (mode 644/755) and the
+      // other from a stat (e.g. 664 under umask 002).
+      return left.sha256 === (right as typeof left).sha256 &&
+        (left.mode & 0o170000) === ((right as typeof left).mode & 0o170000) &&
+        (left.mode & 0o100) === ((right as typeof left).mode & 0o100);
+    case 'symlink':
+      // Symlink modes are not portable or reliably settable; the target is the state.
+      return left.target === (right as typeof left).target;
     case 'absent':
     case 'special':
       return true;
-    case 'regular':
-      return left.mode === (right as typeof left).mode && left.sha256 === (right as typeof left).sha256;
     case 'directory':
       return left.mode === (right as typeof left).mode;
-    case 'symlink':
-      return left.mode === (right as typeof left).mode && left.target === (right as typeof left).target;
     case 'unreadable':
       return left.error === (right as typeof left).error;
   }
