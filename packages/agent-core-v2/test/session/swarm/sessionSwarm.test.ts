@@ -29,6 +29,7 @@ import {
   ISessionSubagentService,
 } from '#/session/subagent/subagent';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { SubagentRoutePool } from '#/session/subagent/routing';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import {
   ISessionMetadata,
@@ -1398,6 +1399,103 @@ describe('SessionSwarmService metadata compatibility', () => {
       await vi.advanceTimersByTimeAsync(3_000);
       await running;
 
+      expect(releasePoolSlot).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases the pool slot when subagents.run rejects before the run starts', async () => {
+    // Real pool, maxConcurrency 1: the second spawn queues behind the first,
+    // so this deadlocks without the observe() early-failure release.
+    const pool = new SubagentRoutePool([
+      { backend: 'kimi', model: 'provider/routed', maxConcurrency: 1 },
+    ]);
+    const releases: ReturnType<typeof vi.fn>[] = [];
+    resolveSpawnRoute.mockImplementation(async () => {
+      const acquired = await pool.acquireQueued();
+      const release = vi.fn(acquired.release);
+      releases.push(release);
+      return {
+        route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+        releasePoolSlot: release,
+      };
+    });
+    let created = 0;
+    createAgent.mockImplementation(async (opts: CreateAgentOptions = {}) => {
+      created += 1;
+      const id = `agent-${created}`;
+      const handle = agentHandle(id, lifecycle, eventBus, {
+        profileName: opts.binding?.profile ?? 'coder',
+        modelAlias: opts.binding?.model ?? 'kimi-test',
+        thinkingLevel: opts.binding?.thinking ?? 'medium',
+      });
+      handles.set(id, handle);
+      return handle;
+    });
+    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+      options?.onReady?.();
+      if (agentId === 'agent-1') return Promise.reject(new Error('run failed to start'));
+      return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'ok' }) };
+    });
+    const service = ix.get(ISessionSwarmService);
+
+    const results = await service.run({
+      callerAgentId: 'main',
+      tasks: [spawnSessionTask('src/a.ts'), spawnSessionTask('src/b.ts')],
+    });
+
+    expect(results).toMatchObject([{ status: 'failed' }, { status: 'completed' }]);
+    expect(releases).toHaveLength(2);
+    expect(releases[0]).toHaveBeenCalledOnce();
+    expect(releases[1]).toHaveBeenCalledOnce();
+  });
+
+  it('releases the pool slot when the retried subagents.run rejects after a rate-limit requeue', async () => {
+    vi.useFakeTimers();
+    try {
+      agents['agent-pooled'] = {
+        labels: { parentAgentId: 'main' },
+      };
+      const releasePoolSlot = vi.fn();
+      resolveSpawnRoute.mockResolvedValue({
+        route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+        releasePoolSlot,
+      });
+      createAgent.mockImplementation(async (opts: CreateAgentOptions = {}) => {
+        const handle = agentHandle('agent-pooled', lifecycle, eventBus, {
+          profileName: opts.binding?.profile ?? 'coder',
+          modelAlias: opts.binding?.model ?? 'kimi-test',
+          thinkingLevel: opts.binding?.thinking ?? 'medium',
+        });
+        handles.set('agent-pooled', handle);
+        return handle;
+      });
+      const rateLimited = createControlledPromise<{ summary: string }>();
+      let pooledRuns = 0;
+      runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+        options?.onReady?.();
+        pooledRuns += 1;
+        // The retry after the rate-limit requeue fails before the run
+        // starts: no completion handler exists, the slot must go here.
+        if (pooledRuns === 2) return Promise.reject(new Error('retry run failed to start'));
+        return { agentId, turn: {} as never, completion: rateLimited };
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [spawnSessionTask('src/a.ts')],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
+      // Retry fires, its subagents.run() rejects before the run starts: the
+      // observe() catch must release the held slot — exactly once (the
+      // per-batch sweep must not double-release).
+      await vi.advanceTimersByTimeAsync(5_000);
+      const results = await running;
+
+      expect(results).toMatchObject([{ status: 'failed' }]);
       expect(releasePoolSlot).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();

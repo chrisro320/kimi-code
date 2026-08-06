@@ -44,7 +44,7 @@ import {
   subagentSwarmItem,
 } from '#/session/agentLifecycle/subagentMetadata';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
-import { ISessionSubagentService } from '#/session/subagent/subagent';
+import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
 import { wrapSubagentModelError } from '#/session/subagent/configSection';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
@@ -291,10 +291,19 @@ export class SessionSwarmService implements ISessionSwarmService {
     request: { kind: 'prompt'; prompt: string } | { kind: 'retry' },
     options: AgentRunAttemptOptions,
   ): Promise<AgentRunAttemptHandle> {
-    const run = await this.subagents.run(agentId, request, {
-      signal: options.signal,
-      onReady: options.onReady,
-    });
+    let run: AgentRunHandle;
+    try {
+      run = await this.subagents.run(agentId, request, {
+        signal: options.signal,
+        onReady: options.onReady,
+      });
+    } catch (error) {
+      // The run never started, so no completion handler will ever fire —
+      // a held pool slot would leak here and eventually deadlock the batch
+      // behind `acquireQueued` (the per-batch sweep only runs at settle).
+      this.releasePoolSlotFor(agentId);
+      throw error;
+    }
     const mirrored = mirrorAgentRun(caller, run, {
       profileName,
       prompt: request.kind === 'prompt' ? request.prompt : undefined,
