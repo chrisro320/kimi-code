@@ -768,7 +768,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
             if (emptyOrTruncatedShrinkCount > MAX_COMPACTION_RETRY_ATTEMPTS) {
               throw error;
             }
-            const reduced = dropOldestMessageAndLeadingToolResults(messagesToCompact);
+            const reduced = dropOldestMessageAndOrphanToolResults(messagesToCompact);
             droppedCount += messagesToCompact.length - reduced.length;
             historyForModel = reduced;
             retryCount = 0;
@@ -791,18 +791,21 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         );
       }
 
+      // Ahead of the prefix-race check on purpose: both requests really happened
+      // and their cache numbers are real regardless of whether this fold lands,
+      // and a cancelled round is exactly when a silent cliff would go unnoticed.
+      // Read-only — `compact()` already recorded the remote usage.
+      const cacheCliff = cacheCliffFields(remote?.usage ?? null, attempt.usage);
+      if (cacheCliff !== undefined) {
+        this.log.warn('remote compaction cache hit far below the local summarizer', cacheCliff);
+      }
+
       if (!historySafeToCompact(this.context.get(), originalHistory)) {
         const active = this._compacting;
         if (active !== null) {
           this.cancelActive(active);
         }
         throw compactionCancelledReason(active);
-      }
-
-      // Read-only: `compact()` already recorded the remote usage.
-      const cacheCliff = cacheCliffFields(remote?.usage ?? null, attempt.usage);
-      if (cacheCliff !== undefined) {
-        this.log.warn('remote compaction cache hit far below the local summarizer', cacheCliff);
       }
 
       const summary = this.postProcessSummary(attempt.summary);
@@ -952,22 +955,38 @@ function takeRecentMessagesWithinTokenBudget<T extends Message>(
     start = i;
   }
   if (start === 0) start = 1;
-  return dropLeadingToolResults(messages.slice(start));
+  return dropOrphanToolResults(messages.slice(start));
 }
 
-function dropOldestMessageAndLeadingToolResults<T extends { readonly role: string }>(
-  messages: readonly T[],
-): T[] {
+function dropOldestMessageAndOrphanToolResults<T extends Message>(messages: readonly T[]): T[] {
   if (messages.length <= 1) return messages.slice();
-  return dropLeadingToolResults(messages.slice(1));
+  return dropOrphanToolResults(messages.slice(1));
 }
 
-function dropLeadingToolResults<T extends { readonly role: string }>(messages: readonly T[]): T[] {
-  let start = 0;
-  while (start < messages.length && messages[start]!.role === 'tool') {
-    start += 1;
+/**
+ * Drop tool results whose owning assistant call did not survive the cut.
+ *
+ * A leading run of `role: 'tool'` is the common shape but not the only one.
+ * With tool-select on, `toolSelect.load()` appends the dynamic tool schema
+ * WHILE the tool is still executing, so the stored order is
+ * `assistant(call) → system(schema) → tool(result)`. A cut landing on the call
+ * leaves the schema in front of the result: the result is orphaned, yet not
+ * leading, and a position-based scan walks straight past it.
+ *
+ * Ownership is therefore decided by the tool-call ids still present in the
+ * slice, not by where a message sits. Protocol messages are left alone — they
+ * are what keeps the summarizer prefix aligned with the turn projection.
+ */
+export function dropOrphanToolResults<T extends Message>(messages: readonly T[]): T[] {
+  const ownedIds = new Set<string>();
+  for (const message of messages) {
+    for (const call of message.toolCalls) ownedIds.add(call.id);
   }
-  return messages.slice(start);
+  return messages.filter(
+    (message) =>
+      message.role !== 'tool' ||
+      (message.toolCallId !== undefined && ownedIds.has(message.toolCallId)),
+  );
 }
 
 /** Share of a request's input tokens served from the provider's prompt cache. */

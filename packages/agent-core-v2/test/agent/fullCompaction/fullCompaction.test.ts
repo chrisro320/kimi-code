@@ -42,7 +42,7 @@ import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } fro
 import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, logServices, sessionServices, testAgent } from '../../harness';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
-import { cacheCliffFields } from '#/agent/fullCompaction/fullCompactionService';
+import { cacheCliffFields, dropOrphanToolResults } from '#/agent/fullCompaction/fullCompactionService';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import {
   IAgentFullCompactionService,
@@ -3730,6 +3730,54 @@ describe('goal reminder re-injection after full compaction', () => {
     it('stays silent when either usage is missing', () => {
       expect(cacheCliffFields(null, usage(9_800, 200))).toBeUndefined();
       expect(cacheCliffFields(usage(0, 10_000), null)).toBeUndefined();
+    });
+  });
+
+  describe('dropOrphanToolResults (B4-R)', () => {
+    const assistantCall = (id: string): Message => ({
+      role: 'assistant',
+      content: [],
+      toolCalls: [{ type: 'function', id, name: 'select_tools', arguments: '{}' }],
+    });
+    const schemaMessage = (): Message => ({
+      role: 'system',
+      content: [],
+      toolCalls: [],
+      tools: [{ name: 'loaded-tool', description: 'schema', parameters: {} }],
+    });
+    const toolResult = (toolCallId: string): Message => ({
+      role: 'tool',
+      content: [{ type: 'text', text: 'result' }],
+      toolCalls: [],
+      toolCallId,
+    });
+
+    it('drops a result stranded behind a schema message when its call is cut', () => {
+      // The real select_tools order: the schema is appended while the tool is
+      // still running, so it sits between the call and the result. A cut on the
+      // call leaves the result orphaned but NOT leading — a position-based scan
+      // walks past it, which is the regression this replaced.
+      const cut = [schemaMessage(), toolResult('call-1')];
+
+      expect(dropOrphanToolResults(cut)).toEqual([schemaMessage()]);
+    });
+
+    it('keeps a result whose assistant call survived the cut', () => {
+      const kept = [assistantCall('call-1'), schemaMessage(), toolResult('call-1')];
+
+      expect(dropOrphanToolResults(kept)).toEqual(kept);
+    });
+
+    it('keeps protocol messages — they are what aligns the prefix', () => {
+      const cut = [schemaMessage(), textMessage('user', 'still here')];
+
+      expect(dropOrphanToolResults(cut)).toEqual(cut);
+    });
+
+    it('drops a leading run of orphans, the shape the old scan handled', () => {
+      const cut = [toolResult('gone-1'), toolResult('gone-2'), textMessage('user', 'kept')];
+
+      expect(dropOrphanToolResults(cut)).toEqual([textMessage('user', 'kept')]);
     });
   });
 });
