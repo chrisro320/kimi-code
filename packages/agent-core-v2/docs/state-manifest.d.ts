@@ -379,7 +379,9 @@ export interface WorkspaceStateSnapshot {
       readonly reason: string;
     }[];
     getKimiSkillsDescription: () => string;
-    getModelSkillListing: () => string;
+    getModelSkillListing: (options?: {
+      readonly compact?: boolean;
+    }) => string;
   };
   // src/workspace/workspaceTrust/workspaceTrustService.ts
   'workspaceTrust.trusted': boolean;
@@ -705,7 +707,9 @@ export interface SessionStateSnapshot {
       readonly reason: string;
     }[];
     getKimiSkillsDescription: () => string;
-    getModelSkillListing: () => string;
+    getModelSkillListing: (options?: {
+      readonly compact?: boolean;
+    }) => string;
   };
   // src/session/sessionToolPolicy/sessionToolPolicyService.ts
   'sessionToolPolicy.state': /* SessionToolPolicyState — packages/agent-core-v2/src/session/sessionToolPolicy/sessionToolPolicyService.ts */ {
