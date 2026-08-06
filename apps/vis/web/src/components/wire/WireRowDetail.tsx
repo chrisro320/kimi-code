@@ -4,7 +4,7 @@ import type { AgentRecord, WireEntry } from '../../types';
 import { CopyButton } from '../shared/CopyButton';
 import { JsonViewer } from '../shared/JsonViewer';
 import { GenericDetail } from './parts';
-import { rendererFor } from './renderers';
+import { redactCheckpointPayloads, rendererFor } from './renderers';
 
 interface WireRowDetailProps {
   entry: WireEntry;
@@ -20,18 +20,23 @@ export function WireRowDetail({ entry }: WireRowDetailProps) {
   // For records on the current protocol, `raw` and `data` are identical
   // and the toggle would just be visual noise.
   const migrated = !sameJson(entry.raw, entry.data);
+  // Opaque checkpoint payloads (provider state) never reach the detail page:
+  // everything below — friendly render, copy buttons, JSON views — works on
+  // the redacted copies.
+  const safeRaw = redactCheckpointPayloads(entry.raw);
+  const safeData = redactCheckpointPayloads(entry.data);
 
   return (
     <div className="pl-[120px] pr-2 py-1 font-mono text-[12px]">
-      {renderFriendly(entry.data)}
+      {renderFriendly(safeData)}
       <div className="mt-2 flex items-center justify-end gap-3">
         <CopyButton
-          value={JSON.stringify(entry.raw, null, 2)}
+          value={JSON.stringify(safeRaw, null, 2)}
           label="copy raw"
         />
         {migrated ? (
           <CopyButton
-            value={JSON.stringify(entry.data, null, 2)}
+            value={JSON.stringify(safeData, null, 2)}
             label="copy projected"
           />
         ) : null}
@@ -71,7 +76,7 @@ export function WireRowDetail({ entry }: WireRowDetailProps) {
             ) : null}
           </div>
           <JsonViewer
-            value={view === 'raw' ? entry.raw : entry.data}
+            value={view === 'raw' ? safeRaw : safeData}
             defaultOpenDepth={2}
           />
         </div>

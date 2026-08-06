@@ -321,7 +321,7 @@ interface InterruptionReminderRecordedPayload {
  */
 interface LlmRequestPayload {
   _name: 'llm.request';
-  kind: 'loop' | 'compaction';
+  kind: 'loop' | 'compaction' | 'remote_compaction';
   provider: string;
   model: string;
   modelAlias?: string;

@@ -45,13 +45,15 @@ import {
   APIContextOverflowError,
   APIEmptyResponseError,
   APIStatusError,
+  classifyApiError,
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 import { createUserMessage, type Message } from '#/kosong/contract/message';
 import type { Tool } from '#/kosong/contract/tool';
 import { inputTotal, type TokenUsage } from '#/kosong/contract/usage';
 import { IEventBus } from '#/app/event/eventBus';
-import type { CompactionFailedEvent, CompactionFinishedEvent } from '#/app/telemetry/events';
+import type { CompactionFailedEvent, CompactionFinishedEvent, CompactionRemoteFallbackEvent } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, Error2, isCodedError, isError2, toKimiErrorPayload, unwrapErrorCause } from "#/errors";
 import { IWireService } from '#/wire/wire';
@@ -588,6 +590,53 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     }
   }
 
+  /**
+   * Remote-compaction attempt (B4-G). Returns the endpoint's checkpoint on
+   * success; anything else falls back to the local summarizer with a
+   * `compaction_remote_fallback` event — except models that never declared
+   * the capability, which take the local path silently (a fallback event for
+   * every compaction of such a model would be noise). Only the checkpoint is
+   * taken from the result: which messages survive a fold is this engine's own
+   * decision (`applyCompaction` derives it from the live history), so the
+   * endpoint's `retainedMessages` echo is discarded unread. Usage is NOT
+   * recorded here — `compact()` records it internally; recording again would
+   * double-count. Aborts propagate (never swallowed into a fallback); every
+   * other failure arrives as a typed outcome, already past the provider's
+   * bounded retry, so the caller does not retry either.
+   */
+  private async tryRemoteCompaction(
+    active: ActiveCompaction,
+    data: Readonly<CompactionBeginData>,
+    shapedHistory: readonly ContextMessage[],
+    signal: AbortSignal,
+  ): Promise<CompactionCheckpoint | undefined> {
+    if (this.profile.resolveModelContext().modelCapabilities.remote_compaction !== true) {
+      return undefined;
+    }
+    const outcome = await this.llmRequester.compact(
+      {
+        history: shapedHistory,
+        source: {
+          type: 'operation',
+          turnId: active.originTurnId,
+          requestKind: 'remote_compaction',
+        },
+      },
+      signal,
+    );
+    if (outcome.kind === 'ok') return outcome.result.checkpoint;
+    const properties: CompactionRemoteFallbackEvent = {
+      turn_id: active.originTurnId,
+      source: data.source,
+      reason: outcome.kind === 'unsupported' ? 'unsupported' : 'request_failed',
+    };
+    if (outcome.kind === 'error') {
+      properties.error_type = classifyApiError(unwrapErrorCause(outcome.error)).kind;
+    }
+    this.telemetry.track2('compaction_remote_fallback', properties);
+    return undefined;
+  }
+
   private async compactionRound(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
@@ -625,6 +674,28 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
+      // Remote compaction first when the model opted in (B4-G): the checkpoint
+      // preserves model-native state the text summary cannot, but it is never
+      // required — anything short of success falls through to the summarizer
+      // below, which runs either way (its output is the only portable record
+      // of the fold). The remote attempt sees the unshrunk history, and its
+      // failure does not consume the loop's retry/shrink budget.
+      //
+      // It gets `shapeHistory`, NOT the summarizer's stripped view: the remote
+      // request is meant to reuse the turn's provider prompt cache, and the
+      // turn shapes its history exactly this way (`toolSelectService`). With
+      // tool-select on, `stripDynamicToolContext` drops every announcement and
+      // schema message, so the two prefixes diverge at the first protocol
+      // message and the cache stops matching from there — v1 measured that at
+      // an 18% hit rate. Tools already agree: `compact()` builds them with the
+      // same `shapeTools` call the turn uses. Tool-select off makes
+      // `shapeHistory` fall through to the same strip, so nothing changes there.
+      const checkpoint = await this.tryRemoteCompaction(
+        active,
+        data,
+        this.toolSelect.shapeHistory(originalHistory),
+        signal,
+      );
       while (true) {
         const messagesToCompact = historyForModel;
         const messages: Message[] = [...messagesToCompact, createUserMessage(instruction)];
@@ -719,11 +790,13 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         tokensBefore,
         summaryOutputTokens: attempt.usage?.output,
         droppedCount: droppedCount === 0 ? undefined : droppedCount,
+        checkpoint,
       });
 
       const properties: CompactionFinishedEvent = {
         turn_id: active.originTurnId,
         source: data.source,
+        implementation: checkpoint === undefined ? 'local' : 'remote',
         tokens_before: result.tokensBefore,
         tokens_after: result.tokensAfter,
         duration_ms: Date.now() - startedAt,

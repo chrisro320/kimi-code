@@ -56,6 +56,7 @@ import {
   isUnsupportedContentPartError,
 } from '#/kosong/contract/errors';
 import { type Message } from '#/kosong/contract/message';
+import { type ModelHistoryItem } from '#/kosong/contract/compaction';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
 import { emptyUsage, inputTotal, type TokenUsage } from '#/kosong/contract/usage';
@@ -137,7 +138,7 @@ interface LLMRequestLogInput {
   readonly maxTokens?: number;
   readonly systemPrompt: string;
   readonly tools: readonly Tool[];
-  readonly messages: readonly Message[];
+  readonly messages: readonly (Message | ModelHistoryItem)[];
   readonly fields?: AgentLLMRequestLogFields;
 }
 
@@ -253,6 +254,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     signal?.throwIfAborted();
     const startedAt = Date.now();
     const resolved = this.profile.resolveModelContext();
+    // Capability gate: a model that does not declare remote_compaction never
+    // reaches the endpoint, even when the provider happens to implement
+    // compactConversation — without this the request below fires blind.
+    if (resolved.modelCapabilities.remote_compaction !== true) {
+      return { kind: 'unsupported' };
+    }
     const budgetParams = completionBudgetParams({
       budget: resolveCompletionBudget({
         maxOutputSize: resolved.maxOutputSize,
@@ -265,11 +272,11 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
     const requester = this.modelCatalog.getRequester(resolved.modelAlias);
     const lineage = requester.compactionLineage();
-    // Both gates in one place: the model must declare the capability AND the
-    // provider must report a lineage. Either missing and there is nothing to
-    // replay against, so the target carries no lineage at all.
+    // The capability gate above already established replay support; lineage is
+    // the second gate — without it there is nothing to replay against, so the
+    // target carries no lineage at all.
     const target: CheckpointTarget =
-      resolved.modelCapabilities.remote_compaction === true && lineage !== undefined
+      lineage !== undefined
         ? { supportsCheckpointReplay: true, lineage }
         : { supportsCheckpointReplay: false };
     const history = input.history ?? this.context.get();
@@ -280,18 +287,41 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       historyItems: projected.length,
       checkpointItems: projected.filter((item) => item.kind === 'checkpoint').length,
     });
+    const systemPrompt = input.systemPrompt ?? this.profile.getSystemPrompt();
+    const tools = [...this.defaultTools()];
+    const params: ModelRequestParams = {
+      ...this.profile.resolveRequestParams(),
+      ...budgetParams,
+    };
+    // runRequest never sees this request, so record it here — without a wire
+    // record a remote fold leaves only a usage entry, indistinguishable from
+    // the local summarizer's. v1 pre-flight convention: an already-aborted
+    // call does not enter the wire.
+    if (signal?.aborted !== true) {
+      const logInput: LLMRequestLogInput = {
+        protocol: requester.model.protocol,
+        providerType: requester.model.providerType,
+        modelName: requester.model.name,
+        modelAlias: resolved.modelAlias,
+        thinkingEffort: resolved.thinkingLevel,
+        maxTokens: effectiveMaxCompletionTokens(params),
+        systemPrompt,
+        tools,
+        messages: projected,
+        fields: { ...logFieldsForSource(input.source), requestKind: 'remote_compaction' },
+      };
+      this.logRequest(logInput);
+      this.recordRequest(logInput);
+    }
     const outcome = await requester.compactConversation(
       {
-        systemPrompt: input.systemPrompt ?? this.profile.getSystemPrompt(),
-        tools: [...this.defaultTools()],
+        systemPrompt,
+        tools,
         history: projected,
         retainedMessages: [...(input.retainedMessages ?? [])],
       },
       signal,
-      {
-        ...this.profile.resolveRequestParams(),
-        ...budgetParams,
-      },
+      params,
     );
     if (outcome.kind === 'ok') {
       this.usage.record(resolved.modelAlias, outcome.result.usage ?? emptyUsage(), input.source);
@@ -726,7 +756,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       this.log.info('llm config', { ...logFields, ...config });
     }
 
-    const partialMessageCount = input.messages.filter((message) => message.partial === true).length;
+    const partialMessageCount = input.messages.filter(
+      (message) => 'partial' in message && message.partial === true,
+    ).length;
     const requestFields: LogContext = { ...logFields };
     if (partialMessageCount > 0) requestFields['partialMessageCount'] = partialMessageCount;
     this.log.info('llm request', requestFields);
@@ -853,6 +885,7 @@ function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] 
 }
 
 function requestKindForRecord(fields: AgentLLMRequestLogFields): PayloadOf<typeof llmRequest>['kind'] {
+  if (fields['requestKind'] === 'remote_compaction') return 'remote_compaction';
   if (fields['kind'] === 'compaction') return 'compaction';
   if (fields['requestKind'] === 'full_compaction') return 'compaction';
   return 'loop';

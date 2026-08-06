@@ -918,10 +918,27 @@ describe('AgentLLMRequesterService compact', () => {
     expect(checkpointItem).toEqual({ kind: 'checkpoint', checkpoint: cp });
   });
 
-  it('degrades checkpoints to portable summary text when the capability is off', async () => {
+  it('never calls the provider when the model does not declare remote_compaction', async () => {
+    let calls = 0;
+    const requester = createRequester({ value: 0 });
+    requester.compactConversation = async () => {
+      calls += 1;
+      return OK_OUTCOME;
+    };
+    requester.compactionLineage = () => ({ ...LINEAGE });
+    const { service } = createService(requester, undefined);
+
+    await expect(service.compact()).resolves.toEqual({ kind: 'unsupported' });
+    expect(calls).toBe(0);
+  });
+
+  it('degrades checkpoints to portable summary text when the provider reports no lineage', async () => {
     const captured: { input?: ModelCompactionInput } = {};
     const requester = compactCapableRequester(captured, OK_OUTCOME);
-    const { service } = createService(requester, undefined);
+    requester.compactionLineage = () => undefined;
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
 
     await service.compact({ history: historyWithCheckpoint(checkpoint()) });
 
@@ -939,10 +956,39 @@ describe('AgentLLMRequesterService compact', () => {
     await expect(service.compact()).resolves.toEqual({ kind: 'unsupported' });
   });
 
+  it('writes a distinguishable remote_compaction wire record before the request', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service, wire, records } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
+
+    await service.compact({ history: historyWithCheckpoint(checkpoint()) });
+    await wire.flush();
+
+    const remote = records.filter(
+      (record) => record.type === 'llm.request' && record['kind'] === 'remote_compaction',
+    );
+    expect(remote).toHaveLength(1);
+    expect(remote[0]?.['messageCount']).toBe(2);
+  });
+
+  it('writes no wire record when the capability gate refuses the request', async () => {
+    const requester = compactCapableRequester({}, OK_OUTCOME);
+    const { service, wire, records } = createService(requester, undefined);
+
+    await expect(service.compact()).resolves.toEqual({ kind: 'unsupported' });
+    await wire.flush();
+
+    expect(records.filter((record) => record.type === 'llm.request')).toHaveLength(0);
+  });
+
   it('passes retainedMessages through untouched', async () => {
     const captured: { input?: ModelCompactionInput } = {};
     const requester = compactCapableRequester(captured, OK_OUTCOME);
-    const { service } = createService(requester, undefined);
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
     const retained: Message[] = [
       { role: 'user', content: [{ type: 'text', text: 'keep me' }], toolCalls: [] },
     ];

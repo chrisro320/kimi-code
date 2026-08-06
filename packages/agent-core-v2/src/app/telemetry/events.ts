@@ -201,6 +201,7 @@ export interface PlanEnterResolvedEvent {
 export interface CompactionFinishedEvent {
   turn_id?: number;
   source: 'manual' | 'auto';
+  implementation: 'local' | 'remote';
   tokens_before: number;
   tokens_after: number;
   duration_ms: number;
@@ -214,6 +215,13 @@ export interface CompactionFinishedEvent {
   input_cache_read?: number;
   input_cache_creation?: number;
   trace_id?: string;
+}
+
+export interface CompactionRemoteFallbackEvent {
+  turn_id?: number;
+  source: 'manual' | 'auto';
+  reason: 'unsupported' | 'request_failed';
+  error_type?: string;
 }
 
 export interface CompactionFailedEvent {
@@ -630,6 +638,8 @@ export const telemetryEventDefinitions = {
     properties: {
       turn_id: 'Per-agent turn index when compaction ran inside a turn; omitted for manual compaction between turns',
       source: 'Whether compaction was triggered manually or automatically',
+      implementation:
+        'Which compaction implementation produced the fold: local summarizer or remote endpoint checkpoint',
       tokens_before: 'Token count before compaction',
       tokens_after: 'Token count after compaction',
       duration_ms: 'Compaction wall-clock time in milliseconds',
@@ -644,6 +654,18 @@ export const telemetryEventDefinitions = {
       input_cache_creation: 'Cache-creation input tokens',
       trace_id:
         'Trace id of the final compaction request round; absent for non-Kimi protocols',
+    },
+  }),
+  compaction_remote_fallback: defineAgentTelemetryEvent<CompactionRemoteFallbackEvent>({
+    owner: 'kimi-code',
+    comment:
+      'A model declared remote_compaction but the remote path did not produce a checkpoint, so compaction fell back to the local summarizer.',
+    properties: {
+      turn_id: 'Per-agent turn index when compaction ran inside a turn; omitted for manual compaction between turns',
+      source: 'Whether compaction was triggered manually or automatically',
+      reason:
+        'Why the remote path was unavailable: provider has no endpoint (unsupported) or the request failed (request_failed)',
+      error_type: 'Classified error kind when reason is request_failed',
     },
   }),
   compaction_failed: defineAgentTelemetryEvent<CompactionFailedEvent>({

@@ -28,6 +28,36 @@ import { JsonViewer } from '../shared/JsonViewer';
 
 export type RecordType = AgentRecord['type'];
 
+/** Deep-redact opaque remote-compaction checkpoint payloads before a wire
+ *  record is rendered or copied: any `checkpoint` object's `encrypted`
+ *  provider state is replaced by a length marker. Metadata (itemType /
+ *  lineage / replay estimate) stays visible. */
+export function redactCheckpointPayloads<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactCheckpointPayloads(item)) as T;
+  }
+  if (typeof value !== 'object' || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'checkpoint' && hasEncryptedPayload(entry)) {
+      out[key] = { ...entry, encrypted: `<redacted ${entry.encrypted.length} chars>` };
+    } else {
+      out[key] = redactCheckpointPayloads(entry);
+    }
+  }
+  return out as T;
+}
+
+function hasEncryptedPayload(value: unknown): value is Record<string, unknown> & {
+  encrypted: string;
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>)['encrypted'] === 'string'
+  );
+}
+
 export interface WireRenderer<K extends RecordType> {
   tone: PillTone;
   /** Compact badge label. */
@@ -69,6 +99,15 @@ function stateTone(state: string | undefined): PillTone {
     default:
       return 'info';
   }
+}
+
+/** The redacted checkpoint of an apply_compaction record, when the session
+ *  was written by an engine that attaches one (v2 remote compaction). The
+ *  field is absent from the v1 record type, so it is read defensively. */
+function checkpointOf(record: unknown): unknown {
+  const checkpoint = (record as { checkpoint?: unknown }).checkpoint;
+  if (checkpoint === undefined) return undefined;
+  return redactCheckpointPayloads({ checkpoint }).checkpoint;
 }
 
 export const WIRE_RENDERERS: RendererMap = {
@@ -313,6 +352,11 @@ export const WIRE_RENDERERS: RendererMap = {
         <FieldRow label="tokensAfter">
           <span className="text-[var(--color-sev-info)]">{r.tokensAfter}</span>
         </FieldRow>
+        {checkpointOf(r) !== undefined ? (
+          <FieldRow label="checkpoint" wide>
+            <JsonViewer value={checkpointOf(r)} defaultOpenDepth={2} />
+          </FieldRow>
+        ) : null}
       </div>
     ),
   },
