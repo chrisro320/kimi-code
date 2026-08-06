@@ -20,7 +20,7 @@
 import { Disposable } from "#/_base/di/lifecycle";
 import { IInstantiationService } from '#/_base/di/instantiation';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { ILogService } from '#/_base/log/log';
+import { ILogService, type LogContext } from '#/_base/log/log';
 import { defineState } from '#/_base/state/stateRegistry';
 import { renderPrompt } from "#/_base/utils/render-prompt";
 import { estimateTokensForMessage } from "#/kosong/contract/tokens";
@@ -37,7 +37,6 @@ import { isAbortError } from '#/_base/utils/abort';
 import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { stripDynamicToolContext } from '#/agent/toolSelect/dynamicTools';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 import { renderTodoList, type TodoItem } from '#/session/todo/todoItem';
@@ -84,6 +83,8 @@ export const MAX_COMPACTION_RETRY_ATTEMPTS = 5;
 const DEFAULT_COMPACTION_MAX_COMPLETION_TOKENS = 128 * 1024;
 const OVERFLOW_CONTEXT_SAFETY_RATIO = 0.85;
 const OVERFLOW_STATUS_RECOVERY_RATIO = 0.5;
+/** How far the remote fold's cache hit may trail the summarizer's before it is worth a warning. */
+const CACHE_HIT_GAP_WARN_THRESHOLD = 0.2;
 const MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS = 3;
 const COMPACTION_OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
 const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
@@ -598,18 +599,24 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
    * every compaction of such a model would be noise). Only the checkpoint is
    * taken from the result: which messages survive a fold is this engine's own
    * decision (`applyCompaction` derives it from the live history), so the
-   * endpoint's `retainedMessages` echo is discarded unread. Usage is NOT
-   * recorded here — `compact()` records it internally; recording again would
-   * double-count. Aborts propagate (never swallowed into a fallback); every
-   * other failure arrives as a typed outcome, already past the provider's
-   * bounded retry, so the caller does not retry either.
+   * endpoint's `retainedMessages` echo is discarded unread. Aborts propagate
+   * (never swallowed into a fallback); every other failure arrives as a typed
+   * outcome, already past the provider's bounded retry, so the caller does not
+   * retry either.
+   *
+   * The usage comes back so the caller can compare cache hit rates against the
+   * summarizer's — it is returned to be READ, never recorded. `compact()`
+   * already recorded it internally, and a second `usage.record` here would
+   * double-count (v1 records at its call site because it has no such layer).
    */
   private async tryRemoteCompaction(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
     shapedHistory: readonly ContextMessage[],
     signal: AbortSignal,
-  ): Promise<CompactionCheckpoint | undefined> {
+  ): Promise<
+    { readonly checkpoint: CompactionCheckpoint; readonly usage: TokenUsage | null } | undefined
+  > {
     if (this.profile.resolveModelContext().modelCapabilities.remote_compaction !== true) {
       return undefined;
     }
@@ -624,7 +631,9 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       },
       signal,
     );
-    if (outcome.kind === 'ok') return outcome.result.checkpoint;
+    if (outcome.kind === 'ok') {
+      return { checkpoint: outcome.result.checkpoint, usage: outcome.result.usage };
+    }
     const properties: CompactionRemoteFallbackEvent = {
       turn_id: active.originTurnId,
       source: data.source,
@@ -670,7 +679,18 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
 
       const delays = retryBackoffDelays(MAX_COMPACTION_RETRY_ATTEMPTS);
       let attempt: CompactionAttemptResult | undefined;
-      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
+      // Dynamic-tool protocol context (schema messages, loadable-tools
+      // announcements) is shaped by `toolSelect.shapeHistory` alone, exactly as
+      // it is for a turn request: stripped when tool-select is off, kept when it
+      // is on. Shaping it here as well would make the summarizer prefix diverge
+      // from the turn projection at the first protocol message and void the
+      // provider prompt cache from there on — v1 measured a summarizer request
+      // whose tools hash, system prompt hash, and message count matched the loop
+      // request immediately before it reading 19968 of 112807 input tokens from
+      // cache (17.7%, against that request's 99.3%), and 95.5% once the extra
+      // shaping was dropped. `originalHistory` itself stays untouched for the
+      // prefix-race check and `compactedCount`.
+      let historyForModel: readonly ContextMessage[] = originalHistory;
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
@@ -681,21 +701,18 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       // of the fold). The remote attempt sees the unshrunk history, and its
       // failure does not consume the loop's retry/shrink budget.
       //
-      // It gets `shapeHistory`, NOT the summarizer's stripped view: the remote
-      // request is meant to reuse the turn's provider prompt cache, and the
-      // turn shapes its history exactly this way (`toolSelectService`). With
-      // tool-select on, `stripDynamicToolContext` drops every announcement and
-      // schema message, so the two prefixes diverge at the first protocol
-      // message and the cache stops matching from there — v1 measured that at
-      // an 18% hit rate. Tools already agree: `compact()` builds them with the
-      // same `shapeTools` call the turn uses. Tool-select off makes
-      // `shapeHistory` fall through to the same strip, so nothing changes there.
-      const checkpoint = await this.tryRemoteCompaction(
+      // Both paths reach the same turn-aligned shape, by different routes: the
+      // summarizer goes through `llmRequester.start()` → `runRequest`, which
+      // shapes for it, while `compact()` never touches `runRequest` and so has
+      // to be handed a shaped history here. Tools already agree — `compact()`
+      // builds them with the same `shapeTools` call the turn uses.
+      const remote = await this.tryRemoteCompaction(
         active,
         data,
         this.toolSelect.shapeHistory(originalHistory),
         signal,
       );
+      const checkpoint = remote?.checkpoint;
       while (true) {
         const messagesToCompact = historyForModel;
         const messages: Message[] = [...messagesToCompact, createUserMessage(instruction)];
@@ -780,6 +797,12 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
           this.cancelActive(active);
         }
         throw compactionCancelledReason(active);
+      }
+
+      // Read-only: `compact()` already recorded the remote usage.
+      const cacheCliff = cacheCliffFields(remote?.usage ?? null, attempt.usage);
+      if (cacheCliff !== undefined) {
+        this.log.warn('remote compaction cache hit far below the local summarizer', cacheCliff);
       }
 
       const summary = this.postProcessSummary(attempt.summary);
@@ -945,6 +968,40 @@ function dropLeadingToolResults<T extends { readonly role: string }>(messages: r
     start += 1;
   }
   return messages.slice(start);
+}
+
+/** Share of a request's input tokens served from the provider's prompt cache. */
+function cacheHitRatio(usage: TokenUsage): number {
+  return usage.inputCacheRead / Math.max(1, inputTotal(usage));
+}
+
+/**
+ * The cache-cliff signature: the remote fold reads far less of the prompt cache
+ * than the local summarizer running on the same history moments later (v1
+ * measured 0% against 98% on real folds). Returns the log fields when the gap is
+ * worth reporting, so the miss cannot hide inside aggregate token stats.
+ *
+ * This is the only thing watching for a compaction prefix that has drifted out
+ * of line with the turn projection: such a drift turns no test red and breaks no
+ * behaviour — it just makes the bill quietly larger.
+ *
+ * Needs both numbers to say anything, so a missing usage on either side is not a
+ * finding.
+ */
+export function cacheCliffFields(
+  remote: TokenUsage | null,
+  summarizer: TokenUsage | null,
+): LogContext | undefined {
+  if (remote === null || summarizer === null) return undefined;
+  if (cacheHitRatio(summarizer) - cacheHitRatio(remote) <= CACHE_HIT_GAP_WARN_THRESHOLD) {
+    return undefined;
+  }
+  return {
+    remoteCacheRead: remote.inputCacheRead,
+    remoteInput: inputTotal(remote),
+    summarizerCacheRead: summarizer.inputCacheRead,
+    summarizerInput: inputTotal(summarizer),
+  };
 }
 
 function usageTelemetry(usage: TokenUsage | null): CompactionTelemetryProperties {

@@ -42,6 +42,8 @@ import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } fro
 import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, logServices, sessionServices, testAgent } from '../../harness';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
+import { cacheCliffFields } from '#/agent/fullCompaction/fullCompactionService';
+import type { TokenUsage } from '#/kosong/contract/usage';
 import {
   IAgentFullCompactionService,
   IAgentLLMRequesterService,
@@ -3433,13 +3435,19 @@ describe('goal reminder re-injection after full compaction', () => {
     function remoteOkOutcome(
       checkpoint: CompactionCheckpoint,
       retainedMessages: readonly Message[] = [],
+      usage: TokenUsage | null = {
+        inputOther: 500,
+        output: 0,
+        inputCacheRead: 0,
+        inputCacheCreation: 0,
+      },
     ): ModelCompactionOutcome {
       return {
         kind: 'ok',
         result: {
           checkpoint,
           retainedMessages,
-          usage: { inputOther: 500, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+          usage,
           traceId: 'trace-remote',
         },
       };
@@ -3448,8 +3456,12 @@ describe('goal reminder re-injection after full compaction', () => {
     function configuredAgent(
       records: TelemetryRecord[],
       capabilities: ModelCapability = REMOTE_CAPS,
+      logger?: Parameters<typeof logServices>[0],
     ) {
-      const ctx = testAgent({ telemetry: recordingTelemetry(records) });
+      const ctx =
+        logger === undefined
+          ? testAgent({ telemetry: recordingTelemetry(records) })
+          : testAgent({ telemetry: recordingTelemetry(records) }, logServices(logger));
       ctx.configure({
         provider: CATALOGUED_PROVIDER,
         modelCapabilities: capabilities,
@@ -3646,13 +3658,78 @@ describe('goal reminder re-injection after full compaction', () => {
 
       await runManualCompaction(ctx);
 
-      // The remote request can only reuse the turn's provider prompt cache when
-      // its history is shaped the way a turn shapes it. The summarizer's
-      // `stripDynamicToolContext` view drops every announcement and schema
-      // message, so with tool-select on the two prefixes diverge at the first
-      // protocol message and the cache stops matching from there.
+      // `compact()` never goes through `runRequest`, so the shaped history has
+      // to be handed to it explicitly — that is what keeps the remote request
+      // able to reuse the turn's provider prompt cache.
       expect(shapeSpy).toHaveBeenCalled();
       expect(compactSpy.mock.calls[0]?.[0]?.history).toBe(shaped);
+    });
+
+    it('hands the summarizer an unstripped history so shapeHistory decides alone', async () => {
+      const records: TelemetryRecord[] = [];
+      // No remote capability: `shapeHistory` is then reached only through
+      // `runRequest`, i.e. only on the summarizer's behalf.
+      const ctx = configuredAgent(records, CATALOGUED_MODEL_CAPABILITIES);
+      ctx.context.append({
+        role: 'system',
+        content: [],
+        toolCalls: [],
+        tools: [{ name: 'protocol-probe', description: 'schema message', parameters: {} }],
+      });
+      // Spy the summarizer's own entry point: `shapeHistory` has several
+      // callers, so asserting on it would pass on someone else's call.
+      const startSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'start');
+
+      await runManualCompaction(ctx);
+
+      // Pre-stripping here would delete the schema message before shapeHistory
+      // ever saw it, leaving the summarizer prefix short of what the turn sent
+      // and voiding the provider cache from that message on.
+      expect(startSpy).toHaveBeenCalled();
+      const summarizerMessages = startSpy.mock.calls[0]?.[0]?.messages ?? [];
+      expect(summarizerMessages.some((message) => (message.tools?.length ?? 0) > 0)).toBe(true);
+    });
+
+  });
+
+  // The cliff detector is tested as a function rather than through the harness:
+  // the scripted generate path does not let a test set the summarizer's usage,
+  // so the positive case — summarizer reading cache while the remote fold does
+  // not — is unreachable end-to-end. See the B4-R regression notes.
+  describe('cacheCliffFields (B4-R)', () => {
+    const usage = (inputCacheRead: number, inputOther: number): TokenUsage => ({
+      inputOther,
+      output: 0,
+      inputCacheRead,
+      inputCacheCreation: 0,
+    });
+
+    it('reports both sides when the remote fold trails the summarizer badly', () => {
+      // The v1-measured shape: summarizer near-fully cached, remote fold cold.
+      const fields = cacheCliffFields(usage(0, 10_000), usage(9_800, 200));
+
+      expect(fields).toEqual({
+        remoteCacheRead: 0,
+        remoteInput: 10_000,
+        summarizerCacheRead: 9_800,
+        summarizerInput: 10_000,
+      });
+    });
+
+    it('stays silent when both sides read a comparable share', () => {
+      expect(cacheCliffFields(usage(9_000, 1_000), usage(9_500, 500))).toBeUndefined();
+    });
+
+    it('stays silent just under the threshold', () => {
+      // 0.75 vs 0.9 — a 0.15 gap. Deliberately not testing the exact 0.2 edge:
+      // these ratios are floating point, so "exactly at the threshold" is not a
+      // state the code can be held to (0.9 - 0.7 evaluates to 0.20000000000000007).
+      expect(cacheCliffFields(usage(7_500, 2_500), usage(9_000, 1_000))).toBeUndefined();
+    });
+
+    it('stays silent when either usage is missing', () => {
+      expect(cacheCliffFields(null, usage(9_800, 200))).toBeUndefined();
+      expect(cacheCliffFields(usage(0, 10_000), null)).toBeUndefined();
     });
   });
 });
