@@ -19,6 +19,7 @@ import type {
 import { isInlineSkillType, normalizeSkillName } from './types';
 
 const LISTING_DESC_MAX = 250;
+const COMPACT_LISTING_DESC_MAX = 80;
 
 export class SkillNotFoundError extends Error {
   readonly skillName: string;
@@ -112,11 +113,11 @@ export class InMemorySkillCatalog implements SkillCatalog {
     return rendered.length === 0 ? 'No skills' : rendered;
   }
 
-  getModelSkillListing(): string {
+  getModelSkillListing(options: { readonly compact?: boolean } = {}): string {
     const lines = ['DISREGARD any earlier skill listings. Current available skills:'];
     const listing = renderGroupedSkills(
       this.listInvocableSkills().filter((skill) => skill.metadata.isSubSkill !== true),
-      formatModelSkill,
+      options.compact === true ? formatCompactModelSkill : formatModelSkill,
     );
     if (listing.length > 0) {
       lines.push(listing);
@@ -229,6 +230,14 @@ function formatModelSkill(skill: SkillDefinition): readonly string[] {
   }
   lines.push(`  Path: ${skill.path}`);
   return lines;
+}
+
+function formatCompactModelSkill(skill: SkillDefinition): readonly string[] {
+  return [`- ${skill.name}: ${truncate(normalizeCompactDescription(skill.description), COMPACT_LISTING_DESC_MAX)}`];
+}
+
+function normalizeCompactDescription(value: string): string {
+  return value.replace(/\s+/gu, ' ').trim();
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
