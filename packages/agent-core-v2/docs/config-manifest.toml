@@ -387,6 +387,9 @@ merge_all_available_skills = true
 timeout_ms = 7200000
 # routing: record<string, object>
 # pools: record<string, object[]>
+# fallback_chain: object[] — one entry per item:
+  # backend: string
+  # model: string
 
 # ##########################################################################
 # task

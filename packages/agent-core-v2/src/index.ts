@@ -350,6 +350,8 @@ export * from '#/session/subagent/subagent';
 export * from '#/session/subagent/subagentService';
 export * from '#/session/subagent/routing';
 export * from '#/session/subagent/routingService';
+export * from '#/session/subagent/circuit';
+export * from '#/session/subagent/circuitService';
 import '#/session/subagent/flag';
 export * from '#/session/subagent/secondaryModelWarning';
 export * from '#/session/subagent/secondaryModelWarningService';

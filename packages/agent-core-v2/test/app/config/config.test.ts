@@ -1706,6 +1706,20 @@ describe('subagent config section', () => {
     disposables.dispose();
   });
 
+  it('reads fallback_chain from config.toml', async () => {
+    const env: Record<string, string> = {};
+    const { config, disposables } = await createConfig(
+      env,
+      '[subagent]\nfallback_chain = [{ backend = "kimi", model = "fast" }, { backend = "kimi" }]\n',
+    );
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION)?.fallbackChain).toEqual([
+      { backend: 'kimi', model: 'fast' },
+      { backend: 'kimi' },
+    ]);
+
+    disposables.dispose();
+  });
+
   it('restores the env-owned timeout to the raw value on set() while the env var is set', async () => {
     const env: Record<string, string> = { [SUBAGENT_TIMEOUT_ENV]: '7000' };
     const { config, disposables } = await createConfig(env, '[subagent]\ntimeout_ms = 5000\n');

@@ -47,6 +47,8 @@ import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAg
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
 import { wrapSubagentModelError } from '#/session/subagent/configSection';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
+import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
@@ -95,6 +97,13 @@ export class SessionSwarmService implements ISessionSwarmService {
    */
   private readonly poolSlots = new Map<string, () => void>();
 
+  /**
+   * R-A2 (Case 8) circuit keys of routed swarm spawns, keyed by child agent
+   * id. Unlike pool slots these are never swept: circuit state must outlive
+   * the batch so a later spawn skips the known-dead route.
+   */
+  private readonly circuitEntries = new Map<string, { readonly key: string; readonly identity: string }>();
+
   constructor(
     @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
@@ -106,7 +115,17 @@ export class SessionSwarmService implements ISessionSwarmService {
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionSubagentRoutingService
     private readonly subagentRouting: ISessionSubagentRoutingService,
+    @ISessionSubagentCircuitService
+    private readonly subagentCircuit: ISessionSubagentCircuitService,
   ) {}
+
+  /** Records `error` against the agent's circuit when it is a non-retryable route failure. */
+  private recordCircuitFailure(agentId: string, error: unknown): void {
+    const entry = this.circuitEntries.get(agentId);
+    if (entry === undefined) return;
+    const code = circuitOpeningErrorCode(error);
+    if (code !== undefined) this.subagentCircuit.openCircuit(entry.key, entry.identity, code);
+  }
 
   async getSwarmItem(args: {
     readonly callerAgentId: string;
@@ -189,6 +208,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       options.signal,
     );
     let releasePoolSlot = spawnRoute?.releasePoolSlot;
+    let childId: string | undefined;
     try {
       const binding = options.binding ?? {
         model: callerData.modelAlias,
@@ -214,6 +234,13 @@ export class SessionSwarmService implements ISessionSwarmService {
         });
       } catch (error) {
         throw wrapSubagentModelError(error, final.model, callerData.modelAlias);
+      }
+      childId = child.id;
+      if (spawnRoute !== undefined) {
+        this.circuitEntries.set(child.id, {
+          key: spawnRoute.circuitKey,
+          identity: subagentRouteIdentity(spawnRoute.route),
+        });
       }
       child.accessor
         .get(IAgentPermissionModeService)
@@ -250,6 +277,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         options,
       );
     } catch (error) {
+      if (childId !== undefined) this.recordCircuitFailure(childId, error);
       releasePoolSlot?.();
       throw error;
     }
@@ -301,6 +329,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       // The run never started, so no completion handler will ever fire —
       // a held pool slot would leak here and eventually deadlock the batch
       // behind `acquireQueued` (the per-batch sweep only runs at settle).
+      this.recordCircuitFailure(agentId, error);
       this.releasePoolSlotFor(agentId);
       throw error;
     }
@@ -310,7 +339,17 @@ export class SessionSwarmService implements ISessionSwarmService {
       suppressRateLimitFailureEvent: options.suppressRateLimitFailureEvent,
       signal: options.signal,
     });
-    const completion = mirrored.then((r) => ({ result: r.summary, usage: r.usage }));
+    const completion = mirrored.then(
+      (r) => ({ result: r.summary, usage: r.usage }),
+      (error: unknown) => {
+        // R-A2 (Case 8): record before the rate-limit branch below — a
+        // rate-limit rejection never opens the circuit
+        // (circuitOpeningErrorCode filters it), so requeued retries are
+        // unaffected.
+        this.recordCircuitFailure(agentId, error);
+        throw error;
+      },
+    );
     if (!this.poolSlots.has(agentId)) {
       return { agentId, profileName, completion };
     }
