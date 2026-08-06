@@ -101,6 +101,8 @@ import { ErrorCodes, Error2 } from "#/errors";
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
+import { COMPACT_SKILL_LISTING_FLAG_ID } from '#/app/skillCatalog/flag';
 import type { LoopControl } from '#/agent/loop/configSection';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostClock } from '#/os/interface/hostClock';
@@ -247,6 +249,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IPluginService private readonly plugins: IPluginService,
     @IAgentIdentity private readonly identity: IAgentIdentity,
     @IAgentAgentsMdReminderService private readonly agentsMdReminder: IAgentAgentsMdReminderService,
+    @IFlagService private readonly flags: IFlagService,
   ) {
     super();
     this.states.register(profileActiveToolNamesOverlayKey);
@@ -975,7 +978,9 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   private async resolveSkillListing(): Promise<string> {
     try {
       await this.skillCatalog.ready;
-      return this.skillCatalog.catalog.getModelSkillListing();
+      return this.skillCatalog.catalog.getModelSkillListing({
+        compact: this.flags.enabled(COMPACT_SKILL_LISTING_FLAG_ID),
+      });
     } catch {
       return '';
     }

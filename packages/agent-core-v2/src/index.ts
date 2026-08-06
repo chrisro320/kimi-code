@@ -198,6 +198,7 @@ import '#/agent/tools/skill/skillTool';
 export * from '#/agent/skill/skill';
 export * from '#/agent/skill/skillService';
 export * from '#/app/skillCatalog/types';
+import '#/app/skillCatalog/flag';
 export * from '#/app/skillCatalog/configSection';
 export * from '#/app/skillCatalog/parser';
 export * from '#/app/skillCatalog/registry';

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
+import { COMPACT_SKILL_LISTING_FLAG_ID } from '#/app/skillCatalog/flag';
+import { getContributedFlags } from '#/app/flag/flagRegistry';
 import type { SkillDefinition, SkillSource } from '#/app/skillCatalog/types';
 import { stubSkill } from './stubs';
 
@@ -165,6 +167,86 @@ describe('InMemorySkillCatalog model skill listing', () => {
     expect(rendered).not.toMatch(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
     );
+  });
+});
+
+describe('InMemorySkillCatalog compact skill listing (compact-skill-listing flag)', () => {
+  it('renders exactly one path-free line per skill', () => {
+    const rendered = makeRegistry([
+      makeSkill('builtin-a', 'builtin', 'builtin description'),
+      makeSkill('user-a', 'user', 'user description'),
+      makeSkill('project-a', 'project', 'project description'),
+      makeSkill('extra-a', 'extra', 'extra description'),
+      makeSkill('subskill', 'user', 'sub', undefined, { type: 'prompt', isSubSkill: true }),
+      makeSkill('disabled', 'user', 'off', undefined, {
+        type: 'prompt',
+        disableModelInvocation: true,
+      }),
+    ]).getModelSkillListing({ compact: true });
+
+    expect(rendered).toContain('- project-a: project description');
+    expect(rendered).toContain('- user-a: user description');
+    expect(rendered).toContain('- extra-a: extra description');
+    expect(rendered).toContain('- builtin-a: builtin description');
+    expect(rendered).not.toContain('subskill');
+    expect(rendered).not.toContain('disabled');
+    expect(rendered).not.toContain('Path:');
+    expect(rendered).not.toContain('When to use:');
+    for (const name of ['project-a', 'user-a', 'extra-a', 'builtin-a']) {
+      expect(
+        rendered.split('\n').filter((line) => line.startsWith(`- ${name}:`)),
+      ).toHaveLength(1);
+    }
+  });
+
+  it('normalizes whitespace in compact descriptions into a single line', () => {
+    const rendered = makeRegistry([
+      makeSkill('demo', 'user', 'first line\nPath: /secret\nWhen to use: leaked\n### Injected'),
+    ]).getModelSkillListing({ compact: true });
+
+    expect(rendered.split('\n').filter((line) => line.startsWith('- demo:'))).toHaveLength(1);
+    expect(rendered).not.toContain('\nPath:');
+    expect(rendered).not.toContain('\nWhen to use:');
+    expect(rendered).not.toContain('\n### Injected');
+  });
+
+  it('truncates compact descriptions to the 80-character limit', () => {
+    const description = 'a'.repeat(100);
+    const rendered = makeRegistry([makeSkill('demo', 'user', description)]).getModelSkillListing({
+      compact: true,
+    });
+
+    expect(rendered).toContain(`- demo: ${'a'.repeat(77)}...`);
+    expect(rendered).not.toContain('a'.repeat(80));
+  });
+
+  it('keeps the no-options output byte-identical to the full format (default unchanged)', () => {
+    const registry = makeRegistry([
+      makeSkill('review', 'user', 'Review code', undefined, {
+        type: 'prompt',
+        whenToUse: 'When reviewing changes.',
+      }),
+    ]);
+
+    const defaultRendered = registry.getModelSkillListing();
+
+    expect(defaultRendered).toBe(registry.getModelSkillListing({}));
+    expect(defaultRendered).toBe(registry.getModelSkillListing({ compact: false }));
+    expect(defaultRendered).toContain('  When to use: When reviewing changes.');
+    expect(defaultRendered).toContain('  Path: /tmp/user/review/SKILL.md');
+  });
+
+  it('registers the compact-skill-listing flag default-off', () => {
+    const registered = getContributedFlags().find(
+      (flag) => flag.id === COMPACT_SKILL_LISTING_FLAG_ID,
+    );
+
+    expect(registered).toMatchObject({
+      id: 'compact-skill-listing',
+      env: 'KIMI_CODE_EXPERIMENTAL_COMPACT_SKILL_LISTING',
+      default: false,
+      surface: 'core',
+    });
   });
 });
 
