@@ -12,7 +12,10 @@
  *
  * Spawn bindings use an explicit tool choice first, then the target profile's
  * symbolic model preference, before `resolveSubagentBinding` falls back to the
- * configured secondary model or the caller's model. The selected alias is
+ * configured secondary model or the caller's model. Configured profile routing
+ * (`[subagent.routing.<profile>]` or a `[[subagent.pools.<profile>]]` route
+ * pool, resolved via `ISessionSubagentRoutingService`) wins over all of these;
+ * a pool slot is released once the run settles. The selected alias is
  * resolved through the model catalog before lifecycle allocation. A resumed
  * agent keeps the model recorded in its own wire journal — with per-subagent
  * models there is no "child follows the parent's current model" invariant to
@@ -78,7 +81,8 @@ import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
-import { ISessionSubagentService } from '#/session/subagent/subagent';
+import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
+import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
 import {
   buildSubagentModelDescriptions,
   formatSubagentTimeoutDescription,
@@ -143,6 +147,8 @@ export class SubagentTool implements ISubagentTool {
     @IConfigService private readonly config: IConfigService,
     @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @ISessionSubagentRoutingService
+    private readonly subagentRouting: ISessionSubagentRoutingService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -255,6 +261,7 @@ export class SubagentTool implements ISubagentTool {
     let agentId: string;
     let profileName: string;
     let promptText = args.prompt;
+    let releasePoolSlot: (() => void) | undefined;
     if (isResume) {
       const target = this.lifecycle.get(resumeAgentId);
       if (target === undefined) {
@@ -291,37 +298,61 @@ export class SubagentTool implements ISubagentTool {
           details: { agentId: this.callerAgentId },
         });
       }
-      const binding = resolveSubagentBinding(
-        this.config,
-        this.flags,
-        { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-        args.model ?? profile.modelPreference,
+      // Profile routing (pool first, then the static routing entry) overrides
+      // the secondary-model binding **per field** — design D-B5R-5: the binding
+      // is always resolved first (secondary model / modelChoice / profile
+      // preference stay in play), the route only overrides fields it sets.
+      // The pool slot is released when the run settles (attached to
+      // `completion` below) or immediately when the spawn fails before that.
+      const spawnRoute = await this.subagentRouting.resolveSpawnRoute(
+        requestedProfileName,
+        controller.signal,
       );
-      let created: IAgentScopeHandle;
+      releasePoolSlot = spawnRoute?.releasePoolSlot;
       try {
-        this.modelCatalog.get(binding.model);
-        created = await this.lifecycle.create({
-          binding: {
-            profile: profile.name,
-            model: binding.model,
-            thinking: binding.thinking,
-          },
-          labels: subagentLabels(this.callerAgentId),
+        const binding = resolveSubagentBinding(
+          this.config,
+          this.flags,
+          { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
+          args.model ?? profile.modelPreference,
+        );
+        const final =
+          spawnRoute === undefined
+            ? binding
+            : {
+                model: spawnRoute.route.modelAlias ?? binding.model,
+                thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
+              };
+        let created: IAgentScopeHandle;
+        try {
+          this.modelCatalog.get(final.model);
+          created = await this.lifecycle.create({
+            binding: {
+              profile: profile.name,
+              model: final.model,
+              thinking: final.thinking,
+            },
+            labels: subagentLabels(this.callerAgentId),
+          });
+        } catch (error) {
+          throw wrapSubagentModelError(error, final.model, own.modelAlias);
+        }
+        created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
+        created.accessor
+          .get(IAgentUserToolService)
+          .inheritUserTools(requester.accessor.get(IAgentUserToolService));
+        agentId = created.id;
+        profileName = profile.name;
+        promptText = await applyProfilePromptPrefix(profile, args.prompt, {
+          cwd: this.workspace.workDir,
+          runner: this.processRunner,
+          log: this.log,
         });
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.model, own.modelAlias);
+        releasePoolSlot?.();
+        releasePoolSlot = undefined;
+        throw error;
       }
-      created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
-      created.accessor
-        .get(IAgentUserToolService)
-        .inheritUserTools(requester.accessor.get(IAgentUserToolService));
-      agentId = created.id;
-      profileName = profile.name;
-      promptText = await applyProfilePromptPrefix(profile, args.prompt, {
-        cwd: this.workspace.workDir,
-        runner: this.processRunner,
-        log: this.log,
-      });
     }
 
     const runInBackground = args.run_in_background === true;
@@ -332,11 +363,18 @@ export class SubagentTool implements ISubagentTool {
       runInBackground,
     });
 
-    const run = await this.subagents.run(
-      agentId,
-      { kind: 'prompt', prompt: promptText },
-      { signal: controller.signal },
-    );
+    let run: AgentRunHandle;
+    try {
+      run = await this.subagents.run(
+        agentId,
+        { kind: 'prompt', prompt: promptText },
+        { signal: controller.signal },
+      );
+    } catch (error) {
+      releasePoolSlot?.();
+      releasePoolSlot = undefined;
+      throw error;
+    }
     const mirrored = mirrorAgentRun(requester, run, {
       profileName,
       prompt: promptText,
@@ -345,10 +383,24 @@ export class SubagentTool implements ISubagentTool {
         controller.abort(reason);
       },
     });
+    const completion = mirrored.then((r) => ({ result: r.summary, usage: r.usage }));
+    if (releasePoolSlot === undefined) {
+      return { agentId, profileName, completion };
+    }
+    const release = releasePoolSlot;
     return {
       agentId,
       profileName,
-      completion: mirrored.then((r) => ({ result: r.summary, usage: r.usage })),
+      completion: completion.then(
+        (settled) => {
+          release();
+          return settled;
+        },
+        (error: unknown) => {
+          release();
+          throw error;
+        },
+      ),
     };
   }
 

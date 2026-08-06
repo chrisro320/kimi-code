@@ -348,6 +348,8 @@ export * from '#/workspace/workspaceMcp/workspaceMcp';
 export * from '#/workspace/workspaceMcp/workspaceMcpService';
 export * from '#/session/subagent/subagent';
 export * from '#/session/subagent/subagentService';
+export * from '#/session/subagent/routing';
+export * from '#/session/subagent/routingService';
 import '#/session/subagent/flag';
 export * from '#/session/subagent/secondaryModelWarning';
 export * from '#/session/subagent/secondaryModelWarningService';

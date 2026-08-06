@@ -1036,6 +1036,94 @@ describe('Agent tool execution contract', () => {
     );
   });
 
+  it('routes the spawn through a configured profile routing entry', async () => {
+    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
+    ctx = createTestAgent(
+      sessionService(IAgentLifecycleService, lifecycle),
+      sessionService(ISessionSubagentService, lifecycle),
+      sessionService(ISessionCronService, cronStub),
+      modelProviderServices(modelCatalogResolving('mock-model', 'provider/routed')),
+      {
+        initialConfig: {
+          // The secondary model stays configured to prove routing wins over it.
+          secondaryModel: { model: 'provider/secondary', defaultEffort: 'low' },
+          models: {
+            'provider/routed': {
+              provider: 'test-provider',
+              model: 'routed-model',
+              maxContextSize: 262_144,
+            },
+          },
+          subagent: {
+            routing: {
+              coder: { backend: 'kimi', model: 'provider/routed', thinkingEffort: 'high' },
+            },
+          },
+        },
+      },
+    );
+    lifecycle.addHandle('main', 'agent');
+
+    await executeAgentTool(ctx, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+    });
+
+    expect(lifecycle.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({
+          model: 'provider/routed',
+          thinking: 'high',
+        }),
+      }),
+    );
+  });
+
+  it('falls back to the binding thinking when the routing entry sets only a model', async () => {
+    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
+    ctx = createTestAgent(
+      sessionService(IAgentLifecycleService, lifecycle),
+      sessionService(ISessionSubagentService, lifecycle),
+      sessionService(ISessionCronService, cronStub),
+      modelProviderServices(modelCatalogResolving('mock-model', 'provider/routed')),
+      secondaryModelFlags(),
+      {
+        initialConfig: {
+          secondaryModel: { model: 'provider/secondary', defaultEffort: 'low' },
+          models: {
+            'provider/routed': {
+              provider: 'test-provider',
+              model: 'routed-model',
+              maxContextSize: 262_144,
+            },
+          },
+          subagent: {
+            routing: {
+              // No thinkingEffort here: D-B5R-5 per-field override — the
+              // route wins the model, the binding keeps its thinking.
+              coder: { backend: 'kimi', model: 'provider/routed' },
+            },
+          },
+        },
+      },
+    );
+    lifecycle.addHandle('main', 'agent');
+
+    await executeAgentTool(ctx, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+    });
+
+    expect(lifecycle.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({
+          model: 'provider/routed',
+          thinking: 'low',
+        }),
+      }),
+    );
+  });
+
   it('binds the pointed entry directly with natural thinking when the recipe has no patch', async () => {
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     const context = createAgentToolContext(lifecycle, secondaryModelFlags(), {

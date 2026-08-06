@@ -14,8 +14,10 @@
  * slot and stop event.
  *
  * Wire shape note: the signals are still named `subagent.spawned / started /
- * completed / failed` and telemetry still tracks `subagent_created` so existing
- * session recordings and dashboards stay valid.
+ * progress / completed / failed` and telemetry still tracks
+ * `subagent_created` so existing session recordings and dashboards stay
+ * valid. The child's live usage totals are forwarded as `subagent.progress`
+ * for the duration of the run.
  */
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
@@ -57,6 +59,12 @@ export interface SubagentCompletedEvent {
   readonly contextTokens?: number;
 }
 
+export interface SubagentProgressEvent {
+  readonly type: 'subagent.progress';
+  readonly subagentId: string;
+  readonly usage: TokenUsage;
+}
+
 export interface SubagentFailedEvent {
   readonly type: 'subagent.failed';
   readonly subagentId: string;
@@ -67,6 +75,7 @@ declare module '#/app/event/eventBus' {
   interface DomainEventMap {
     'subagent.spawned': SubagentSpawnedEvent;
     'subagent.started': SubagentStartedEvent;
+    'subagent.progress': SubagentProgressEvent;
     'subagent.completed': SubagentCompletedEvent;
     'subagent.failed': SubagentFailedEvent;
   }
@@ -129,6 +138,17 @@ export async function mirrorAgentRun(
   const subagents = requester.accessor.get(ISessionSubagentService);
   const agentLifecycle = requester.accessor.get(IAgentLifecycleService);
   eventBus?.publish({ type: 'subagent.started', subagentId: run.agentId });
+  // Forward the child's live usage as `subagent.progress` on the requester's
+  // stream (the TUI badge and statusline consume it); the subscription dies
+  // with the run.
+  const progressSubscription = agentLifecycle
+    ?.get(run.agentId)
+    ?.accessor.get(IEventBus)
+    ?.subscribe('agent.status.updated', (event) => {
+      const total = event.usage?.total;
+      if (total === undefined) return;
+      eventBus?.publish({ type: 'subagent.progress', subagentId: run.agentId, usage: total });
+    });
   if (options.prompt !== undefined) {
     const cancelAndRethrow = (reason: unknown): never => {
       options.cancel?.(reason);
@@ -172,6 +192,8 @@ export async function mirrorAgentRun(
       });
     }
     throw error;
+  } finally {
+    progressSubscription?.dispose();
   }
 }
 
