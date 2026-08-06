@@ -724,6 +724,8 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       const properties: CompactionFinishedEvent = {
         turn_id: active.originTurnId,
         source: data.source,
+        // Only the local summarizer exists until B4-G wires the remote path.
+        implementation: 'local',
         tokens_before: result.tokensBefore,
         tokens_after: result.tokensAfter,
         duration_ms: Date.now() - startedAt,
