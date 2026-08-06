@@ -178,39 +178,42 @@ export class SessionSwarmService implements ISessionSwarmService {
         details: { agentId: callerAgentId },
       });
     }
-    // Profile routing (pool first, then the static entry) wins over the
-    // caller-supplied binding — see design D-B5R-5. Per-spawn acquisition
-    // happens here, not in the tool, so queued acquisitions interleave with
-    // the batch scheduler instead of deadlocking it.
+    // Profile routing (pool first, then the static entry) overrides the
+    // caller-supplied binding **per field** — see design D-B5R-5: the binding
+    // base is always computed first, the route only overrides fields it sets.
+    // Per-spawn acquisition happens here, not in the tool, so queued
+    // acquisitions interleave with the batch scheduler instead of deadlocking
+    // it.
     const spawnRoute = await this.subagentRouting.resolveSpawnRoute(
       options.profileName,
       options.signal,
     );
     let releasePoolSlot = spawnRoute?.releasePoolSlot;
     try {
-      const binding =
-        spawnRoute !== undefined
-          ? {
-              model: spawnRoute.route.modelAlias ?? callerData.modelAlias,
-              thinking: spawnRoute.route.thinkingEffort,
-            }
-          : (options.binding ?? {
-              model: callerData.modelAlias,
-              thinking: callerData.thinkingLevel,
-            });
+      const binding = options.binding ?? {
+        model: callerData.modelAlias,
+        thinking: callerData.thinkingLevel,
+      };
+      const final =
+        spawnRoute === undefined
+          ? binding
+          : {
+              model: spawnRoute.route.modelAlias ?? binding.model,
+              thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
+            };
       let child: IAgentScopeHandle;
       try {
-        this.modelCatalog.get(binding.model);
+        this.modelCatalog.get(final.model);
         child = await this.lifecycle.create({
           binding: {
             profile: profile.name,
-            model: binding.model,
-            thinking: binding.thinking,
+            model: final.model,
+            thinking: final.thinking,
           },
           labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
         });
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.model, callerData.modelAlias);
+        throw wrapSubagentModelError(error, final.model, callerData.modelAlias);
       }
       child.accessor
         .get(IAgentPermissionModeService)

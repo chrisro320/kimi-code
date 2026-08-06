@@ -1287,6 +1287,37 @@ describe('SessionSwarmService metadata compatibility', () => {
     );
   });
 
+  it('keeps the binding thinking when the route sets only a model', async () => {
+    resolveSpawnRoute.mockResolvedValue({
+      route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+    });
+    const service = ix.get(ISessionSwarmService);
+    const spawnTask: SessionSwarmSpawnTask = {
+      ...spawnSessionTask('src/a.ts'),
+      kind: 'spawn',
+      binding: { model: 'provider/secondary', thinking: 'low' },
+    };
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [spawnTask],
+      }),
+    ).resolves.toMatchObject([{ status: 'completed', agentId: 'agent-new' }]);
+
+    // D-B5R-5 per-field override: the route wins the model, the caller
+    // binding keeps its thinking.
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: {
+          profile: 'coder',
+          model: 'provider/routed',
+          thinking: 'low',
+        },
+      }),
+    );
+  });
+
   it('releases the pool slot when the spawned run settles', async () => {
     const releasePoolSlot = vi.fn();
     resolveSpawnRoute.mockResolvedValue({

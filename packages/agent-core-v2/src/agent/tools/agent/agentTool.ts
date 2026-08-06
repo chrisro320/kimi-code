@@ -298,41 +298,44 @@ export class SubagentTool implements ISubagentTool {
           details: { agentId: this.callerAgentId },
         });
       }
-      // Profile routing (pool first, then the static routing entry) wins
-      // over the secondary-model binding — design D-B5R-5. The pool slot is
-      // released when the run settles (attached to `completion` below) or
-      // immediately when the spawn fails before that.
+      // Profile routing (pool first, then the static routing entry) overrides
+      // the secondary-model binding **per field** — design D-B5R-5: the binding
+      // is always resolved first (secondary model / modelChoice / profile
+      // preference stay in play), the route only overrides fields it sets.
+      // The pool slot is released when the run settles (attached to
+      // `completion` below) or immediately when the spawn fails before that.
       const spawnRoute = await this.subagentRouting.resolveSpawnRoute(
         requestedProfileName,
         controller.signal,
       );
       releasePoolSlot = spawnRoute?.releasePoolSlot;
       try {
-        const binding =
+        const binding = resolveSubagentBinding(
+          this.config,
+          this.flags,
+          { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
+          args.model ?? profile.modelPreference,
+        );
+        const final =
           spawnRoute === undefined
-            ? resolveSubagentBinding(
-                this.config,
-                this.flags,
-                { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-                args.model ?? profile.modelPreference,
-              )
+            ? binding
             : {
-                model: spawnRoute.route.modelAlias ?? own.modelAlias,
-                thinking: spawnRoute.route.thinkingEffort,
+                model: spawnRoute.route.modelAlias ?? binding.model,
+                thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
               };
         let created: IAgentScopeHandle;
         try {
-          this.modelCatalog.get(binding.model);
+          this.modelCatalog.get(final.model);
           created = await this.lifecycle.create({
             binding: {
               profile: profile.name,
-              model: binding.model,
-              thinking: binding.thinking,
+              model: final.model,
+              thinking: final.thinking,
             },
             labels: subagentLabels(this.callerAgentId),
           });
         } catch (error) {
-          throw wrapSubagentModelError(error, binding.model, own.modelAlias);
+          throw wrapSubagentModelError(error, final.model, own.modelAlias);
         }
         created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
         created.accessor
