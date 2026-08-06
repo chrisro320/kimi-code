@@ -28,6 +28,7 @@ import {
   type AgentTaskHooks,
   ISessionSubagentService,
 } from '#/session/subagent/subagent';
+import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import {
   ISessionMetadata,
@@ -846,6 +847,7 @@ describe('SessionSwarmService metadata compatibility', () => {
   let subagents: ISessionSubagentService;
   let createAgent: ReturnType<typeof vi.fn>;
   let runAgent: ReturnType<typeof vi.fn>;
+  let resolveSpawnRoute: ReturnType<typeof vi.fn>;
   let eventBus: IEventBus;
 
   beforeEach(() => {
@@ -858,8 +860,13 @@ describe('SessionSwarmService metadata compatibility', () => {
     subagents = subagentStub();
     createAgent = lifecycle.create as ReturnType<typeof vi.fn>;
     runAgent = subagents.run as ReturnType<typeof vi.fn>;
+    resolveSpawnRoute = vi.fn(async () => undefined);
     handles.set('main', agentHandle('main', lifecycle, eventBus));
 
+    ix.stub(ISessionSubagentRoutingService, {
+      _serviceBrand: undefined,
+      resolveSpawnRoute,
+    } as unknown as ISessionSubagentRoutingService);
     ix.stub(IAgentLifecycleService, lifecycle);
     ix.stub(ISessionSubagentService, subagents);
     ix.stub(ISessionAgentProfileCatalog, {
@@ -1248,6 +1255,122 @@ describe('SessionSwarmService metadata compatibility', () => {
     expect(eventBus.publish).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'subagent.spawned' }),
     );
+  });
+
+  it('routes spawns through the profile route when one resolves', async () => {
+    resolveSpawnRoute.mockResolvedValue({
+      route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: 'high' },
+    });
+    const service = ix.get(ISessionSwarmService);
+    const spawnTask: SessionSwarmSpawnTask = {
+      ...spawnSessionTask('src/a.ts'),
+      kind: 'spawn',
+      binding: { model: 'provider/secondary', thinking: 'low' },
+    };
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [spawnTask],
+      }),
+    ).resolves.toMatchObject([{ status: 'completed', agentId: 'agent-new' }]);
+
+    expect(resolveSpawnRoute).toHaveBeenCalledWith('coder', expect.anything());
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: {
+          profile: 'coder',
+          model: 'provider/routed',
+          thinking: 'high',
+        },
+      }),
+    );
+  });
+
+  it('releases the pool slot when the spawned run settles', async () => {
+    const releasePoolSlot = vi.fn();
+    resolveSpawnRoute.mockResolvedValue({
+      route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+      releasePoolSlot,
+    });
+    const service = ix.get(ISessionSwarmService);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [spawnSessionTask('src/a.ts')],
+      }),
+    ).resolves.toMatchObject([{ status: 'completed' }]);
+
+    expect(releasePoolSlot).toHaveBeenCalledOnce();
+  });
+
+  it('holds the pool slot across a provider-rate-limit retry of the same agent', async () => {
+    vi.useFakeTimers();
+    try {
+      agents['agent-pooled'] = {
+        labels: { parentAgentId: 'main' },
+      };
+      const releasePoolSlot = vi.fn();
+      let routeCalls = 0;
+      resolveSpawnRoute.mockImplementation(async () => {
+        routeCalls += 1;
+        return routeCalls === 1
+          ? {
+              route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+              releasePoolSlot,
+            }
+          : { route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined } };
+      });
+      let created = 0;
+      createAgent.mockImplementation(async (opts: CreateAgentOptions = {}) => {
+        created += 1;
+        const id = created === 1 ? 'agent-pooled' : 'agent-blocker';
+        const handle = agentHandle(id, lifecycle, eventBus, {
+          profileName: opts.binding?.profile ?? 'coder',
+          modelAlias: opts.binding?.model ?? 'kimi-test',
+          thinkingLevel: opts.binding?.thinking ?? 'medium',
+        });
+        handles.set(id, handle);
+        return handle;
+      });
+      const rateLimited = createControlledPromise<{ summary: string }>();
+      const blocker = createControlledPromise<{ summary: string }>();
+      let pooledRuns = 0;
+      runAgent.mockImplementation((agentId, request, options) => {
+        options?.onReady?.();
+        if (agentId === 'agent-pooled') {
+          pooledRuns += 1;
+          return {
+            agentId,
+            turn: {} as never,
+            completion:
+              pooledRuns === 1
+                ? rateLimited
+                : Promise.resolve({ summary: 'recovered summary' }),
+          };
+        }
+        return { agentId, turn: {} as never, completion: blocker };
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [spawnSessionTask('src/a.ts'), spawnSessionTask('src/b.ts')],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      // The slot stays held while the rate-limited agent is requeued for retry.
+      expect(releasePoolSlot).not.toHaveBeenCalled();
+      blocker.resolve({ summary: 'blocker summary' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await running;
+
+      expect(releasePoolSlot).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

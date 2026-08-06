@@ -11,7 +11,11 @@
  * requeued after a provider rate limit) are emitted from this layer; the
  * lifecycle registry itself stays flat. Spawn tasks may carry a concrete
  * `binding` resolved by the caller; without
- * one, spawns inherit the caller agent's model and thinking level. Spawn
+ * one, spawns inherit the caller agent's model and thinking level. Profile
+ * routing (`[subagent.routing.*]` / `[[subagent.pools.*]]`, resolved through
+ * `ISessionSubagentRoutingService` per spawn attempt) wins over both — a
+ * pool slot is acquired per spawn and released when the agent's run settles,
+ * held across provider-rate-limit retries of the same agent. Spawn
  * bindings are resolved through the model catalog before lifecycle allocation.
  * Resumed agents keep the model recorded in their own wire journal — with
  * per-subagent models there is no "child follows the parent's current model"
@@ -42,6 +46,8 @@ import {
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { wrapSubagentModelError } from '#/session/subagent/configSection';
+import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
@@ -81,6 +87,14 @@ export class SessionSwarmService implements ISessionSwarmService {
 
   private readonly inFlight = new Map<string, AbortController>();
 
+  /**
+   * Pool-slot releases of in-flight swarm spawns, keyed by child agent id. A
+   * slot is held across provider-rate-limit retries of the same agent and
+   * released when the agent's run reaches any other terminal state; the
+   * per-batch sweep in `run` covers requeued agents whose retry never came.
+   */
+  private readonly poolSlots = new Map<string, () => void>();
+
   constructor(
     @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
@@ -90,6 +104,8 @@ export class SessionSwarmService implements ISessionSwarmService {
     @ISessionProcessRunner private readonly processRunner: ISessionProcessRunner,
     @ILogService private readonly log: ILogService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @ISessionSubagentRoutingService
+    private readonly subagentRouting: ISessionSubagentRoutingService,
   ) {}
 
   async getSwarmItem(args: {
@@ -111,8 +127,9 @@ export class SessionSwarmService implements ISessionSwarmService {
       if (task.signal !== undefined) unlinks.push(linkAbortSignal(task.signal, controller));
       return { ...task, signal: controller.signal };
     });
+    const batchPoolAgents = new Set<string>();
     const launcher: AgentRunBatchLauncher = {
-      spawn: (options) => this.spawnAttempt(callerAgentId, options),
+      spawn: (options) => this.spawnAttempt(callerAgentId, options, batchPoolAgents),
       resume: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, false),
       retry: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, true),
       suspended: (event) => {
@@ -129,6 +146,10 @@ export class SessionSwarmService implements ISessionSwarmService {
     void promise.finally(() => {
       for (const unlink of unlinks) unlink();
       if (this.inFlight.get(callerAgentId) === controller) this.inFlight.delete(callerAgentId);
+      // Sweep pool slots of agents whose rate-limit retry never came (batch
+      // aborted or failed while they were requeued). Already-released slots
+      // are no-ops.
+      for (const agentId of batchPoolAgents) this.releasePoolSlotFor(agentId);
     });
     return promise;
   }
@@ -140,6 +161,7 @@ export class SessionSwarmService implements ISessionSwarmService {
   private async spawnAttempt(
     callerAgentId: string,
     options: AgentSpawnAttemptOptions,
+    batchPoolAgents: Set<string>,
   ): Promise<AgentRunAttemptHandle> {
     options.signal.throwIfAborted();
     const caller = this.requireHandle(callerAgentId, 'Caller agent');
@@ -156,47 +178,78 @@ export class SessionSwarmService implements ISessionSwarmService {
         details: { agentId: callerAgentId },
       });
     }
-    const binding = options.binding ?? {
-      model: callerData.modelAlias,
-      thinking: callerData.thinkingLevel,
-    };
-    let child: IAgentScopeHandle;
+    // Profile routing (pool first, then the static entry) wins over the
+    // caller-supplied binding — see design D-B5R-5. Per-spawn acquisition
+    // happens here, not in the tool, so queued acquisitions interleave with
+    // the batch scheduler instead of deadlocking it.
+    const spawnRoute = await this.subagentRouting.resolveSpawnRoute(
+      options.profileName,
+      options.signal,
+    );
+    let releasePoolSlot = spawnRoute?.releasePoolSlot;
     try {
-      this.modelCatalog.get(binding.model);
-      child = await this.lifecycle.create({
-        binding: {
-          profile: profile.name,
-          model: binding.model,
-          thinking: binding.thinking,
-        },
-        labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
+      const binding =
+        spawnRoute !== undefined
+          ? {
+              model: spawnRoute.route.modelAlias ?? callerData.modelAlias,
+              thinking: spawnRoute.route.thinkingEffort,
+            }
+          : (options.binding ?? {
+              model: callerData.modelAlias,
+              thinking: callerData.thinkingLevel,
+            });
+      let child: IAgentScopeHandle;
+      try {
+        this.modelCatalog.get(binding.model);
+        child = await this.lifecycle.create({
+          binding: {
+            profile: profile.name,
+            model: binding.model,
+            thinking: binding.thinking,
+          },
+          labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
+        });
+      } catch (error) {
+        throw wrapSubagentModelError(error, binding.model, callerData.modelAlias);
+      }
+      child.accessor
+        .get(IAgentPermissionModeService)
+        .setMode(caller.accessor.get(IAgentPermissionModeService).mode);
+      child.accessor
+        .get(IAgentUserToolService)
+        .inheritUserTools(caller.accessor.get(IAgentUserToolService));
+      emitAgentRunSpawned(caller, child.id, {
+        profileName: options.profileName,
+        parentToolCallId: options.parentToolCallId,
+        parentToolCallUuid: options.parentToolCallUuid,
+        description: options.description,
+        swarmIndex: options.swarmIndex,
+        runInBackground: options.runInBackground,
       });
+      const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
+        cwd: this.sessionContext.cwd,
+        runner: this.processRunner,
+        log: this.log,
+      });
+      if (releasePoolSlot !== undefined) {
+        this.poolSlots.set(child.id, releasePoolSlot);
+        batchPoolAgents.add(child.id);
+        releasePoolSlot = undefined;
+      }
+      return this.observe(
+        caller,
+        child.id,
+        options.profileName,
+        {
+          kind: 'prompt',
+          prompt: promptText,
+        },
+        options,
+      );
     } catch (error) {
-      throw wrapSubagentModelError(error, binding.model, callerData.modelAlias);
+      releasePoolSlot?.();
+      throw error;
     }
-    child.accessor
-      .get(IAgentPermissionModeService)
-      .setMode(caller.accessor.get(IAgentPermissionModeService).mode);
-    child.accessor
-      .get(IAgentUserToolService)
-      .inheritUserTools(caller.accessor.get(IAgentUserToolService));
-    emitAgentRunSpawned(caller, child.id, {
-      profileName: options.profileName,
-      parentToolCallId: options.parentToolCallId,
-      parentToolCallUuid: options.parentToolCallUuid,
-      description: options.description,
-      swarmIndex: options.swarmIndex,
-      runInBackground: options.runInBackground,
-    });
-    const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
-      cwd: this.sessionContext.cwd,
-      runner: this.processRunner,
-      log: this.log,
-    });
-    return this.observe(caller, child.id, options.profileName, {
-      kind: 'prompt',
-      prompt: promptText,
-    }, options);
   }
 
   private async resumeAttempt(
@@ -245,11 +298,35 @@ export class SessionSwarmService implements ISessionSwarmService {
       suppressRateLimitFailureEvent: options.suppressRateLimitFailureEvent,
       signal: options.signal,
     });
+    const completion = mirrored.then((r) => ({ result: r.summary, usage: r.usage }));
+    if (!this.poolSlots.has(agentId)) {
+      return { agentId, profileName, completion };
+    }
     return {
       agentId,
       profileName,
-      completion: mirrored.then((r) => ({ result: r.summary, usage: r.usage })),
+      completion: completion.then(
+        (settled) => {
+          this.releasePoolSlotFor(agentId);
+          return settled;
+        },
+        (error: unknown) => {
+          // A provider rate limit requeues the SAME agent for a retry, so its
+          // pool slot stays held across attempts; every other terminal state
+          // releases. Requeued agents whose retry never comes are covered by
+          // the per-batch sweep in `run`.
+          if (!isProviderRateLimitError(error)) this.releasePoolSlotFor(agentId);
+          throw error;
+        },
+      ),
     };
+  }
+
+  private releasePoolSlotFor(agentId: string): void {
+    const release = this.poolSlots.get(agentId);
+    if (release === undefined) return;
+    this.poolSlots.delete(agentId);
+    release();
   }
 
   private requireHandle(agentId: string, label: string): IAgentScopeHandle {
