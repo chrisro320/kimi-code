@@ -4,7 +4,12 @@
  *
  * Owns the `[subagent]` configuration section (`timeout_ms` on disk) together
  * with the `KIMI_SUBAGENT_TIMEOUT_MS` env override (precedence: env >
- * config.toml > 2h default). While
+ * config.toml > 2h default). The section also carries the spawn-routing
+ * tables: `[subagent.routing.<profile>]` binds a profile to a fixed
+ * backend/model/thinking_effort route, and `[[subagent.pools.<profile>]]`
+ * declares a pool of weighted routes rotated per spawn (resolution lives in
+ * `routing.ts`; both need the deep snake_case conversion in
+ * `subagentFromToml`/`subagentToToml`). While
  * the env var is set, `stripEnvBoundFields` restores the env-free raw value
  * before persistence, so the override never leaks into `config.toml`. Per-run
  * timeouts resolve through `resolveSubagentTimeoutMs`, and the timeout
@@ -37,7 +42,13 @@ import { z } from 'zod';
 
 import { Error2, ErrorCodes, isError2 } from '#/errors';
 import type { AgentModelPreference } from '#/app/agentProfileCatalog/agentProfileCatalog';
-import { isPlainObject } from '#/app/config/toml';
+import {
+  camelToSnake,
+  cloneRecord,
+  isPlainObject,
+  setDefined,
+  transformPlainObject,
+} from '#/app/config/toml';
 import type { IFlagService } from '#/app/flag/flag';
 import {
   SECONDARY_MODEL_ENV,
@@ -62,8 +73,41 @@ import { SECONDARY_MODEL_FLAG_ID } from './flag';
 
 export const SUBAGENT_SECTION = 'subagent';
 
+export const SubagentRoutingSchema = z.object({
+  /** `kimi` (or omitted) uses the in-process subagent. */
+  backend: z.string().min(1).optional(),
+  /** Model alias used by this subagent type. */
+  model: z.string().min(1).optional(),
+  /** Thinking effort for an in-process Kimi route; external backends ignore it. */
+  thinkingEffort: z.string().min(1).optional(),
+});
+
+export type SubagentRouting = z.infer<typeof SubagentRoutingSchema>;
+
+export const SubagentPoolRouteSchema = z.object({
+  /** `kimi` uses the in-process subagent; anything else must exist in `subagent.backends`. */
+  backend: z.string().min(1),
+  /** Model alias used when this route is selected. */
+  model: z.string().min(1).optional(),
+  /** Thinking effort for an in-process Kimi route; external backends ignore it. */
+  thinkingEffort: z.string().min(1).optional(),
+  /** Max concurrently active spawns through this route. Unset means unlimited. */
+  maxConcurrency: z.number().int().min(1).optional(),
+  /** Relative weight for round-robin selection. Defaults to 1. */
+  weight: z.number().positive().optional(),
+});
+
+export type SubagentPoolRoute = z.infer<typeof SubagentPoolRouteSchema>;
+
 export const SubagentConfigSchema = z.object({
   timeoutMs: z.number().int().min(0).optional(),
+  routing: z.record(z.string().min(1), SubagentRoutingSchema).optional(),
+  /**
+   * Per-profile pool of weighted routes. When a profile has a non-empty
+   * pool, spawns go through a deterministic weighted round-robin over these
+   * routes instead of the single `routing` entry.
+   */
+  pools: z.record(z.string().min(1), z.array(SubagentPoolRouteSchema).min(1)).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
@@ -86,8 +130,98 @@ export const subagentEnvBindings: EnvBindings<SubagentConfig> = envBindings(
 
 export const stripSubagentEnv = stripEnvBoundFields(subagentEnvBindings);
 
+/**
+ * The default TOML transform is shallow, but `routing.<profile>` entries and
+ * `pools.<profile>` array items nest snake_case keys (`thinking_effort`,
+ * `max_concurrency`) one level deeper — convert those explicitly or the
+ * schema would silently strip them.
+ */
+export const subagentFromToml = (rawSnake: unknown): unknown => {
+  if (!isPlainObject(rawSnake)) return rawSnake;
+  const converted = transformPlainObject(rawSnake);
+  if (isPlainObject(converted['routing'])) {
+    const routing: Record<string, unknown> = {};
+    for (const [profile, entry] of Object.entries(converted['routing'])) {
+      routing[profile] = isPlainObject(entry) ? transformPlainObject(entry) : entry;
+    }
+    converted['routing'] = routing;
+  }
+  if (isPlainObject(converted['pools'])) {
+    const pools: Record<string, unknown> = {};
+    for (const [profile, entries] of Object.entries(converted['pools'])) {
+      pools[profile] = Array.isArray(entries)
+        ? entries.map((entry) => (isPlainObject(entry) ? transformPlainObject(entry) : entry))
+        : entries;
+    }
+    converted['pools'] = pools;
+  }
+  return converted;
+};
+
+export const subagentToToml = (value: unknown, rawSnake: unknown): unknown => {
+  if (!isPlainObject(value)) return value;
+  const rawSub = cloneRecord(rawSnake);
+  const out = cloneRecord(rawSnake);
+  for (const [key, field] of Object.entries(value)) {
+    if (key === 'routing' && isPlainObject(field)) {
+      out['routing'] = subagentRoutingToToml(field, rawSub['routing']);
+    } else if (key === 'pools' && isPlainObject(field)) {
+      out['pools'] = subagentPoolsToToml(field, rawSub['pools']);
+    } else {
+      setDefined(out, camelToSnake(key), field);
+    }
+  }
+  return out;
+};
+
+function subagentRoutingToToml(
+  routing: Record<string, unknown>,
+  rawSnake: unknown,
+): Record<string, unknown> {
+  const rawSub = cloneRecord(rawSnake);
+  const out: Record<string, unknown> = {};
+  for (const [profile, entry] of Object.entries(routing)) {
+    if (!isPlainObject(entry)) {
+      out[profile] = entry;
+      continue;
+    }
+    const merged = cloneRecord(rawSub[profile]);
+    for (const [key, field] of Object.entries(entry)) {
+      setDefined(merged, camelToSnake(key), field);
+    }
+    out[profile] = merged;
+  }
+  return out;
+}
+
+function subagentPoolsToToml(
+  pools: Record<string, unknown>,
+  rawSnake: unknown,
+): Record<string, unknown> {
+  const rawSub = cloneRecord(rawSnake);
+  const out: Record<string, unknown> = {};
+  for (const [profile, entries] of Object.entries(pools)) {
+    if (!Array.isArray(entries)) {
+      out[profile] = entries;
+      continue;
+    }
+    const rawEntries: unknown = rawSub[profile];
+    out[profile] = entries.map((entry, index) => {
+      if (!isPlainObject(entry)) return entry;
+      const merged = cloneRecord(Array.isArray(rawEntries) ? rawEntries[index] : undefined);
+      for (const [key, field] of Object.entries(entry)) {
+        setDefined(merged, camelToSnake(key), field);
+      }
+      return merged;
+    });
+  }
+  return out;
+}
+
 registerConfigSection(SUBAGENT_SECTION, SubagentConfigSchema, {
   defaultValue: { timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS },
+  fromToml: subagentFromToml,
+  toToml: subagentToToml,
   env: subagentEnvBindings,
   stripEnv: stripSubagentEnv,
 });
