@@ -14,7 +14,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
-import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
+import { UNKNOWN_CAPABILITY, type ModelCapability } from '#/kosong/contract/capability';
+import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
+import { abortError } from '#/_base/utils/abort';
+import type { ModelCompactionOutcome } from '#/kosong/model/modelRequester';
 import {
   APIConnectionError,
   APIContextOverflowError,
@@ -36,10 +39,12 @@ import { MASTER_ENV } from '#/app/flag/flagService';
 import { estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } from '../../harness';
-import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, sessionServices, testAgent } from '../../harness';
+import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, logServices, sessionServices, testAgent } from '../../harness';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import {
   IAgentFullCompactionService,
+  IAgentLLMRequesterService,
+  IAgentUsageService,
   IModelOAuthTokens,
   IAgentProfileService,
   IAgentToolRegistryService,
@@ -3405,5 +3410,226 @@ describe('goal reminder re-injection after full compaction', () => {
     expect(turnRequest).toContain('deferred prompt');
     expect(goalReminderCount(turnRequest)).toBeGreaterThanOrEqual(1);
     expect(turnRequest.some((text) => text.includes('Compacted summary.'))).toBe(true);
+  });
+
+  describe('remote compaction wiring (B4-G)', () => {
+    const REMOTE_CAPS = { ...CATALOGUED_MODEL_CAPABILITIES, remote_compaction: true } as const;
+    const REMOTE_LINEAGE = {
+      provider: 'kimi',
+      model: 'kimi-code',
+      baseUrl: 'https://api.example/v1',
+    } as const;
+
+    function remoteCheckpoint(): CompactionCheckpoint {
+      return {
+        encrypted: 'opaque-remote-payload',
+        itemType: 'compaction',
+        lineage: { ...REMOTE_LINEAGE },
+        replayInputTokens: { kind: 'measured', tokens: 1234 },
+      };
+    }
+
+    function remoteOkOutcome(
+      checkpoint: CompactionCheckpoint,
+      retainedMessages: readonly Message[] = [],
+    ): ModelCompactionOutcome {
+      return {
+        kind: 'ok',
+        result: {
+          checkpoint,
+          retainedMessages,
+          usage: { inputOther: 500, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+          traceId: 'trace-remote',
+        },
+      };
+    }
+
+    function configuredAgent(
+      records: TelemetryRecord[],
+      capabilities: ModelCapability = REMOTE_CAPS,
+    ) {
+      const ctx = testAgent({ telemetry: recordingTelemetry(records) });
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: capabilities,
+        tools: SNAPSHOT_VISIBLE_TOOLS,
+      });
+      ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+      ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+      return ctx;
+    }
+
+    async function runManualCompaction(ctx: TestAgentContext): Promise<void> {
+      const compacted = new Promise<void>((resolve) => {
+        ctx.emitter.once('full_compaction.complete', () => {
+          resolve();
+        });
+      });
+      ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
+      await ctx.rpc.beginCompaction({});
+      await compacted;
+    }
+
+    it('takes the local path silently when the model does not declare remote_compaction', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records, CATALOGUED_MODEL_CAPABILITIES);
+      const compactSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact');
+
+      await runManualCompaction(ctx);
+
+      expect(compactSpy).not.toHaveBeenCalled();
+      expect(
+        records.filter((record) => record.event === 'compaction_remote_fallback'),
+      ).toHaveLength(0);
+      expect(
+        records.find((record) => record.event === 'compaction_finished')?.properties,
+      ).toMatchObject({ implementation: 'local' });
+    });
+
+    it('falls back with an unsupported event when the provider has no endpoint', async () => {
+      const warn = vi.fn();
+      const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
+      const records: TelemetryRecord[] = [];
+      const ctx = testAgent(
+        { telemetry: recordingTelemetry(records) },
+        logServices(logger),
+      );
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: REMOTE_CAPS,
+        tools: SNAPSHOT_VISIBLE_TOOLS,
+      });
+      ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+      ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+
+      await runManualCompaction(ctx);
+
+      // The harness provider has no compactConversation, so the REAL gate
+      // chain runs: capability passes, the requester answers unsupported.
+      expect(records).toContainEqual({
+        event: 'compaction_remote_fallback',
+        properties: expect.objectContaining({ reason: 'unsupported' }),
+      });
+      expect(
+        records.find((record) => record.event === 'compaction_finished')?.properties,
+      ).toMatchObject({ implementation: 'local' });
+      expect(ctx.compactHistory().some((entry) => entry.text.includes('Compacted summary.'))).toBe(
+        true,
+      );
+      const compactionWarnings = warn.mock.calls.filter(([message]) =>
+        String(message).toLowerCase().includes('compact'),
+      );
+      expect(compactionWarnings).toHaveLength(0);
+    });
+
+    it('falls back with a request_failed event on remote error and does not retry remote', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      const compactSpy = vi
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .mockResolvedValue({ kind: 'error', error: new APIConnectionError('endpoint down') });
+
+      await runManualCompaction(ctx);
+
+      expect(compactSpy).toHaveBeenCalledTimes(1);
+      expect(records).toContainEqual({
+        event: 'compaction_remote_fallback',
+        properties: expect.objectContaining({
+          reason: 'request_failed',
+          error_type: expect.any(String),
+        }),
+      });
+      expect(
+        records.find((record) => record.event === 'compaction_finished')?.properties,
+      ).toMatchObject({ implementation: 'local' });
+      expect(ctx.compactHistory().some((entry) => entry.text.includes('Compacted summary.'))).toBe(
+        true,
+      );
+    });
+
+    it('propagates a remote abort instead of swallowing it into a fallback', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockRejectedValue(
+        abortError('remote aborted'),
+      );
+      const cancelled = ctx.once('compaction.cancelled');
+
+      await ctx.rpc.beginCompaction({});
+      await cancelled;
+
+      expect(records.filter((record) => record.event === 'compaction_remote_fallback')).toHaveLength(0);
+      expect(records.filter((record) => record.event === 'compaction_finished')).toHaveLength(0);
+      expect(ctx.compactHistory()).toEqual([
+        { role: 'user', text: 'old user one' },
+        { role: 'assistant', text: 'old assistant one' },
+        { role: 'user', text: 'recent user two' },
+        { role: 'assistant', text: 'recent assistant two' },
+      ]);
+    });
+
+    it('still runs the summarizer on remote success and lands the checkpoint on the summary origin', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      const compactSpy = vi
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .mockResolvedValue(remoteOkOutcome(remoteCheckpoint()));
+
+      await runManualCompaction(ctx);
+
+      // The remote attempt saw the unshrunk history; the summarizer ran too
+      // (its output is the only portable record of the fold).
+      expect(compactSpy).toHaveBeenCalledTimes(1);
+      expect(compactSpy.mock.calls[0]?.[0]?.history).toHaveLength(4);
+      expect(ctx.llmCalls).toHaveLength(1);
+      expect(
+        records.find((record) => record.event === 'compaction_finished')?.properties,
+      ).toMatchObject({ implementation: 'remote' });
+
+      const summaryMessage = ctx.context
+        .get()
+        .find((message) => message.origin?.kind === 'compaction_summary');
+      expect(summaryMessage?.origin).toEqual({
+        kind: 'compaction_summary',
+        checkpoint: expect.objectContaining({ encrypted: 'opaque-remote-payload' }),
+      });
+      // The checkpoint rides the origin sidecar only — never message content.
+      expect(JSON.stringify(summaryMessage?.content)).not.toContain('opaque-remote-payload');
+    });
+
+    it('discards the endpoint retainedMessages echo instead of merging it into history', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockResolvedValue(
+        remoteOkOutcome(remoteCheckpoint(), [textMessage('user', 'endpoint-retained-echo')]),
+      );
+
+      await runManualCompaction(ctx);
+
+      expect(JSON.stringify(ctx.context.get())).not.toContain('endpoint-retained-echo');
+    });
+
+    it('records remote usage exactly once (inside compact(), never in the caller)', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      const usageService = ctx.get(IAgentUsageService);
+      const recordSpy = vi.spyOn(usageService, 'record');
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockImplementation(async (input) => {
+        // Mirror compact()'s real contract: usage is recorded inside, once.
+        usageService.record(
+          'kimi-code',
+          { inputOther: 500, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+          input?.source,
+        );
+        return remoteOkOutcome(remoteCheckpoint());
+      });
+
+      await runManualCompaction(ctx);
+
+      const remoteUsageRecords = recordSpy.mock.calls.filter(
+        ([, , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
+      );
+      expect(remoteUsageRecords).toHaveLength(1);
+    });
   });
 });
