@@ -607,6 +607,7 @@ export * from '#/tool/toolContract';
 export * from '#/agent/toolExecutor/toolHooks';
 export * from '#/agent/toolExecutor/toolExecutor';
 export * from '#/agent/toolExecutor/toolExecutorService';
+export * from '#/agent/toolExecutor/deterministicFingerprint';
 export * from '#/agent/toolResultTruncation/toolResultTruncation';
 import '#/agent/toolResultTruncation/toolResultTruncationService';
 import '#/agent/toolActivation/toolActivationService';

@@ -55,6 +55,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { OrderedHookSlot } from '#/hooks';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import { BeforeToolExecuteEmitter } from './beforeToolExecuteEvent';
+import { DeterministicFailureFingerprint } from './deterministicFingerprint';
 import {
   IAgentToolExecutorService,
   type MissingToolDescriber,
@@ -133,6 +134,13 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
   private missingToolDescriber: MissingToolDescriber | undefined;
   private unavailableToolDescriber: UnavailableToolDescriber | undefined;
   private toolCallGuard: ToolCallGuard | undefined;
+
+  /**
+   * Per-Agent deterministic failure records (v1 parity: owned by the Agent
+   * for its whole lifetime — this service is Agent-scoped). Not reset per
+   * turn or step.
+   */
+  private readonly deterministicFailures = new DeterministicFailureFingerprint();
 
   recordDupType(toolCallId: string, dupType: ToolCallDupType): void {
     this.toolCallDupTypes.set(toolCallId, dupType);
@@ -416,6 +424,14 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       );
     }
 
+    // Deterministic failure fingerprint: this exact (toolName, args) already
+    // failed on a path-shape condition that cannot change between calls —
+    // block before execution with the recorded failure instead of re-running.
+    const blocked = this.deterministicFailures.checkFingerprint(call.toolName, call.args);
+    if (blocked !== null) {
+      return settleSynthetic(call.args, blocked, 'synthetic', displayFields);
+    }
+
     if (execution.isError === true) {
       return settleSynthetic(call.args, execution, 'synthetic', displayFields);
     }
@@ -632,6 +648,18 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     outcome: ToolExecutionOutcome,
     resolvedAccesses?: ToolAccesses,
   ): Promise<ToolResult> {
+    // Deterministic failure fingerprint: record path-shape failures, and
+    // drop records whose paths a successful mutation just changed. Only real
+    // executions count — synthetic/vetoed results are not filesystem
+    // evidence.
+    if (outcome === 'executed') {
+      if (result.isError === true) {
+        this.deterministicFailures.recordIfDeterministic(call.toolName, call.args, result);
+      } else {
+        this.deterministicFailures.invalidateOnSuccess(call.toolName, call.args);
+      }
+    }
+
     const didCtx: ToolDidExecuteContext = {
       turnId: options.turnId,
       signal: options.signal,
