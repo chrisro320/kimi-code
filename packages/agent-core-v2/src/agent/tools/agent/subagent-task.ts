@@ -6,10 +6,18 @@ import {
   type AgentTaskInfoBase,
   type AgentTaskSink,
 } from '#/agent/task/types';
+import type { EditingCandidateDraft } from '#/session/subagent/worktree';
 
-type SubagentCompletion = {
+export type SubagentCompletion = {
   readonly result: string;
   readonly usage?: TokenUsage;
+  /**
+   * Present when the isolated worktree finish produced a scope-expansion
+   * candidate instead of applying the worker's changes. The task layer turns
+   * it into an `input_required` state carrying `candidate`; the changes stay
+   * unapplied until the caller approves or denies the expansion.
+   */
+  readonly editingCandidate?: EditingCandidateDraft;
 };
 
 export type SubagentHandle = {

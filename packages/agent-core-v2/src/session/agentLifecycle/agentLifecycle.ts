@@ -34,6 +34,12 @@ export interface CreateAgentOptions {
   readonly binding?: BindAgentInput;
   readonly forkedFrom?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  /**
+   * Absolute work directory for this agent's workspace context, overriding
+   * the session default (used by subagent worktree isolation). Omit to keep
+   * the session work directory.
+   */
+  readonly workspaceCwd?: string;
 }
 
 export interface ForkAgentOptions {

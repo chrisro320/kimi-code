@@ -55,6 +55,19 @@ export const SubagentToolInputSchema = z.preprocess(
       .describe(
         'If true, return immediately without waiting for completion. Prefer false unless the task can run independently and there is a clear benefit to not waiting.',
       ),
+    dispatch: z
+      .object({
+        scope: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Workspace-relative files, directories, or globs this subagent may change. Changes outside this scope trigger a scope-expansion approval flow instead of being applied or discarded.',
+          ),
+      })
+      .optional()
+      .describe(
+        'Dispatch control options for editing subagents: declare the change scope (scope).',
+      ),
     model: z
       .enum(['secondary', 'primary'])
       .optional()

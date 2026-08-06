@@ -27,6 +27,7 @@ import { join } from 'pathe';
 import {
   createScopedChildHandle,
   type IAgentScopeHandle,
+  type ScopeSeed,
   LifecycleScope,
   ScopeActivation,
   registerScopedService,
@@ -51,6 +52,8 @@ import { IAgentToolActivationService } from '#/agent/toolActivation/toolActivati
 import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { IWireService } from '#/wire/wire';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { makeWorkspaceContextView } from '#/session/workspaceContext/workspaceContextView';
 import {
   type AgentListFilter,
   type CreateAgentOptions,
@@ -83,6 +86,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     @IConfigService private readonly config: IConfigService,
     @ISessionInteractionService private readonly interaction: ISessionInteractionService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
   ) {
     super();
     this._register(this.onDidCreate((handle) => this.subscribeInteractionBus(handle)));
@@ -145,15 +149,19 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const agentScope = this.ctx.scope(`agents/${agentId}`);
     const agentHomedir = join(this.bootstrap.homeDir, agentScope);
+    const extra: ScopeSeed = [
+      [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
+      [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
+      ...(opts.workspaceCwd === undefined
+        ? []
+        : [[ISessionWorkspaceContext, makeWorkspaceContextView(opts.workspaceCwd, this.workspace.additionalDirs)] as const]),
+    ];
     const handle = createScopedChildHandle(
       this.instantiation,
       LifecycleScope.Agent,
       agentId,
       {
-        extra: [
-          [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
-          [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
-        ],
+        extra,
       },
     ) as IAgentScopeHandle;
     this.handles.set(agentId, handle);
