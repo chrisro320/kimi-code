@@ -1618,6 +1618,124 @@ describe('SessionSwarmService metadata compatibility', () => {
       vi.useRealTimers();
     }
   });
+
+  // R-C1 risk gate wiring: an editing-capable batch at/above the concurrency
+  // threshold is silently serialized (maxConcurrency forced to 1); below the
+  // threshold or read-only, the batch schedule is untouched. v2 tasks carry
+  // no dispatch scope yet, so only the threshold signal is live.
+  describe('risk gate (R-C1)', () => {
+    function stubEditingCapableCatalog(): void {
+      ix.stub(ISessionAgentProfileCatalog, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        get: (name: string) =>
+          name === 'coder'
+            ? normalizeAgentProfile({
+                name: 'coder',
+                tools: ['Write', 'Edit'],
+                systemPrompt: () => '',
+              })
+            : undefined,
+        getDefault: () =>
+          normalizeAgentProfile({ name: 'agent', tools: [], systemPrompt: () => '' }),
+        list: () => [],
+      });
+    }
+
+    function controlledRuns(): {
+      completions: Array<ReturnType<typeof createControlledPromise<{ summary: string }>>>;
+    } {
+      const completions: Array<ReturnType<typeof createControlledPromise<{ summary: string }>>> =
+        [];
+      runAgent.mockImplementation(
+        (agentId: string, _request: unknown, options?: { onReady?: () => void }) => {
+          options?.onReady?.();
+          const completion = createControlledPromise<{ summary: string }>();
+          completions.push(completion);
+          return { agentId, turn: {} as never, completion };
+        },
+      );
+      return { completions };
+    }
+
+    function spawnTasks(count: number): SessionSwarmSpawnTask[] {
+      return Array.from({ length: count }, (_, index) => ({
+        ...spawnSessionTask(`src/f${String(index)}.ts`),
+        swarmIndex: index + 1,
+      }));
+    }
+
+    it('serializes an editing-capable batch at the concurrency threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        stubEditingCapableCatalog();
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(4) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(1);
+
+        completions[0]!.resolve({ summary: 'one' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(2);
+
+        completions[1]!.resolve({ summary: 'two' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(3);
+
+        completions[2]!.resolve({ summary: 'three' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(4);
+
+        completions[3]!.resolve({ summary: 'four' });
+        await expect(running).resolves.toMatchObject([
+          { status: 'completed' },
+          { status: 'completed' },
+          { status: 'completed' },
+          { status: 'completed' },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not serialize an editing-capable batch below the threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        stubEditingCapableCatalog();
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(3) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(3);
+
+        for (const completion of completions) completion.resolve({ summary: 'done' });
+        await expect(running).resolves.toHaveLength(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not serialize a read-only batch even above the threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        // Default catalog stub: coder has `tools: []` — not editing-capable.
+        const { completions } = controlledRuns();
+        const service = ix.get(ISessionSwarmService);
+
+        const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(5) });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runAgent).toHaveBeenCalledTimes(5);
+
+        for (const completion of completions) completion.resolve({ summary: 'done' });
+        await expect(running).resolves.toHaveLength(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 function spawnSessionTask(swarmItem?: string): SessionSwarmSpawnTask {
