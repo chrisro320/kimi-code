@@ -155,12 +155,32 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const agentScope = this.ctx.scope(`agents/${agentId}`);
     const agentHomedir = join(this.bootstrap.homeDir, agentScope);
+    const workspaceSeeds: ScopeSeed = opts.workspaceCwd === undefined
+      ? []
+      : [
+          [ISessionWorkspaceContext, makeWorkspaceContextView(opts.workspaceCwd, this.workspace.additionalDirs)],
+          // Tools and prompt rendering read the working directory through
+          // ISessionContext.cwd (Bash, profile prompt), not only through the
+          // workspace context — override it too so an isolated subagent's
+          // entire tool surface is rooted at the worktree. All other fields
+          // pass through to the session context.
+          [
+            ISessionContext,
+            {
+              _serviceBrand: undefined,
+              sessionId: this.ctx.sessionId,
+              workspaceId: this.ctx.workspaceId,
+              sessionDir: this.ctx.sessionDir,
+              metaScope: this.ctx.metaScope,
+              cwd: opts.workspaceCwd,
+              scope: (subKey?: string) => this.ctx.scope(subKey),
+            },
+          ],
+        ];
     const extra: ScopeSeed = [
       [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
       [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
-      ...(opts.workspaceCwd === undefined
-        ? []
-        : [[ISessionWorkspaceContext, makeWorkspaceContextView(opts.workspaceCwd, this.workspace.additionalDirs)] as const]),
+      ...workspaceSeeds,
     ];
     const handle = createScopedChildHandle(
       this.instantiation,
