@@ -51,6 +51,15 @@ import {
 } from '#/session/swarm/agentRunBatch';
 import { ISessionSwarmService, type SessionSwarmSpawnTask, type SessionSwarmTask } from '#/session/swarm/sessionSwarm';
 import { Error2 } from '#/_base/errors/errors';
+import { ErrorCodes } from '#/errors';
+import type { IConfigService } from '#/app/config/config';
+import { MODELS_SECTION } from '#/app/kosongConfig/configSection';
+import { SUBAGENT_SECTION } from '#/session/subagent/configSection';
+import {
+  ISessionSubagentCircuitService,
+  SessionSubagentCircuitService,
+} from '#/session/subagent/circuitService';
+import { SessionSubagentRoutingService } from '#/session/subagent/routingService';
 import { ConfigErrors } from '#/app/config/errors';
 import { SessionSwarmService } from '#/session/swarm/sessionSwarmService';
 
@@ -1734,6 +1743,81 @@ describe('SessionSwarmService metadata compatibility', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  // R-A2 circuit breaker, end to end across services. The unit tests on either
+  // side open the circuit by hand with a literal key, so nothing covered the
+  // seam: a real spawn failure flowing through `recordCircuitFailure` into the
+  // session-scoped circuit, and the *next* spawn resolving to the fallback
+  // chain because of it. Both services are real here — only the run fails.
+  describe('circuit breaker (R-A2) end to end', () => {
+    function realRouting(): void {
+      const config = {
+        get: ((domain: string) =>
+          ({
+            [MODELS_SECTION]: {
+              fast: { provider: 'local', model: 'fast-model' },
+              precise: { provider: 'local', model: 'precise-model' },
+            },
+            [SUBAGENT_SECTION]: {
+              routing: { coder: { model: 'fast' } },
+              fallbackChain: [{ backend: 'kimi', model: 'precise' }],
+            },
+          })[domain]) as IConfigService['get'],
+      } as unknown as IConfigService;
+      // The swarm records failures against the circuit it gets injected, while
+      // routing reads the one it was constructed with. In production the
+      // Session scope hands both the same instance; sharing it here is what
+      // makes this an integration test rather than two isolated stubs.
+      const circuit = new SessionSubagentCircuitService();
+      ix.stub(ISessionSubagentCircuitService, circuit);
+      ix.stub(
+        ISessionSubagentRoutingService,
+        new SessionSubagentRoutingService(config, circuit),
+      );
+    }
+
+    function modelOfCreateCall(index: number): unknown {
+      return (createAgent.mock.calls[index]?.[0] as { binding?: { model?: unknown } } | undefined)
+        ?.binding?.model;
+    }
+
+    it('opens the circuit from a real spawn failure and takes the fallback next time', async () => {
+      realRouting();
+      const service = ix.get(ISessionSwarmService);
+
+      // First batch: the run rejects with a non-retryable route failure.
+      runAgent.mockImplementationOnce(() => {
+        throw new Error2(ErrorCodes.PROVIDER_AUTH_ERROR, 'auth rejected');
+      });
+      const first = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(first).toMatchObject([{ status: 'failed' }]);
+      expect(modelOfCreateCall(0)).toBe('fast');
+
+      // Second batch: the circuit opened above must divert this spawn onto the
+      // fallback chain. The circuit is session-scoped, so it survives the batch.
+      const second = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(second).toMatchObject([{ status: 'completed' }]);
+      expect(modelOfCreateCall(1)).toBe('precise');
+    });
+
+    it('leaves the route intact when the failure is transient', async () => {
+      realRouting();
+      const service = ix.get(ISessionSwarmService);
+
+      runAgent.mockImplementationOnce(() => {
+        throw new APIProviderRateLimitError('rate limited');
+      });
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      // A rate limit is not a route defect: the next spawn stays on `fast`.
+      const second = await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(second).toMatchObject([{ status: 'completed' }]);
+      expect(modelOfCreateCall(1)).toBe('fast');
     });
   });
 });
