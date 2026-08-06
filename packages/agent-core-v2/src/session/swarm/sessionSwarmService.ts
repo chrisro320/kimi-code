@@ -297,10 +297,6 @@ export class SessionSwarmService implements ISessionSwarmService {
       let child: IAgentScopeHandle;
       try {
         this.modelCatalog.get(final.model);
-        // Acquire isolation BEFORE creating/exposing the child agent (same
-        // ordering as the Agent tool): an acquire failure leaves no
-        // resumable empty-shell ghost, and the pool slot is released by the
-        // enclosing catch.
         if (
           this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
           isEditingCapableProfile({ tools: profile.tools ?? [] })
@@ -500,9 +496,6 @@ export class SessionSwarmService implements ISessionSwarmService {
   ): { readonly result: string; readonly usage?: TokenUsage } {
     if (finishResult.applied) return { result: r.summary, usage: r.usage };
     if (finishResult.reason === 'scope-expansion-required' && finishResult.candidate !== undefined) {
-      // Swarm batches have no interactive approval channel; fail closed and
-      // keep the worker's work in the retained worktree (never acknowledged,
-      // never applied) instead of silently discarding it.
       throw new Error(
         `Editing subagent changes were not applied: scope expansion required for ` +
           `${finishResult.outsideScope?.join(', ') ?? 'paths outside the declared scope'}. ` +

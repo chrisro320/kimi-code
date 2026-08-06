@@ -281,10 +281,6 @@ export class SubagentTool implements ISubagentTool {
     let profileName: string;
     let promptText = args.prompt;
     let releasePoolSlot: (() => void) | undefined;
-    // Worktree isolation handle, acquired before `lifecycle.create` (so an
-    // acquire failure never leaves a resumable empty-shell ghost behind) and
-    // finished once the mirrored run settles. `undefined` when isolation is
-    // not requested or unsupported-and-degraded.
     let worktree: SubagentWorktreeHandle | undefined;
     // R-A2 (Case 8): records a non-retryable provider/model/route failure
     // against the resolved route's circuit (no-op for resume spawns and
@@ -370,10 +366,6 @@ export class SubagentTool implements ISubagentTool {
         let created: IAgentScopeHandle;
         try {
           this.modelCatalog.get(final.model);
-          // Acquire isolation BEFORE creating/exposing the child agent: when
-          // this throws, the caller gets an error with no agentId, so no
-          // resumable empty-shell ghost is left behind (and the pool slot is
-          // released by the enclosing catch).
           if (
             this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
             isEditingCapableProfile({ tools: profile.tools ?? [] })
@@ -490,9 +482,6 @@ export class SubagentTool implements ISubagentTool {
       scope: args.dispatch?.scope,
     });
     if (isSubagentWorktreeUnsupported(acquisition)) {
-      // The opt-in experimental flag is an explicit request for isolation;
-      // refusing dispatch matches v1's `explicitlyEnabled` handling instead
-      // of running the editing subagent unisolated.
       throw new Error(
         `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
       );
@@ -512,7 +501,10 @@ export class SubagentTool implements ISubagentTool {
       return {
         result: r.summary,
         usage: r.usage,
-        editingCandidate: finishResult.candidate,
+        editingCandidate: {
+          draft: finishResult.candidate,
+          acknowledgePersisted: finishResult.acknowledgePersisted,
+        },
       };
     }
     const recovery =
@@ -655,6 +647,22 @@ export class SubagentTool implements ISubagentTool {
         output: formatForegroundAgentSuccess(handle, await this.tasks.readOutput(taskId)),
       };
     }
+    if (info?.status === 'input_required' && info.kind === 'agent' && info.candidate !== undefined) {
+      return {
+        output: formatForegroundInputRequired(taskId, handle, info.candidate),
+        isError: false,
+      };
+    }
+    if (info?.status === 'expansion_denied') {
+      return {
+        output: formatForegroundAgentFailure(
+          handle,
+          'The scope expansion was denied; the subagent work candidate was discarded. Re-dispatch with an explicitly wider dispatch.scope if the change is still wanted.',
+          false,
+        ),
+        isError: true,
+      };
+    }
     const timedOut = info?.status === 'timed_out';
     const message = timedOut
       ? `Agent timed out after ${formatSubagentTimeoutDescription(timeoutMs)}.`
@@ -664,6 +672,27 @@ export class SubagentTool implements ISubagentTool {
       isError: true,
     };
   }
+}
+
+function formatForegroundInputRequired(
+  taskId: string,
+  handle: SubagentHandle,
+  candidate: { readonly hash: string; readonly requestedScope: readonly string[]; readonly paths: readonly string[] },
+): string {
+  return [
+    `agent_id: ${handle.agentId}`,
+    `actual_subagent_type: ${handle.profileName}`,
+    'status: input_required',
+    `task_id: ${taskId}`,
+    `candidate_hash: ${candidate.hash}`,
+    `requested_scope: ${JSON.stringify(candidate.requestedScope)}`,
+    '',
+    'The subagent finished but touched paths outside its declared scope:',
+    ...candidate.paths.map((path) => `- ${path}`),
+    '',
+    'Its work is preserved as a durable candidate and has NOT been applied.',
+    `Inspect it with TaskOutput(task_id="${taskId}"), then either apply it with TaskOutput(task_id="${taskId}", action="approve_scope_expansion", candidate_hash="${candidate.hash}", requested_scope=${JSON.stringify(candidate.requestedScope)}) or discard it with action="deny_scope_expansion".`,
+  ].join('\n');
 }
 
 registerAgentToolService(ISubagentTool, SubagentTool, { name: 'Agent', domain: 'subagent' });

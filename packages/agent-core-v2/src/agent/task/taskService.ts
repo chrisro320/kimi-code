@@ -26,6 +26,12 @@
  * remain governed by the Session lifecycle. Scope disposal paths that bypass
  * graceful close synchronously cancel/abort work and immediately attempt a
  * best-effort force-stop to reduce the risk of surviving child processes.
+ * Scope-expansion candidates (design D-B6-1) settle as `input_required`:
+ * the durable candidate is persisted under the task's scope, the task
+ * surfaces `candidate` and waits; `resolveScopeExpansion` (serialized per
+ * task) applies the candidate through the guarded worktree apply path on
+ * approve, marks the task `expansion_denied` on deny, and both are
+ * idempotent through the persisted resolution.
  * The plain-data task state (`ghosts`, `scheduledNotificationKeys`,
  * `deliveredNotificationKeys`, `activeTaskReminderPending`) is registered
  * into `agentState` (`IAgentStateService`) and read/written through it; the
@@ -78,6 +84,13 @@ import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStor
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IWireService } from '#/wire/wire';
+import { IGitService } from '#/app/git/git';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostProcessService } from '#/os/interface/hostProcess';
+import {
+  applySubagentWorktreeCandidate,
+  type SubagentWorktreeServices,
+} from '#/session/subagent/worktree';
 import {
   IAgentTaskService,
   type AgentTaskNotificationContext,
@@ -90,6 +103,8 @@ import {
   type ForegroundTaskReleaseReason,
   type IAgentTaskEntry,
   type RegisterAgentTaskOptions,
+  type ScopeExpansionResolutionRequest,
+  type ScopeExpansionResolutionResult,
 } from './task';
 import { resolveAgentTaskConfig } from './configSection';
 import { AgentTaskPersistence } from './persist';
@@ -166,6 +181,7 @@ interface ManagedTask {
   timedOut: boolean;
   readonly waiters: Array<() => void>;
   handleSubscription?: { dispose(): void };
+  candidate?: { readonly hash: string; readonly requestedScope: readonly string[]; readonly paths: readonly string[] };
 }
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -254,6 +270,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   private readonly tasks = new Map<string, ManagedTask>();
   private readonly buildingNotificationKeys = new Set<string>();
   private readonly pendingNotificationRequests = new Map<string, TaskNotificationStepRequest>();
+  private readonly resolutionQueues = new Map<string, Promise<void>>();
   private readonly persistence: AgentTaskPersistence;
   private notificationRestoreQueue: Promise<void> = Promise.resolve();
 
@@ -274,6 +291,9 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     undoParticipants: IAgentConversationUndoParticipantRegistry,
     @ILogService private readonly log: ILogService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IGitService private readonly git: IGitService,
+    @IHostFileSystem private readonly fs: IHostFileSystem,
+    @IHostProcessService private readonly proc: IHostProcessService,
   ) {
     super();
     this.states.register(taskGhostsKey);
@@ -1034,11 +1054,28 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     entry: ManagedTask,
     settlement: AgentTaskSettlement,
   ): Promise<boolean> {
-    if (TERMINAL_STATUSES.has(entry.status)) return false;
+    if (TERMINAL_STATUSES.has(entry.status) || entry.status === 'input_required') return false;
     entry.status = settlement.status;
     entry.endedAt = Date.now();
     entry.stopReason =
       settlement.stopReason ?? (settlement.status === 'killed' ? entry.stopReason : undefined);
+    if (settlement.status === 'input_required' && settlement.editingCandidate !== undefined) {
+      try {
+        const manifest = await this.persistence.writeEditingCandidate(
+          entry.taskId,
+          settlement.editingCandidate.draft,
+        );
+        entry.candidate = {
+          hash: manifest.candidateHash,
+          requestedScope: manifest.requestedScope,
+          paths: manifest.paths.map((path) => path.relPath),
+        };
+        await settlement.editingCandidate.acknowledgePersisted?.().catch(() => {});
+      } catch (error) {
+        entry.status = 'failed';
+        entry.stopReason = `Editing candidate persistence failed; the isolated worktree was retained: ${errorMessage(error)}`;
+      }
+    }
     entry.foregroundSignalCleanup?.();
     entry.foregroundSignalCleanup = undefined;
     entry.handleSubscription?.dispose();
@@ -1292,8 +1329,85 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       terminalNotificationSuppressed: entry.terminalNotificationSuppressed,
       timeoutMs: entry.options.timeoutMs,
     };
-    if (entry.toInfoFn) return entry.toInfoFn(base);
-    return entry.task!.toInfo(base);
+    const info = entry.toInfoFn ? entry.toInfoFn(base) : entry.task!.toInfo(base);
+    return entry.candidate === undefined
+      ? info
+      : ({ ...info, candidate: entry.candidate } as AgentTaskInfo);
+  }
+
+  async resolveScopeExpansion(
+    request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult> {
+    const previous = this.resolutionQueues.get(request.taskId) ?? Promise.resolve();
+    const resolution = previous
+      .catch(() => {})
+      .then(() => this.resolveScopeExpansionSerialized(request));
+    const tracked = resolution.then(() => {}, () => {});
+    this.resolutionQueues.set(request.taskId, tracked);
+    try {
+      return await resolution;
+    } finally {
+      if (this.resolutionQueues.get(request.taskId) === tracked) {
+        this.resolutionQueues.delete(request.taskId);
+      }
+    }
+  }
+
+  private async resolveScopeExpansionSerialized(
+    request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult> {
+    const entry = this.tasks.get(request.taskId);
+    if (entry === undefined) throw new Error(`Task not found: ${request.taskId}`);
+    if (entry.task?.kind !== 'agent') {
+      throw new Error('candidate_identity_mismatch: task is not an agent task');
+    }
+    if (entry.status !== 'input_required' || entry.candidate === undefined) {
+      throw new Error(`candidate_already_resolved: task status is ${entry.status}`);
+    }
+    const { manifest, draft } = await this.persistence.readEditingCandidate(request.taskId);
+    if (
+      manifest.candidateHash !== request.candidateHash ||
+      JSON.stringify(manifest.requestedScope) !== JSON.stringify(request.requestedScope) ||
+      entry.candidate.hash !== request.candidateHash ||
+      JSON.stringify(entry.candidate.requestedScope) !== JSON.stringify(manifest.requestedScope)
+    ) {
+      throw new Error('candidate_identity_mismatch: candidate hash or requested scope does not match');
+    }
+    const resolutionKind = request.action === 'approve' ? 'approved_applied' : 'denied';
+    if (manifest.resolution !== undefined && manifest.resolution.kind !== resolutionKind) {
+      throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+    }
+    if (request.action === 'approve' && manifest.resolution === undefined) {
+      await applySubagentWorktreeCandidate(
+        this.worktreeServices(),
+        draft,
+        request.requestedScope,
+      );
+    }
+    const write = await this.persistence.writeEditingCandidateResolution(
+      request.taskId,
+      request.candidateHash,
+      { kind: resolutionKind, resolvedAt: new Date().toISOString() },
+    );
+    entry.status = request.action === 'approve' ? 'completed' : 'expansion_denied';
+    entry.endedAt = Date.now();
+    entry.foregroundSignalCleanup?.();
+    entry.foregroundSignalCleanup = undefined;
+    await this.persistLive(entry);
+    this.fireTerminalEffects(entry);
+    entry.foregroundRelease?.resolve('terminal');
+    this.resolveWaiters(entry);
+    return {
+      task: this.toInfo(entry),
+      candidateHash: manifest.candidateHash,
+      requestedScope: manifest.requestedScope,
+      resolution: resolutionKind,
+      idempotent: write.idempotent,
+    };
+  }
+
+  private worktreeServices(): SubagentWorktreeServices {
+    return { git: this.git, fs: this.fs, proc: this.proc, log: this.log };
   }
 }
 

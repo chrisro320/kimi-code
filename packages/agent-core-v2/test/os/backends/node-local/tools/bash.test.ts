@@ -668,6 +668,10 @@ function createFakeTaskService(options: { maxRunningTasks?: number } = {}): {
         entry.lifecyclePromise.then(() => 'terminal' as const),
       ]);
     },
+
+    async resolveScopeExpansion(): Promise<never> {
+      throw new Error('fake IAgentTaskService.resolveScopeExpansion is not implemented');
+    },
   };
 
   return { service, tasks, persisted };

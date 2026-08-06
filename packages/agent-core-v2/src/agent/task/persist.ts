@@ -14,7 +14,11 @@
  * every write remains rooted at the owning agent. Task ids are validated
  * against the `{prefix}-{8 hex}` shape before use as path segments
  * (path-traversal and legacy `bg_<hex>` guard), and legacy snake_case records
- * are normalized to the current shape on read. Not scope-bound.
+ * are normalized to the current shape on read. Scope-expansion candidates
+ * persist under the task's scope too: path payloads into byte storage
+ * (`candidate/<side>/<relPath>`), the state-only manifest as an atomic
+ * document (`<taskId>.candidate.json`), with resolutions folded back into
+ * the manifest for idempotent re-resolution. Not scope-bound.
  */
 
 import { join } from 'pathe';
@@ -37,6 +41,44 @@ const textDecoder = new TextDecoder();
 type PersistedTask = AgentTaskInfo;
 
 type DiskPersistedTask = PersistedTask | LegacyPersistedTask;
+
+/** Path-level candidate manifest record (state only; payloads live in byte storage). */
+export interface EditingCandidateManifestPath {
+  readonly relPath: string;
+  readonly classification: import('#/session/subagent/worktree').EditingCandidatePathClassification;
+  readonly before: import('#/session/subagent/worktree').EditingCandidatePathState;
+  readonly after: import('#/session/subagent/worktree').EditingCandidatePathState;
+  readonly beforePayload: boolean;
+  readonly afterPayload: boolean;
+}
+
+export type EditingCandidateResolution =
+  | { readonly kind: 'approved_applied'; readonly resolvedAt: string }
+  | { readonly kind: 'denied'; readonly resolvedAt: string };
+
+export interface EditingCandidateManifestV1 {
+  readonly version: 1;
+  readonly taskId: string;
+  readonly repoRoot: string;
+  readonly commonDir: string;
+  readonly headCommit: string;
+  readonly originalScope: readonly string[];
+  readonly requestedScope: readonly string[];
+  readonly candidateHash: string;
+  readonly createdAt: string;
+  readonly paths: readonly EditingCandidateManifestPath[];
+  readonly resolution?: EditingCandidateResolution;
+}
+
+export interface LoadedEditingCandidate {
+  readonly manifest: EditingCandidateManifestV1;
+  readonly draft: import('#/session/subagent/worktree').EditingCandidateDraft;
+}
+
+export interface EditingCandidateResolutionWriteResult {
+  readonly manifest: EditingCandidateManifestV1;
+  readonly idempotent: boolean;
+}
 
 export interface AgentTaskPersistenceRoot {
   readonly dir: string;
@@ -173,6 +215,117 @@ export class AgentTaskPersistence {
       }
     }
     return tasks.map((entry) => entry.task).toSorted((a, b) => a.taskId.localeCompare(b.taskId));
+  }
+
+  async writeEditingCandidate(
+    taskId: string,
+    draft: import('#/session/subagent/worktree').EditingCandidateDraft,
+  ): Promise<EditingCandidateManifestV1> {
+    validateTaskId(taskId);
+    const scope = this.taskOutputScope(taskId);
+    for (const path of draft.paths) {
+      await this.writeCandidatePayload(scope, taskId, 'before', path.relPath, path.before);
+      await this.writeCandidatePayload(scope, taskId, 'after', path.relPath, path.after);
+    }
+    const manifest: EditingCandidateManifestV1 = {
+      version: 1,
+      taskId,
+      repoRoot: draft.repoRoot,
+      commonDir: draft.commonDir,
+      headCommit: draft.headCommit,
+      originalScope: draft.scope,
+      requestedScope: draft.requestedScope,
+      candidateHash: draft.candidateHash,
+      createdAt: new Date().toISOString(),
+      paths: draft.paths.map((path) => ({
+        relPath: path.relPath,
+        classification: path.classification,
+        before: path.before.state,
+        after: path.after.state,
+        beforePayload: path.before.payload !== undefined,
+        afterPayload: path.after.payload !== undefined,
+      })),
+    };
+    await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, manifest);
+    return manifest;
+  }
+
+  async readEditingCandidate(taskId: string): Promise<LoadedEditingCandidate> {
+    validateTaskId(taskId);
+    const manifest = await this.docs.get<EditingCandidateManifestV1>(
+      this.tasksScope(),
+      `${taskId}.candidate.json`,
+    );
+    if (manifest === undefined) {
+      throw new Error('candidate_corrupt: candidate persistence is unavailable');
+    }
+    const scope = this.taskOutputScope(taskId);
+    const paths: import('#/session/subagent/worktree').EditingCandidatePath[] = [];
+    for (const record of manifest.paths) {
+      paths.push({
+        relPath: record.relPath,
+        classification: record.classification,
+        before: await this.readCandidatePayload(scope, 'before', record),
+        after: await this.readCandidatePayload(scope, 'after', record),
+      });
+    }
+    const draft: import('#/session/subagent/worktree').EditingCandidateDraft = {
+      version: 1,
+      candidateHash: manifest.candidateHash,
+      repoRoot: manifest.repoRoot,
+      commonDir: manifest.commonDir,
+      headCommit: manifest.headCommit,
+      scope: manifest.originalScope,
+      requestedScope: manifest.requestedScope,
+      paths,
+    };
+    return { manifest, draft };
+  }
+
+  async writeEditingCandidateResolution(
+    taskId: string,
+    candidateHash: string,
+    resolution: EditingCandidateResolution,
+  ): Promise<EditingCandidateResolutionWriteResult> {
+    validateTaskId(taskId);
+    const { manifest, draft } = await this.readEditingCandidate(taskId);
+    if (manifest.candidateHash !== candidateHash) {
+      throw new Error('candidate_identity_mismatch: candidate hash does not match');
+    }
+    if (manifest.resolution !== undefined && manifest.resolution.kind !== resolution.kind) {
+      throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+    }
+    const idempotent = manifest.resolution !== undefined;
+    const updated: EditingCandidateManifestV1 = { ...manifest, resolution };
+    await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, updated);
+    return { manifest: updated, idempotent };
+  }
+
+  private async writeCandidatePayload(
+    scope: string,
+    taskId: string,
+    side: 'before' | 'after',
+    relPath: string,
+    snapshot: import('#/session/subagent/worktree').EditingCandidatePathSnapshot,
+  ): Promise<void> {
+    if (snapshot.payload === undefined) return;
+    await this.bytes.write(scope, `candidate/${side}/${relPath}`, snapshot.payload);
+  }
+
+  private async readCandidatePayload(
+    scope: string,
+    side: 'before' | 'after',
+    record: EditingCandidateManifestPath,
+  ): Promise<import('#/session/subagent/worktree').EditingCandidatePathSnapshot> {
+    const state = side === 'before' ? record.before : record.after;
+    if (state.kind !== 'regular') return { state };
+    const hasPayload = side === 'before' ? record.beforePayload : record.afterPayload;
+    if (!hasPayload) return { state };
+    const payload = await this.bytes.read(scope, `candidate/${side}/${record.relPath}`);
+    if (payload === undefined) {
+      throw new Error(`candidate_corrupt: missing ${side} payload for ${record.relPath}`);
+    }
+    return { state, payload };
   }
 
   private async listTasksAt(root: AgentTaskPersistenceRoot): Promise<{

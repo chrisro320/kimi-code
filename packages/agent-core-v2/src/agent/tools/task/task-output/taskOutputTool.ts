@@ -22,7 +22,7 @@ import { matchesGlobRuleSubject } from '#/tool/rule-match';
 import { type ExecutableToolResult, type ToolExecution } from '#/tool/toolContract';
 import { registerAgentToolService } from '#/agent/toolRegistry/toolContribution';
 
-import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentTaskService, type ScopeExpansionResolutionAction } from '#/agent/task/task';
 import type {
   AgentTaskInfo,
   AgentTaskOutputSnapshot,
@@ -37,8 +37,12 @@ const OUTPUT_PREVIEW_BYTES = 32 * 1024;
 const PAGING_HINT_LINES = 300;
 
 
-function retrievalStatus(status: AgentTaskStatus): 'success' | 'not_ready' {
-  return TERMINAL_STATUSES.has(status) ? 'success' : 'not_ready';
+function retrievalStatus(
+  status: AgentTaskStatus,
+  block: boolean | undefined,
+): 'success' | 'timeout' | 'not_ready' {
+  if (TERMINAL_STATUSES.has(status) || status === 'input_required') return 'success';
+  return block ? 'timeout' : 'not_ready';
 }
 
 function terminalReason(info: AgentTaskInfo): 'timed_out' | 'stopped' | 'failed' | undefined {
@@ -89,11 +93,26 @@ export class TaskOutputTool implements ITaskOutputTool {
       return { isError: true, output: `Task not found: ${args.task_id}` };
     }
 
-    const output = await this.tasks.getOutputSnapshot(args.task_id, OUTPUT_PREVIEW_BYTES);
+    if (args.action === 'approve_scope_expansion' || args.action === 'deny_scope_expansion') {
+      return await this.resolveScopeExpansion(args);
+    }
+    const inspect: { readonly task_id: string; readonly block?: boolean; readonly timeout?: number } = args;
+
+    if (inspect.block === true) {
+      const waited = await this.tasks.wait(inspect.task_id, inspect.timeout, undefined);
+      if (waited === undefined) {
+        return {
+          isError: false,
+          output: `Task ${inspect.task_id} did not finish within ${String(inspect.timeout)}s.`,
+        };
+      }
+    }
+
+    const output = await this.tasks.getOutputSnapshot(inspect.task_id, OUTPUT_PREVIEW_BYTES);
 
     const lines = [
       formatPlainObject({
-        retrievalStatus: retrievalStatus(current.status),
+        retrievalStatus: retrievalStatus(current.status, inspect.block),
         ...current,
         outputPath: output.outputPath,
         terminalReason: terminalReason(current),
@@ -122,6 +141,35 @@ export class TaskOutputTool implements ITaskOutputTool {
       isError: false,
     };
   }
+
+  private async resolveScopeExpansion(
+    args: Extract<TaskOutputInput, { action: 'approve_scope_expansion' | 'deny_scope_expansion' }>,
+  ): Promise<ExecutableToolResult> {
+    const resolutionAction: ScopeExpansionResolutionAction =
+      args.action === 'approve_scope_expansion' ? 'approve' : 'deny';
+    try {
+      const result = await this.tasks.resolveScopeExpansion({
+        taskId: args.task_id,
+        action: resolutionAction,
+        candidateHash: args.candidate_hash,
+        requestedScope: args.requested_scope,
+      });
+      const verb = resolutionAction === 'approve' ? 'approved and applied' : 'denied and discarded';
+      return {
+        output:
+          `Scope expansion ${verb} for task ${args.task_id} ` +
+          `(candidate ${result.candidateHash.slice(0, 12)}). ` +
+          `Task status: ${result.task.status}.`,
+        isError: false,
+      };
+    } catch (error) {
+      return { isError: true, output: `Scope expansion resolution failed: ${errorMessage(error)}` };
+    }
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 registerAgentToolService(ITaskOutputTool, TaskOutputTool, { name: 'TaskOutput', domain: 'agentTask' });

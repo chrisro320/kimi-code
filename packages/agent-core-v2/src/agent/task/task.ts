@@ -50,6 +50,24 @@ export interface RegisterAgentTaskOptions {
 
 export type ForegroundTaskReleaseReason = 'detached' | 'timeout_detached' | 'terminal';
 
+/** How a scope-expansion request may be resolved. */
+export type ScopeExpansionResolutionAction = 'approve' | 'deny';
+
+export interface ScopeExpansionResolutionRequest {
+  readonly taskId: string;
+  readonly action: ScopeExpansionResolutionAction;
+  readonly candidateHash: string;
+  readonly requestedScope: readonly string[];
+}
+
+export interface ScopeExpansionResolutionResult {
+  readonly task: AgentTaskInfo;
+  readonly candidateHash: string;
+  readonly requestedScope: readonly string[];
+  readonly resolution: 'approved_applied' | 'denied';
+  readonly idempotent: boolean;
+}
+
 export interface AgentTaskTrackOptions {
   readonly idPrefix?: string;
   readonly description: string;
@@ -103,6 +121,9 @@ export interface IAgentTaskService {
   waitForForegroundRelease(
     taskId: string,
   ): Promise<ForegroundTaskReleaseReason | undefined>;
+  resolveScopeExpansion(
+    request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult>;
 }
 
 export const IAgentTaskService =

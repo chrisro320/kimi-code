@@ -1,5 +1,5 @@
 /**
- * `subagent` domain — editing-subagent worktree isolation.
+ * `subagent` domain -- editing-subagent worktree isolation.
  *
  * Runs editing-capable subagents in a temporary detached git worktree seeded
  * from the repository's uncommitted state, then applies the worker's delta
@@ -7,14 +7,40 @@
  * (identity vs. the declared scope, baseline divergence detection, symlink
  * escape rejection) while holding a per-repository apply lock. Changes
  * outside the declared scope produce a durable scope-expansion candidate
- * instead of being applied or discarded. Ported from v1
- * `session/subagent-worktree.ts`; git operations go through `IGitService`
- * (design D-B6-2), filesystem operations through `IHostFileSystem` plus
- * POSIX commands through `IHostProcessService` (mode bits and symlink
- * targets are not exposed by the fs contract). Not a Service: the exported
- * functions take the collaborator services explicitly. Path ordering is by
- * UTF-16 code unit (never locale collation) so manifest order stays a
- * re-derivable contract.
+ * instead of being applied or discarded.
+ *
+ * Baseline semantics: only uncommitted state (tracked dirty + untracked
+ * paths) is seeded and snapshotted — `git worktree add` already populates
+ * clean tracked files from HEAD, so snapshotting the whole tree would pin
+ * the repo's bytes in memory for the subagent's lifetime. Worker edits to
+ * clean tracked files are discovered at finish time via `git diff HEAD` in
+ * the worktree, with their `before` state reconstructed from HEAD blobs;
+ * such paths reconstruct as `absent` when unknown to HEAD and `unreadable`
+ * for anything unsupported (e.g. submodule gitlinks), failing closed.
+ *
+ * Symlink safety: worker-planted symlinks are a read-path escape — applied
+ * into the real workspace, a later Read following the link leaves the repo
+ * and the declared scope. Only relative targets that resolve back inside the
+ * repo are applied; absolute or escaping targets fail closed.
+ *
+ * Isolation can never work in some workspaces (non-POSIX backend, not a git
+ * repository, no commit to base a worktree on); that is a property of the
+ * environment, not a failure, and surfaces as `SubagentWorktreeUnsupported`.
+ * A `null` acquisition instead means isolation *should* have worked but did
+ * not (creation failed, baseline could not be snapshotted, seeded tree
+ * diverged) and still refuses dispatch: running unisolated in a repository
+ * whose state we failed to capture is the exact situation isolation exists
+ * to prevent. Failed or refused applies preserve the worker's state under
+ * the recovery directory with a manifest instead of discarding it.
+ *
+ * Ported from v1 `session/subagent-worktree.ts` (design D-B6-1/2): git
+ * operations go through `git` (`IGitService`), filesystem operations
+ * through `fs` (`IHostFileSystem`) plus POSIX commands through `proc`
+ * (`IHostProcessService` — mode bits and symlink targets are not exposed by
+ * the fs contract), and diagnostics through `log` (`ILogService`). Not a
+ * Service: the exported functions take the collaborator services explicitly.
+ * Path ordering is by UTF-16 code unit (never locale collation) so manifest
+ * order stays a contract the integrity check re-derives with a plain sort.
  */
 
 import { createHash } from 'node:crypto';
@@ -52,7 +78,6 @@ const SECRET_PATH_PATTERNS = [
   '**/*credentials*',
 ] as const;
 
-/** Collaborator services the worktree functions borrow from their caller. */
 export interface SubagentWorktreeServices {
   readonly git: IGitService;
   readonly fs: IHostFileSystem;
@@ -83,18 +108,6 @@ export interface SubagentWorktreeHandle {
   finish(outcome: SubagentWorktreeOutcome): Promise<SubagentWorktreeFinishResult>;
 }
 
-/**
- * Isolation can never work in this workspace: the backend cannot materialize
- * POSIX state, the directory is not a git repository, or the repository has
- * no commit to base a worktree on. That is a property of the environment, not
- * a failure — retrying or repairing the tree changes nothing.
- *
- * Kept distinct from the `null` return, which means isolation *should* have
- * worked here and did not (worktree creation failed, the baseline could not be
- * snapshotted, the seeded tree diverged from it). That case still refuses
- * dispatch: running unisolated in a repository whose state we failed to
- * capture is the exact situation the isolation exists to prevent.
- */
 export interface SubagentWorktreeUnsupported {
   readonly unsupported: string;
 }
@@ -191,7 +204,6 @@ interface CommandBytesResult {
 
 let testApplyFailureAt: number | undefined;
 
-/** Test-only failure injection. It is deliberately not wired to user configuration. */
 export const __testing = {
   failApplyAt(operation: number | undefined): void {
     testApplyFailureAt = operation;
@@ -405,9 +417,6 @@ async function collectDeltas(
     const after = workerFinal.get(relPath)!;
     if (!snapshotsEqual(before, after)) deltas.push({ relPath, before, after });
   }
-  // Code unit order, matching canonicalizePathSet: the manifest's path order
-  // is a contract the integrity check re-derives with a plain sort, and
-  // localeCompare disagrees with it on case and punctuation.
   return deltas.sort((left, right) => (left.relPath < right.relPath ? -1 : left.relPath > right.relPath ? 1 : 0));
 }
 
@@ -578,12 +587,6 @@ async function applyDeltaPlan(
   }
 }
 
-/**
- * Worker-planted symlinks are a read-path escape: applied into the real
- * workspace, a later Read following the link leaves the repo (and the
- * declared scope). Only relative targets that resolve back inside the repo
- * are applied; absolute or escaping targets fail closed.
- */
 function assertSafeSymlinkTarget(repoRoot: string, relPath: string, target: string): void {
   if (pathe.isAbsolute(target) || /^[a-zA-Z]:[\\/]/.test(target)) {
     throw new Error(`unsafe symlink target at ${relPath}: absolute targets are not applied`);
@@ -812,12 +815,6 @@ async function acquisitionCandidates(
   services: SubagentWorktreeServices,
   repoRoot: string,
 ): Promise<string[]> {
-  // Only uncommitted state needs seeding and baselining: `git worktree add`
-  // already populates clean tracked files from HEAD, so snapshotting the whole
-  // tree would pin the entire repo's bytes in memory for the subagent's
-  // lifetime (and OOM large repos). Worker edits to clean tracked files are
-  // discovered at finish time via `git diff HEAD` in the worktree, with their
-  // `before` state reconstructed from HEAD blobs (see captureHeadPath).
   const [changed, untracked] = await Promise.all([
     services.git.diffChangedPaths(repoRoot),
     listSafeUntracked(services, repoRoot),

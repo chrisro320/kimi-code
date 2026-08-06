@@ -8,6 +8,18 @@
  * Session's execution environment, so it never depends on a Session. Path
  * confinement is the caller's responsibility — the service receives
  * already-resolved absolute `cwd` and repo-relative paths.
+ *
+ * The worktree-isolation additions (`repoInfo`, `createDetachedWorktree`,
+ * `removeWorktree`, `diffChangedPaths`, `untrackedPaths`, `trackedPaths`,
+ * `headEntry`) back the editing-subagent isolation (design D-B6-2).
+ * `repoInfo` resolves the top-level repo root, the shared metadata dir
+ * (`--git-common-dir`; under `.git` in single-worktree repositories, outside
+ * the working tree in linked ones) and the current HEAD — `null` when the
+ * cwd is not inside a git repository, and a `headCommit` of `null` for an
+ * unborn branch. `headEntry` reconstructs one repo-relative path's HEAD
+ * state (`absent` when unknown to HEAD, `unreadable` for submodule gitlinks
+ * or git failures so callers fail closed, `regular` with the blob payload
+ * for files, `symlink` with the link target).
  */
 
 import { z } from 'zod';
@@ -65,26 +77,12 @@ export const fsDiffResponseSchema = z.object({
 });
 export type FsDiffResponse = z.infer<typeof fsDiffResponseSchema>;
 
-/**
- * Repository facts needed to build an isolated subagent worktree. `repoRoot`
- * is the top-level directory of the git repository containing `cwd`;
- * `commonDir` is the shared metadata directory (`--git-common-dir`), which
- * lives under `.git` in single-worktree repositories and outside the working
- * tree in linked ones; `headCommit` is the current HEAD, `null` for an
- * unborn branch (repository without commits).
- */
 export interface GitRepoInfo {
   readonly repoRoot: string;
   readonly commonDir: string;
   readonly headCommit: string | null;
 }
 
-/**
- * The HEAD state of one repo-relative path, used to reconstruct the `before`
- * state of a clean tracked path at worktree finish time. `absent` means the
- * path is unknown to HEAD; `unreadable` means it cannot be reconstructed
- * (submodule gitlink, git failure) so callers fail closed.
- */
 export type GitHeadEntry =
   | { readonly kind: 'absent' }
   | { readonly kind: 'unreadable'; readonly error: string }
@@ -97,19 +95,12 @@ export interface IGitService {
   status(cwd: string, pathFilter?: ReadonlySet<string>): Promise<FsGitStatusResponse>;
   diff(cwd: string, relPath: string, absPath: string): Promise<FsDiffResponse>;
   findWorkTree(cwd: string): Promise<GitWorkTree | null>;
-  /** Top-level repo + shared metadata dir + HEAD, or `null` when `cwd` is not inside a git repository. */
   repoInfo(cwd: string): Promise<GitRepoInfo | null>;
-  /** Create a detached worktree at `worktreeRoot` checked out at `headCommit`. */
   createDetachedWorktree(repoRoot: string, worktreeRoot: string, headCommit: string): Promise<void>;
-  /** Remove the worktree at `worktreeRoot`, pruning the admin data when removal fails. */
   removeWorktree(repoRoot: string, worktreeRoot: string): Promise<void>;
-  /** Repo-relative paths with uncommitted modifications (tracked changes, including rename/copy destinations). */
   diffChangedPaths(repoRoot: string): Promise<string[]>;
-  /** Repo-relative untracked paths, excluding git-ignored entries (secrets are filtered by the caller). */
   untrackedPaths(repoRoot: string): Promise<string[]>;
-  /** Every path tracked in the index. */
   trackedPaths(repoRoot: string): Promise<string[]>;
-  /** HEAD state of one repo-relative path (blob payload for `regular`, link target for `symlink`). */
   headEntry(repoRoot: string, relPath: string): Promise<GitHeadEntry>;
 }
 

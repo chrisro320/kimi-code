@@ -12,6 +12,12 @@
  * compaction, then disposing the child scope. Fans session-level
  * permission-mode switches out to every live agent. Bound at Session scope.
  *
+ * A `CreateAgentOptions.workspaceCwd` seeds a per-agent workspace-context
+ * override (worktree isolation): the child scope resolves
+ * `ISessionWorkspaceContext` to a view rooted at that directory instead of
+ * the session work directory, so editing subagents operate inside their
+ * isolated worktree while path confinement semantics stay identical.
+ *
  * No agent id is special here: the main agent is simply the agent created
  * with the conventional `MAIN_AGENT_ID`, and `fork` requires its source to
  * exist. MCP readiness is not awaited here: the workspace's shared manager

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import type { ILogService } from '#/_base/log/log';
+import type { RunnableToolExecution } from '#/tool/toolContract';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -51,7 +52,7 @@ function editingProfile(): AgentProfile {
 }
 
 function makeTool(deps: {
-  routing: Partial<ISessionSubagentRoutingService>;
+  routing: unknown;
   git: Partial<IGitService>;
   create?: ReturnType<typeof vi.fn>;
   flagsEnabled?: boolean;
@@ -84,15 +85,15 @@ function makeTool(deps: {
     { data: () => ({ modelAlias: 'test-model', thinkingLevel: 'high', profileName: 'main' }) } as unknown as IAgentProfileService,
     { isToolActive: () => false, isToolActiveForProfile: () => false } as unknown as IAgentToolPolicyService,
     { listReferences: () => [] } as unknown as IAgentToolRegistryService,
-    { workDir: WORK_DIR, additionalDirs: [] } as ISessionWorkspaceContext,
+    { workDir: WORK_DIR, additionalDirs: [] } as unknown as ISessionWorkspaceContext,
     {} as ISessionProcessRunner,
     { read: async () => ({}) } as unknown as ISessionMetadata,
-    { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } as ILogService,
+    { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } as unknown as ILogService,
     { mode: 'acceptEdits', setMode: () => {} } as unknown as IAgentPermissionModeService,
     { get: () => undefined } as unknown as IConfigService,
     { enabled: (id: string) => (deps.flagsEnabled ?? true) || id === 'secondary-model' } as unknown as IFlagService,
     { get: () => ({}) } as unknown as IModelCatalog,
-    deps.routing as ISessionSubagentRoutingService,
+    deps.routing as unknown as ISessionSubagentRoutingService,
     { openCircuit: () => {} } as unknown as ISessionSubagentCircuitService,
     deps.git as IGitService,
     {} as IHostFileSystem,
@@ -138,7 +139,7 @@ describe('SubagentTool worktree isolation wiring', () => {
       create,
     });
 
-    const execution = await tool.resolveExecution(args());
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
     const result = await execution.execute({
       toolCallId: 'call-1',
       signal: new AbortController().signal,
@@ -166,7 +167,7 @@ describe('SubagentTool worktree isolation wiring', () => {
       flagsEnabled: false,
     });
 
-    const execution = await tool.resolveExecution(args());
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
     const result = await execution.execute({
       toolCallId: 'call-1',
       signal: new AbortController().signal,

@@ -11,13 +11,10 @@ import type { EditingCandidateDraft } from '#/session/subagent/worktree';
 export type SubagentCompletion = {
   readonly result: string;
   readonly usage?: TokenUsage;
-  /**
-   * Present when the isolated worktree finish produced a scope-expansion
-   * candidate instead of applying the worker's changes. The task layer turns
-   * it into an `input_required` state carrying `candidate`; the changes stay
-   * unapplied until the caller approves or denies the expansion.
-   */
-  readonly editingCandidate?: EditingCandidateDraft;
+  readonly editingCandidate?: {
+    readonly draft: EditingCandidateDraft;
+    readonly acknowledgePersisted?: () => Promise<void>;
+  };
 };
 
 export type SubagentHandle = {
@@ -30,6 +27,11 @@ export interface SubagentTaskInfo extends AgentTaskInfoBase {
   readonly kind: 'agent';
   readonly agentId?: string;
   readonly subagentType?: string;
+  readonly candidate?: {
+    readonly hash: string;
+    readonly requestedScope: readonly string[];
+    readonly paths: readonly string[];
+  };
 }
 
 declare module '#/agent/task/types' {
@@ -99,6 +101,13 @@ export class SubagentTask implements AgentTask {
     try {
       const outcome = await this.handle.completion;
       sink.appendOutput(outcome.result);
+      if (outcome.editingCandidate !== undefined) {
+        await sink.settle({
+          status: 'input_required',
+          editingCandidate: outcome.editingCandidate,
+        });
+        return;
+      }
       await sink.settle({ status: 'completed' });
     } catch (error: unknown) {
       if (sink.signal.aborted && (isAbortError(error) || error === sink.signal.reason)) {

@@ -257,7 +257,7 @@ export interface BackgroundTaskCompletedEvent {
   task_id: string;
   kind: 'agent' | 'process' | 'question';
   duration_ms: number | null;
-  status: 'running' | 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost';
+  status: 'running' | 'completed' | 'failed' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
 }
 
 export interface ModelSwitchEvent {
