@@ -1405,6 +1405,84 @@ describe('SessionSwarmService metadata compatibility', () => {
     }
   });
 
+  it('schedules the rate-limit retry while another spawn is queued on the saturated pool', async () => {
+    vi.useFakeTimers();
+    try {
+      agents['agent-pooled'] = {
+        labels: { parentAgentId: 'main' },
+      };
+      // Cross-layer deadlock (D-B5R-8): real pool maxConcurrency=1 — B is
+      // stuck in acquireQueued inside the launcher while A's rate-limit
+      // retry waits for rateLimitCapacity. Pre-fix B's attempt still counts
+      // as `active` (capacity 1), so the retry is never scheduled.
+      const pool = new SubagentRoutePool([
+        { backend: 'kimi', model: 'provider/routed', maxConcurrency: 1 },
+      ]);
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      resolveSpawnRoute.mockImplementation(async () => {
+        const acquired = await pool.acquireQueued();
+        const release = vi.fn(acquired.release);
+        releases.push(release);
+        return {
+          route: { kind: 'internal', modelAlias: 'provider/routed', thinkingEffort: undefined },
+          releasePoolSlot: release,
+        };
+      });
+      let created = 0;
+      createAgent.mockImplementation(async (opts: CreateAgentOptions = {}) => {
+        created += 1;
+        const id = created === 1 ? 'agent-pooled' : 'agent-queued';
+        const handle = agentHandle(id, lifecycle, eventBus, {
+          profileName: opts.binding?.profile ?? 'coder',
+          modelAlias: opts.binding?.model ?? 'kimi-test',
+          thinkingLevel: opts.binding?.thinking ?? 'medium',
+        });
+        handles.set(id, handle);
+        return handle;
+      });
+      const rateLimited = createControlledPromise<{ summary: string }>();
+      runAgent.mockImplementation((agentId: string, request: unknown, options: { onReady?: () => void } | undefined) => {
+        options?.onReady?.();
+        if (agentId === 'agent-pooled') {
+          const kind = (request as { kind?: string }).kind;
+          if (kind === 'retry') {
+            return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'recovered' }) };
+          }
+          return { agentId, turn: {} as never, completion: rateLimited };
+        }
+        return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'ok' }) };
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [spawnSessionTask('src/a.ts'), spawnSessionTask('src/b.ts')],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
+      await vi.advanceTimersByTimeAsync(0);
+      // The slot stays held across the requeue…
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).not.toHaveBeenCalled();
+      // …the retry is still scheduled despite B queueing on the pool, A
+      // recovers and releases, B follows.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(0);
+      const results = await running;
+
+      expect(results).toMatchObject([
+        { status: 'completed', result: 'recovered' },
+        { status: 'completed', result: 'ok' },
+      ]);
+      expect(resolveSpawnRoute).toHaveBeenCalledTimes(2);
+      expect(releases).toHaveLength(2);
+      expect(releases[0]).toHaveBeenCalledOnce();
+      expect(releases[1]).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('releases the pool slot when subagents.run rejects before the run starts', async () => {
     // Real pool, maxConcurrency 1: the second spawn queues behind the first,
     // so this deadlocks without the observe() early-failure release.
