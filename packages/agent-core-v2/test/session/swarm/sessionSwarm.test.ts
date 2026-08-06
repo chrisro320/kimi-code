@@ -1501,6 +1501,45 @@ describe('SessionSwarmService metadata compatibility', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not arm the per-task timer when the task timeout is 0 (print mode)', async () => {
+    vi.useFakeTimers();
+    try {
+      // Print mode fills `[subagent] timeout_ms = 0` as "effectively
+      // unbounded"; arming setTimeout with 0 aborts the attempt before the
+      // launcher returns ("Subagent timed out." / not_started). The stub
+      // honors the attempt signal so the abort is observable.
+      const controlled = createControlledPromise<{ summary: string }>();
+      runAgent.mockImplementation(
+        (agentId: string, _request: unknown, options: { onReady?: () => void; signal?: AbortSignal } | undefined) => {
+          options?.onReady?.();
+          const completion = new Promise<{ summary: string }>((resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => reject(new Error('Aborted')), {
+              once: true,
+            });
+            controlled.then(resolve, reject);
+          });
+          return { agentId, turn: {} as never, completion };
+        },
+      );
+      const service = ix.get(ISessionSwarmService);
+
+      const running = service.run({
+        callerAgentId: 'main',
+        tasks: [{ ...spawnSessionTask('src/a.ts'), timeout: 0 }],
+      });
+      // A real run always takes at least one macrotask; a wrongly armed 0ms
+      // timer fires here and aborts the attempt.
+      await vi.advanceTimersByTimeAsync(0);
+      controlled.resolve({ summary: 'ok' });
+      const results = await running;
+
+      expect(results).toMatchObject([{ status: 'completed' }]);
+      expect(results[0]).not.toMatchObject({ error: 'Subagent timed out.' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function spawnSessionTask(swarmItem?: string): SessionSwarmSpawnTask {

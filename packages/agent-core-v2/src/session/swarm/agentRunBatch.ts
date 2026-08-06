@@ -600,8 +600,11 @@ export class AgentRunBatch<T> {
     const abortFromTask = () => {
       attempt.controller.abort(task.signal?.reason);
     };
+    // `0` means "no timeout" (print mode fills it as "effectively unbounded";
+    // v1 semantics: `0` arms no timer) — arming setTimeout with 0 would fire
+    // immediately and kill the attempt before the launcher returns.
     const timeout =
-      task.timeout === undefined
+      task.timeout === undefined || task.timeout <= 0
         ? undefined
         : setTimeout(() => {
             attempt.timedOut = true;

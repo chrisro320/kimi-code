@@ -1688,6 +1688,10 @@ describe('subagent config section', () => {
     env[SUBAGENT_TIMEOUT_ENV] = '3000';
     expect(resolveSubagentTimeoutMs(config)).toBe(3000);
 
+    // `0` means "no timeout" (v1 parity), not "fall back to the default".
+    env[SUBAGENT_TIMEOUT_ENV] = '0';
+    expect(resolveSubagentTimeoutMs(config)).toBe(0);
+
     disposables.dispose();
   });
 
