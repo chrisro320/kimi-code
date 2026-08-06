@@ -51,7 +51,7 @@ export const llmToolsSnapshot = LlmRequestTraceModel.defineOp('llm.tools_snapsho
 
 export const llmRequest = LlmRequestTraceModel.defineOp('llm.request', {
   schema: z.object({
-    kind: z.enum(['loop', 'compaction']),
+    kind: z.enum(['loop', 'compaction', 'remote_compaction']),
     provider: z.string(),
     model: z.string(),
     modelAlias: z.string().optional(),
