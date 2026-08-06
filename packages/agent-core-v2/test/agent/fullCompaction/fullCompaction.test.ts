@@ -40,6 +40,7 @@ import { estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } from '../../harness';
 import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, logServices, sessionServices, testAgent } from '../../harness';
+import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import {
   IAgentFullCompactionService,
@@ -3630,6 +3631,28 @@ describe('goal reminder re-injection after full compaction', () => {
         ([, , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
       );
       expect(remoteUsageRecords).toHaveLength(1);
+    });
+
+    it('sends remote the turn-shaped history, not the summarizer stripped view', async () => {
+      const records: TelemetryRecord[] = [];
+      const ctx = configuredAgent(records);
+      const shaped = [textMessage('user', 'turn-shaped-history')];
+      const shapeSpy = vi
+        .spyOn(ctx.get(IAgentToolSelectService), 'shapeHistory')
+        .mockReturnValue(shaped);
+      const compactSpy = vi
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .mockResolvedValue(remoteOkOutcome(remoteCheckpoint()));
+
+      await runManualCompaction(ctx);
+
+      // The remote request can only reuse the turn's provider prompt cache when
+      // its history is shaped the way a turn shapes it. The summarizer's
+      // `stripDynamicToolContext` view drops every announcement and schema
+      // message, so with tool-select on the two prefixes diverge at the first
+      // protocol message and the cache stops matching from there.
+      expect(shapeSpy).toHaveBeenCalled();
+      expect(compactSpy.mock.calls[0]?.[0]?.history).toBe(shaped);
     });
   });
 });

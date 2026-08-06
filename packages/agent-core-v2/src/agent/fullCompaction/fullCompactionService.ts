@@ -607,7 +607,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   private async tryRemoteCompaction(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
-    historyForModel: readonly ContextMessage[],
+    shapedHistory: readonly ContextMessage[],
     signal: AbortSignal,
   ): Promise<CompactionCheckpoint | undefined> {
     if (this.profile.resolveModelContext().modelCapabilities.remote_compaction !== true) {
@@ -615,7 +615,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     }
     const outcome = await this.llmRequester.compact(
       {
-        history: historyForModel,
+        history: shapedHistory,
         source: {
           type: 'operation',
           turnId: active.originTurnId,
@@ -680,7 +680,22 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       // below, which runs either way (its output is the only portable record
       // of the fold). The remote attempt sees the unshrunk history, and its
       // failure does not consume the loop's retry/shrink budget.
-      const checkpoint = await this.tryRemoteCompaction(active, data, historyForModel, signal);
+      //
+      // It gets `shapeHistory`, NOT the summarizer's stripped view: the remote
+      // request is meant to reuse the turn's provider prompt cache, and the
+      // turn shapes its history exactly this way (`toolSelectService`). With
+      // tool-select on, `stripDynamicToolContext` drops every announcement and
+      // schema message, so the two prefixes diverge at the first protocol
+      // message and the cache stops matching from there — v1 measured that at
+      // an 18% hit rate. Tools already agree: `compact()` builds them with the
+      // same `shapeTools` call the turn uses. Tool-select off makes
+      // `shapeHistory` fall through to the same strip, so nothing changes there.
+      const checkpoint = await this.tryRemoteCompaction(
+        active,
+        data,
+        this.toolSelect.shapeHistory(originalHistory),
+        signal,
+      );
       while (true) {
         const messagesToCompact = historyForModel;
         const messages: Message[] = [...messagesToCompact, createUserMessage(instruction)];
