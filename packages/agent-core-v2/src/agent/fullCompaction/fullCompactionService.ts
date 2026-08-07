@@ -14,7 +14,11 @@
  * `strategy`, and the lazily-resolved `contextInjectorService` stay instance
  * fields (mechanism, not plain data). Bound at Agent scope and constructed with
  * the scope so the overflow recovery handler registers before the first turn
- * runs.
+ * runs. A completed round does not refresh the profile's system prompt inline:
+ * the mid-turn refresh would reach no request of this turn — the turn config
+ * freezes the prompt at the turn's first request — and would only make
+ * fold-time requests send a prefix the provider never saw. Instead the service
+ * requests the refresh and the loop applies it at the next turn boundary.
  */
 
 import { Disposable } from "#/_base/di/lifecycle";
@@ -554,11 +558,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     try {
       const result = await this.compactionRound(active, data);
       if (this._compacting !== active) throw compactionCancelledReason(active);
-      try {
-        await this.profile.refreshSystemPrompt();
-      } catch (error) {
-        this.log.error('failed to refresh system prompt after compaction', { error });
-      }
+      this.profile.requestSystemPromptRefresh();
       this.lastCompactedTokenCount = result.tokensAfter;
       await this.contextInjector.injectAfterCompaction();
       this.lastCompactedTokenCount = this.tokenCountWithPending();

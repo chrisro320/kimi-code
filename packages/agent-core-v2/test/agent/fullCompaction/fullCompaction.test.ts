@@ -326,7 +326,7 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('refreshes the active profile system prompt after compaction without resetting active tools', async () => {
+  it('requests (not applies) the system prompt refresh after compaction without resetting active tools', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'kimi-compact-refresh-home-'));
     const workDir = mkdtempSync(join(tmpdir(), 'kimi-compact-refresh-work-'));
     try {
@@ -345,6 +345,7 @@ describe('FullCompaction', () => {
         exactCompactionRefreshPrompt(workDir, 'old project instructions'),
       );
 
+      const requestSpy = vi.spyOn(profile, 'requestSystemPromptRefresh');
       const refreshSpy = vi.spyOn(profile, 'refreshSystemPrompt');
       writeFileSync(join(workDir, 'AGENTS.md'), 'new project instructions', 'utf-8');
       ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
@@ -355,11 +356,20 @@ describe('FullCompaction', () => {
       await ctx.rpc.beginCompaction({});
       await completed;
 
-      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      // The refresh is only requested: applying it mid-turn would change the
+      // prompt prefix for fold-time requests of this turn.
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(profile.data().systemPrompt).toBe(
+        exactCompactionRefreshPrompt(workDir, 'old project instructions'),
+      );
+      expect(profile.getActiveToolNames()).toEqual(['Read']);
+
+      // The next turn boundary drains the pending request.
+      await profile.flushPendingSystemPromptRefresh();
       expect(profile.data().systemPrompt).toBe(
         exactCompactionRefreshPrompt(workDir, 'new project instructions'),
       );
-      expect(profile.getActiveToolNames()).toEqual(['Read']);
     } finally {
       rmSync(homeDir, { recursive: true, force: true });
       rmSync(workDir, { recursive: true, force: true });

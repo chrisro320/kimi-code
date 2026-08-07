@@ -55,6 +55,7 @@ import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompacti
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import { IHostClock } from '#/os/interface/hostClock';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
@@ -303,6 +304,11 @@ describe('AgentLifecycleService', () => {
       set: () => {},
     });
     ix.stub(IHostEnvironment, { _serviceBrand: undefined } as IHostEnvironment);
+    ix.stub(IHostClock, {
+      _serviceBrand: undefined,
+      now: () => new Date('2026-01-01T00:00:00.000Z'),
+      timeZone: () => 'UTC',
+    } satisfies IHostClock);
     ix.stub(IHostFileSystem, { _serviceBrand: undefined } as IHostFileSystem);
     ix.stub(ISessionAgentProfileCatalog, {
       _serviceBrand: undefined,

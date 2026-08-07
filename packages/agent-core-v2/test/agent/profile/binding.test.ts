@@ -4,7 +4,7 @@ import { join, normalize } from 'pathe';
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Event } from '#/_base/event';
+import { Event, Emitter } from '#/_base/event';
 import { ConfigTarget, IConfigService } from '#/app/config/config';
 import { TOOLS_SECTION } from '#/agent/toolPolicy/configSection';
 import { DEFAULT_AGENT_PROFILE_NAME, normalizeAgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
@@ -22,8 +22,13 @@ import { SELECT_TOOLS_TOOL_NAME } from '#/agent/toolSelect/toolSelect';
 import { IAtomicDocumentStore, type IAtomicDocumentStore as AtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
+import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
+import {
+  ISessionToolPolicy,
+  type SessionToolPolicyChangedEvent,
+} from '#/session/sessionToolPolicy/sessionToolPolicy';
 import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
+import { PLUGIN_SKILL_SOURCE_ID } from '#/app/skillCatalog/skillSource';
 import { IWireService } from '#/wire/wire';
 import type { ExecutableTool, ToolExecution, ToolResult, ToolSource } from '#/tool/toolContract';
 
@@ -795,6 +800,136 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
 
     expect(toolPolicy.isToolActive('Skill')).toBe(false);
     await vi.waitFor(() => expect(profile.getSystemPrompt()).not.toContain(skillMarker));
+  });
+
+  it('keeps the system prompt byte-identical across refreshes when only the clock advances', async () => {
+    registerAgentProfile({
+      name: 'clock-pinned',
+      tools: ['Read'],
+      systemPrompt: (context) => `ts:${context.now} tz:${context.timeZone}`,
+    });
+    let current = new Date('2026-07-29T04:00:00.000Z');
+    const hostClock: IHostClock = {
+      _serviceBrand: undefined,
+      now: () => current,
+      timeZone: () => 'Asia/Shanghai',
+    };
+    ctx = createTestAgent(appService(IHostClock, hostClock), hostEnvironmentServices(homeDir));
+    const svc = ctx.get(IAgentProfileService);
+    await svc.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
+
+    const first = svc.getSystemPrompt();
+    expect(first).toBe('ts:2026-07-29T04:00:00.000Z tz:Asia/Shanghai');
+
+    current = new Date('2026-07-30T04:00:00.000Z');
+    await svc.refreshSystemPrompt();
+
+    expect(svc.getSystemPrompt()).toBe(first);
+    expect(svc.getSystemPrompt()).toBe('ts:2026-07-29T04:00:00.000Z tz:Asia/Shanghai');
+  });
+
+  it('pins the prompt timestamp to each agent scope construction time', async () => {
+    registerAgentProfile({
+      name: 'clock-pinned',
+      tools: ['Read'],
+      systemPrompt: (context) => `ts:${context.now}`,
+    });
+    ctx = createTestAgent(
+      appService(IHostClock, {
+        _serviceBrand: undefined,
+        now: () => new Date('2026-07-29T04:00:00.000Z'),
+        timeZone: () => 'Asia/Shanghai',
+      }),
+      hostEnvironmentServices(homeDir),
+    );
+    const first = ctx.get(IAgentProfileService);
+    await first.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
+    expect(first.getSystemPrompt()).toBe('ts:2026-07-29T04:00:00.000Z');
+
+    const secondCtx = createTestAgent(
+      appService(IHostClock, {
+        _serviceBrand: undefined,
+        now: () => new Date('2026-07-29T08:00:00.000Z'),
+        timeZone: () => 'Asia/Shanghai',
+      }),
+      hostEnvironmentServices(homeDir),
+    );
+    try {
+      const second = secondCtx.get(IAgentProfileService);
+      await second.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
+      expect(second.getSystemPrompt()).toBe('ts:2026-07-29T08:00:00.000Z');
+    } finally {
+      await secondCtx.dispose();
+    }
+  });
+
+  it('refreshes immediately on an instructions change instead of deferring to a turn boundary', async () => {
+    let agentsMd = 'v1 instructions';
+    const change = new Emitter<void>();
+    ctx = createTestAgent(
+      hostEnvironmentServices(homeDir),
+      sessionService(ISessionInstructionsProvider, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        get agentsMd() {
+          return agentsMd;
+        },
+        agentsMdWarning: undefined,
+        agentsMdPaths: [],
+        onDidChange: change.event,
+      } satisfies ISessionInstructionsProvider),
+    );
+    const svc = ctx.get(IAgentProfileService);
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+    expect(svc.getSystemPrompt()).toContain('v1 instructions');
+
+    agentsMd = 'v2 instructions';
+    change.fire();
+    await vi.waitFor(() => expect(svc.getSystemPrompt()).toContain('v2 instructions'));
+  });
+
+  it('refreshes immediately on a plugin skill-catalog change instead of deferring to a turn boundary', async () => {
+    let listing = 'catalog-v1';
+    const change = new Emitter<string>();
+    ctx = createTestAgent(
+      hostEnvironmentServices(homeDir),
+      sessionService(ISessionSkillCatalog, {
+        _serviceBrand: undefined,
+        catalog: { getModelSkillListing: () => listing } as never,
+        ready: Promise.resolve(),
+        onDidChange: change.event,
+        load: async () => {},
+        reload: async () => {},
+        list: async () => [],
+      }),
+    );
+    const svc = ctx.get(IAgentProfileService);
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+    expect(svc.getSystemPrompt()).toContain('catalog-v1');
+
+    listing = 'catalog-v2';
+    change.fire(PLUGIN_SKILL_SOURCE_ID);
+    await vi.waitFor(() => expect(svc.getSystemPrompt()).toContain('catalog-v2'));
+  });
+
+  it('refreshes immediately on a session tool-policy change instead of deferring to a turn boundary', async () => {
+    const change = new Emitter<SessionToolPolicyChangedEvent>();
+    ctx = createTestAgent(
+      hostEnvironmentServices(homeDir),
+      sessionService(ISessionToolPolicy, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        onDidChange: change.event,
+        disabledTools: () => [],
+        setDisabledTools: async () => {},
+      } satisfies ISessionToolPolicy),
+    );
+    const svc = ctx.get(IAgentProfileService);
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+    const refreshSpy = vi.spyOn(svc, 'refreshSystemPrompt');
+
+    change.fire({ signal: new AbortController().signal, waitUntil: () => {} });
+    await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
   });
 });
 

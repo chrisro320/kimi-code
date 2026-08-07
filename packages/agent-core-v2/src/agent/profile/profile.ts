@@ -140,6 +140,8 @@ export interface IAgentProfileService {
   useProfile(profile: ResolvedAgentProfile, context: SystemPromptContext): void;
   applyProfile(profile: ResolvedAgentProfile, options?: ApplyProfileOptions): Promise<void>;
   refreshSystemPrompt(): Promise<void>;
+  requestSystemPromptRefresh(): void;
+  flushPendingSystemPromptRefresh(): Promise<void>;
   getAgentsMdWarning(): string | undefined;
   data(): ProfileData;
   getEffectiveThinkingLevel(): ThinkingEffort;
