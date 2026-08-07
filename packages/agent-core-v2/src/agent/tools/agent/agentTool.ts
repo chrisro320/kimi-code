@@ -95,12 +95,13 @@ import {
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID, SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
-import { isEditingCapableProfile } from '#/agent/dispatch/profile';
+import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
 import { IGitService } from '#/app/git/git';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
 import {
   acquireSubagentWorktree,
+  discardSpawnWorktree,
   isSubagentWorktreeUnsupported,
   type SubagentWorktreeFinishResult,
   type SubagentWorktreeHandle,
@@ -368,7 +369,7 @@ export class SubagentTool implements ISubagentTool {
           this.modelCatalog.get(final.model);
           if (
             this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
-            isEditingCapableProfile({ tools: profile.tools ?? [] })
+            isEditingCapableCatalogProfile(profile)
           ) {
             worktree = await this.acquireIsolatedWorktree(args, profile.name);
           }
@@ -396,6 +397,8 @@ export class SubagentTool implements ISubagentTool {
           log: this.log,
         });
       } catch (error) {
+        await discardSpawnWorktree(worktree);
+        worktree = undefined;
         recordCircuitFailure(error);
         releasePoolSlot?.();
         releasePoolSlot = undefined;
@@ -419,6 +422,8 @@ export class SubagentTool implements ISubagentTool {
         { signal: controller.signal },
       );
     } catch (error) {
+      await discardSpawnWorktree(worktree);
+      worktree = undefined;
       recordCircuitFailure(error);
       releasePoolSlot?.();
       releasePoolSlot = undefined;

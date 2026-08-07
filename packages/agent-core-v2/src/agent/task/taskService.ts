@@ -1361,9 +1361,13 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     if (entry.task?.kind !== 'agent') {
       throw new Error('candidate_identity_mismatch: task is not an agent task');
     }
-    if (entry.status !== 'input_required' || entry.candidate === undefined) {
+    if (entry.candidate === undefined) {
       throw new Error(`candidate_already_resolved: task status is ${entry.status}`);
     }
+    // The durable manifest, not the in-memory status, decides whether this
+    // resolution already happened: the first approve/deny moves the task to a
+    // terminal status, so gating on `input_required` here would make a repeat
+    // of the same action throw instead of replaying its recorded outcome.
     const { manifest, draft } = await this.persistence.readEditingCandidate(request.taskId);
     if (
       manifest.candidateHash !== request.candidateHash ||
@@ -1376,6 +1380,9 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     const resolutionKind = request.action === 'approve' ? 'approved_applied' : 'denied';
     if (manifest.resolution !== undefined && manifest.resolution.kind !== resolutionKind) {
       throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+    }
+    if (manifest.resolution === undefined && entry.status !== 'input_required') {
+      throw new Error(`candidate_already_resolved: task status is ${entry.status}`);
     }
     if (request.action === 'approve' && manifest.resolution === undefined) {
       await applySubagentWorktreeCandidate(

@@ -66,6 +66,25 @@ import { SessionSwarmService } from '#/session/swarm/sessionSwarmService';
 
 import { stubLog } from '../../_base/log/stubs';
 
+// Isolation acquisition needs a real git repository, which the service-level
+// tests below do not have. The override lets a test stand in a fake handle and
+// observe what the spawn path does with it; when it is unset every caller
+// still runs the real implementation.
+const worktreeMock = vi.hoisted(() => ({
+  acquire: undefined as undefined | ((cwd: string) => unknown),
+}));
+
+vi.mock('#/session/subagent/worktree', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('#/session/subagent/worktree')>();
+  return {
+    ...actual,
+    acquireSubagentWorktree: async (services: never, cwd: string, options: never) =>
+      worktreeMock.acquire === undefined
+        ? await actual.acquireSubagentWorktree(services, cwd, options)
+        : worktreeMock.acquire(cwd),
+  };
+});
+
 describe('resolveSwarmMaxConcurrency', () => {
   it('returns undefined when the variable is unset', () => {
     expect(resolveSwarmMaxConcurrency({})).toBeUndefined();
@@ -1829,6 +1848,130 @@ describe('SessionSwarmService metadata compatibility', () => {
       expect(modelOfCreateCall(1)).toBe('fast');
     });
   });
+
+  describe('worktree isolation wiring', () => {
+    const PARENT_WORKTREE = '/repo/.git/kimi-code-subagent-worktrees/parent';
+    let acquiredFrom: string[];
+    let finish: ReturnType<typeof vi.fn>;
+
+    function isolationEnabled(): void {
+      ix.stub(IFlagService, {
+        _serviceBrand: undefined,
+        enabled: () => true,
+      } as unknown as IFlagService);
+    }
+
+    function catalogWith(tools: readonly string[] | undefined): void {
+      ix.stub(ISessionAgentProfileCatalog, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        get: () => normalizeAgentProfile({ name: 'coder', tools, systemPrompt: () => '' }),
+        getDefault: () => normalizeAgentProfile({ name: 'agent', tools: [], systemPrompt: () => '' }),
+        list: () => [],
+      } as unknown as ISessionAgentProfileCatalog);
+    }
+
+    beforeEach(() => {
+      acquiredFrom = [];
+      finish = vi.fn(async () => ({ applied: false, reason: 'discarded' }));
+      worktreeMock.acquire = (cwd: string) => {
+        acquiredFrom.push(cwd);
+        return { cwd: '/repo/.git/kimi-code-subagent-worktrees/child', finish };
+      };
+    });
+
+    afterEach(() => {
+      worktreeMock.acquire = undefined;
+    });
+
+    it('branches a nested swarm off the caller worktree, not the session workspace', async () => {
+      // This service is Session-scoped: reading the cwd off the session
+      // context would send an isolated caller's swarm children straight back
+      // at the user's workspace, defeating the parent's isolation.
+      isolationEnabled();
+      catalogWith(['Write', 'Edit']);
+      handles.set(
+        'main',
+        agentHandle('main', lifecycle, eventBus, {}, new Map([
+          [
+            ISessionContext,
+            makeSessionContext({
+              sessionId: 's1',
+              workspaceId: 'w1',
+              sessionDir: '/tmp/kimi/s1',
+              sessionScope: 'sessions/w1/s1',
+              cwd: PARENT_WORKTREE,
+            }),
+          ],
+        ])),
+      );
+      const service = ix.get(ISessionSwarmService);
+
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(acquiredFrom).toEqual([PARENT_WORKTREE]);
+    });
+
+    it('isolates a profile that declares no tool list', async () => {
+      // An absent tool list means the profile inherits the full default set,
+      // Write/Edit included. Reading it as an empty list would silently skip
+      // isolation for every profile that does not spell its tools out.
+      isolationEnabled();
+      catalogWith(undefined);
+      const service = ix.get(ISessionSwarmService);
+
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(acquiredFrom).toEqual(['/repo']);
+    });
+
+    it('leaves a read-only profile unisolated', async () => {
+      isolationEnabled();
+      catalogWith(['Read', 'Grep']);
+      const service = ix.get(ISessionSwarmService);
+
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(acquiredFrom).toEqual([]);
+    });
+
+    it('discards the worktree when the spawn fails after acquiring it', async () => {
+      // Nothing else ever will: the completion handler that finishes a
+      // worktree is only attached once the child's run has started.
+      isolationEnabled();
+      catalogWith(['Write', 'Edit']);
+      createAgent.mockImplementationOnce(() => {
+        throw new Error('lifecycle exploded');
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(acquiredFrom).toEqual(['/repo']);
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledWith({
+        kind: 'discard',
+        reason: 'spawn aborted before the child started',
+      });
+    });
+
+    it('discards the worktree when the run rejects before it starts', async () => {
+      isolationEnabled();
+      catalogWith(['Write', 'Edit']);
+      runAgent.mockImplementationOnce(() => {
+        throw new Error('run rejected');
+      });
+      const service = ix.get(ISessionSwarmService);
+
+      await service.run({ callerAgentId: 'main', tasks: [spawnSessionTask()] });
+
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledWith({
+        kind: 'discard',
+        reason: 'spawn aborted before the child started',
+      });
+    });
+  });
 });
 
 function spawnSessionTask(swarmItem?: string): SessionSwarmSpawnTask {
@@ -1946,6 +2089,18 @@ function agentHandle(
         if (serviceId === IEventBus) return eventBus;
         if (serviceId === ITelemetryService) return noopTelemetryService;
         if (serviceId === IAgentLifecycleService) return lifecycle;
+        // An isolated subagent's Agent scope overrides this with its worktree
+        // cwd; a plain agent inherits the session's. Spawning reads the cwd
+        // off the caller's accessor, so the stub has to answer it.
+        if (serviceId === ISessionContext) {
+          return makeSessionContext({
+            sessionId: 's1',
+            workspaceId: 'w1',
+            sessionDir: '/tmp/kimi/s1',
+            sessionScope: 'sessions/w1/s1',
+            cwd: '/repo',
+          });
+        }
         return undefined;
       }) as IAgentScopeHandle['accessor']['get'],
     },

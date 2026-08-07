@@ -53,6 +53,7 @@ import { wrapSubagentModelError } from '#/session/subagent/configSection';
 import { SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
 import {
   acquireSubagentWorktree,
+  discardSpawnWorktree,
   isSubagentWorktreeUnsupported,
   type SubagentWorktreeFinishResult,
   type SubagentWorktreeHandle,
@@ -61,7 +62,7 @@ import {
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
 import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
 import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
-import { isEditingCapableProfile } from '#/agent/dispatch/profile';
+import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
 import { IFlagService } from '#/app/flag/flag';
 import { IGitService } from '#/app/git/git';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -227,13 +228,9 @@ export class SessionSwarmService implements ISessionSwarmService {
         // An unresolvable profile is not this function's problem to report;
         // treat it as non-editing (v1 parity) so risk detection degrades
         // safely instead of throwing ahead of the spawn's own
-        // profile-resolution error. A profile without an explicit tool list
-        // inherits the full default tool set, which includes Write/Edit —
-        // editing-capable.
+        // profile-resolution error.
         const isEditingCapable =
-          profile === undefined
-            ? false
-            : profile.tools === undefined || isEditingCapableProfile({ tools: profile.tools });
+          profile === undefined ? false : isEditingCapableCatalogProfile(profile);
         return { isEditingCapable, scope: undefined };
       });
       return await resolveEffectiveMaxConcurrency(items, configured, {
@@ -282,6 +279,12 @@ export class SessionSwarmService implements ISessionSwarmService {
     let releasePoolSlot = spawnRoute?.releasePoolSlot;
     let childId: string | undefined;
     let worktree: SubagentWorktreeHandle | undefined;
+    // This service is Session-scoped, but the caller may itself be an isolated
+    // subagent whose Agent scope overrides `ISessionContext.cwd` with its
+    // worktree. Reading the cwd off the caller's accessor is what keeps a
+    // nested swarm inside the parent's isolation instead of branching a fresh
+    // worktree off — and applying to — the user's workspace.
+    const callerCwd = caller.accessor.get(ISessionContext).cwd;
     try {
       const binding = options.binding ?? {
         model: callerData.modelAlias,
@@ -299,9 +302,9 @@ export class SessionSwarmService implements ISessionSwarmService {
         this.modelCatalog.get(final.model);
         if (
           this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
-          isEditingCapableProfile({ tools: profile.tools ?? [] })
+          isEditingCapableCatalogProfile(profile)
         ) {
-          worktree = await this.acquireIsolatedWorktree(profile.name);
+          worktree = await this.acquireIsolatedWorktree(callerCwd);
         }
         child = await this.lifecycle.create({
           binding: {
@@ -337,7 +340,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         runInBackground: options.runInBackground,
       });
       const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
-        cwd: this.sessionContext.cwd,
+        cwd: worktree?.cwd ?? callerCwd,
         runner: this.processRunner,
         log: this.log,
       });
@@ -358,6 +361,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         worktree,
       );
     } catch (error) {
+      await discardSpawnWorktree(worktree);
       if (childId !== undefined) this.recordCircuitFailure(childId, error);
       releasePoolSlot?.();
       throw error;
@@ -408,9 +412,11 @@ export class SessionSwarmService implements ISessionSwarmService {
         onReady: options.onReady,
       });
     } catch (error) {
-      // The run never started, so no completion handler will ever fire —
-      // a held pool slot would leak here and eventually deadlock the batch
-      // behind `acquireQueued` (the per-batch sweep only runs at settle).
+      // The run never started, so no completion handler will ever fire — a
+      // held pool slot would leak here and eventually deadlock the batch
+      // behind `acquireQueued` (the per-batch sweep only runs at settle), and
+      // an acquired worktree would stay registered with its checkout on disk.
+      await discardSpawnWorktree(worktree);
       this.recordCircuitFailure(agentId, error);
       this.releasePoolSlotFor(agentId);
       throw error;
@@ -471,14 +477,14 @@ export class SessionSwarmService implements ISessionSwarmService {
     release();
   }
 
-  private async acquireIsolatedWorktree(profileName: string): Promise<SubagentWorktreeHandle> {
+  private async acquireIsolatedWorktree(callerCwd: string): Promise<SubagentWorktreeHandle> {
     const services: SubagentWorktreeServices = {
       git: this.git,
       fs: this.fs,
       proc: this.proc,
       log: this.log,
     };
-    const acquisition = await acquireSubagentWorktree(services, this.sessionContext.cwd);
+    const acquisition = await acquireSubagentWorktree(services, callerCwd);
     if (isSubagentWorktreeUnsupported(acquisition)) {
       throw new Error(
         `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,

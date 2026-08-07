@@ -15,6 +15,8 @@ import type { IAgentScopeHandle } from '#/_base/di/scope';
 import type { ILogService } from '#/_base/log/log';
 import type { RunnableToolExecution } from '#/tool/toolContract';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IEventBus } from '#/app/event/eventBus';
+import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
@@ -42,12 +44,30 @@ import type { SubagentToolInput } from '#/agent/tools/agent/agent';
 
 const WORK_DIR = '/tmp/ac3-worktree-test';
 
-function editingProfile(): AgentProfile {
+// Acquisition needs a real git repository, which this harness does not have.
+// The override stands in a fake handle so the tests can observe what the spawn
+// path does with one; unset, every caller runs the real implementation.
+const worktreeMock = vi.hoisted(() => ({
+  acquire: undefined as undefined | (() => unknown),
+}));
+
+vi.mock('#/session/subagent/worktree', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('#/session/subagent/worktree')>();
+  return {
+    ...actual,
+    acquireSubagentWorktree: async (services: never, cwd: string, options: never) =>
+      worktreeMock.acquire === undefined
+        ? await actual.acquireSubagentWorktree(services, cwd, options)
+        : worktreeMock.acquire(),
+  };
+});
+
+function editingProfile(tools: readonly string[] | undefined): AgentProfile {
   return {
     name: 'coder',
     description: 'test',
     whenToUse: 'test',
-    tools: ['Write', 'Edit'],
+    tools,
   } as unknown as AgentProfile;
 }
 
@@ -56,6 +76,8 @@ function makeTool(deps: {
   git: Partial<IGitService>;
   create?: ReturnType<typeof vi.fn>;
   flagsEnabled?: boolean;
+  profile?: AgentProfile;
+  run?: ReturnType<typeof vi.fn>;
 }): SubagentTool {
   const accessor = {
     get: (id: unknown) => {
@@ -64,6 +86,10 @@ function makeTool(deps: {
       if (id === IAgentProfileService) {
         return { data: () => ({ modelAlias: 'test-model', thinkingLevel: 'high', profileName: 'main' }) };
       }
+      // `emitAgentRunSpawned` publishes through these and tolerates their
+      // absence; the tests that reach it only care about what happens after.
+      if (id === IEventBus || id === IAgentLifecycleService) return undefined;
+      if (id === ITelemetryService) return noopTelemetryService;
       throw new Error(`unexpected accessor.get(${String(id)})`);
     },
   };
@@ -73,10 +99,10 @@ function makeTool(deps: {
       get: (id: string) => (id === 'main' ? handle : undefined),
       create: deps.create ?? vi.fn(async () => ({ id: 'agent-1', accessor }) as unknown as IAgentScopeHandle),
     } as unknown as IAgentLifecycleService,
-    { run: vi.fn() } as unknown as ISessionSubagentService,
+    { run: deps.run ?? vi.fn() } as unknown as ISessionSubagentService,
     {
       ready: Promise.resolve(),
-      get: () => editingProfile(),
+      get: () => deps.profile ?? editingProfile(['Write', 'Edit']),
       list: () => [],
       getDefault: () => ({ subagents: [] }),
     } as unknown as ISessionAgentProfileCatalog,
@@ -120,6 +146,7 @@ describe('SubagentTool worktree isolation wiring', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    worktreeMock.acquire = undefined;
   });
 
   it('releases the pool slot exactly once when isolation acquire fails (AC3)', async () => {
@@ -176,6 +203,86 @@ describe('SubagentTool worktree isolation wiring', () => {
     // Flag off → no isolation → spawn proceeds; the failure here comes from
     // lifecycle.create, and the pool slot must still be released.
     expect(result.isError).toBe(true);
+    expect(releaseCalls).toBe(1);
+  });
+
+  it('isolates a profile that declares no tool list', async () => {
+    // An absent tool list means the profile inherits the full default set,
+    // Write/Edit included. Reading it as an empty list would silently skip
+    // isolation for every profile that does not spell its tools out — the
+    // common shape for user-defined agents.
+    const create = vi.fn(async () => {
+      throw new Error('lifecycle.create must not be reached');
+    });
+    const tool = makeTool({
+      routing: { resolveSpawnRoute: async () => undefined },
+      git: { repoInfo: async () => null },
+      create,
+      profile: editingProfile(undefined),
+    });
+
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
+    const result = await execution.execute({
+      toolCallId: 'call-1',
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(String(result.output)).toContain('Editing subagent isolation is unavailable');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('discards the worktree when the spawn fails after acquiring it', async () => {
+    // Nothing else ever will: the completion handler that finishes a worktree
+    // is only attached once the child's run has started.
+    const finish = vi.fn(async () => ({ applied: false, reason: 'discarded' }));
+    worktreeMock.acquire = () => ({ cwd: '/tmp/wt', finish });
+    const create = vi.fn(async () => {
+      throw new Error('lifecycle exploded');
+    });
+    const tool = makeTool({
+      routing: { resolveSpawnRoute: async () => ({ route: { circuitKey: 'k' }, releasePoolSlot }) },
+      git: {},
+      create,
+    });
+
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
+    const result = await execution.execute({
+      toolCallId: 'call-1',
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({
+      kind: 'discard',
+      reason: 'spawn aborted before the child started',
+    });
+    expect(releaseCalls).toBe(1);
+  });
+
+  it('discards the worktree when the run rejects before it starts', async () => {
+    const finish = vi.fn(async () => ({ applied: false, reason: 'discarded' }));
+    worktreeMock.acquire = () => ({ cwd: '/tmp/wt', finish });
+    const tool = makeTool({
+      routing: { resolveSpawnRoute: async () => ({ route: { circuitKey: 'k' }, releasePoolSlot }) },
+      git: {},
+      run: vi.fn(async () => {
+        throw new Error('run rejected');
+      }),
+    });
+
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
+    const result = await execution.execute({
+      toolCallId: 'call-1',
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith({
+      kind: 'discard',
+      reason: 'spawn aborted before the child started',
+    });
     expect(releaseCalls).toBe(1);
   });
 });

@@ -217,6 +217,23 @@ export const __testing = {
   },
 };
 
+/**
+ * Releases a worktree acquired for a spawn that never reached its first run.
+ * Every acquisition has to be paired with this on the failure path (v1 does it
+ * in `subagent-host.ts` under the same reason string): without it a throw
+ * between acquire and the child's first run leaks both the worktree
+ * registration and its checkout, and no completion handler will ever fire to
+ * clean them up.
+ */
+export async function discardSpawnWorktree(
+  worktree: SubagentWorktreeHandle | undefined,
+): Promise<void> {
+  if (worktree === undefined) return;
+  await worktree
+    .finish({ kind: 'discard', reason: 'spawn aborted before the child started' })
+    .catch(() => {});
+}
+
 export async function acquireSubagentWorktree(
   services: SubagentWorktreeServices,
   repoCwd: string,
