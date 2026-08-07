@@ -26,7 +26,12 @@
  * holds resources (`AbortController`, controlled promises, a
  * `StepRequestQueue`) that must not be snapshotted, alongside the mechanism
  * resources (`standaloneStepQueue`, `pendingAssignments`, `errorHandlers`,
- * `settleWaiters`, `activeRequestTrace`). Bound at Agent scope.
+ * `settleWaiters`, `activeRequestTrace`). Bound at Agent scope. Drains a
+ * pending system-prompt refresh through `profile` at the start of each
+ * `runTurn`: the turn's first request freezes the prompt into its turn config,
+ * so a refresh requested mid-turn (e.g. by full compaction) must land before
+ * that freeze — draining anywhere later would only affect the next turn's
+ * requests.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -51,6 +56,7 @@ import { OrderedHookSlot } from '#/hooks';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { isVacuousContentPart } from '#/agent/contextMemory/vacuousContent';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import type {
@@ -127,6 +133,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
   ) {
     super();
     this.states.register(loopNextReservedTurnIdKey);
@@ -464,6 +471,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     turn: Turn,
     ready: ReturnType<typeof createControlledPromise<void>>,
   ): Promise<TurnResult> {
+    await this.profile.flushPendingSystemPromptRefresh();
     const startedAt = Date.now();
     this.telemetryContext.set({ turn_id: turn.id });
     const telemetryContext = this.telemetryContext.get();

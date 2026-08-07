@@ -1,10 +1,14 @@
 import { type ToolCall } from '#/kosong/contract/message';
 import { emptyUsage } from '#/kosong/contract/usage';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'pathe';
 
 import type { IDisposable } from '#/_base/di/lifecycle';
 import { IAgentProfileService } from '#/index';
 import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
+import { normalizeAgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { ModelRequestTiming } from '#/kosong/model/modelRequester';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentGoalService } from '#/agent/goal/goal';
@@ -20,6 +24,7 @@ import { userCancellationReason } from '#/_base/utils/abort';
 import {
   agentService,
   createTestAgent,
+  hostEnvironmentServices,
   permissionModeServices,
   type TestAgentContext,
   type TestAgentOptions,
@@ -730,6 +735,64 @@ describe('Agent loop', () => {
     subscription.dispose();
 
     expect(prompts).toEqual([undefined, 'hi']);
+  });
+
+  it('freezes the next turn config from the refreshed prompt after a pending refresh', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'kimi-loop-refresh-home-'));
+    const workDir = mkdtempSync(join(tmpdir(), 'kimi-loop-refresh-work-'));
+    try {
+      writeFileSync(join(workDir, 'AGENTS.md'), 'v1 instructions', 'utf-8');
+      const local = createTestAgent(hostEnvironmentServices(homeDir), { cwd: workDir });
+      try {
+        const localProfile = local.get(IAgentProfileService);
+        localProfile.update({ activeToolNames: [] });
+        await localProfile.applyProfile(
+          normalizeAgentProfile({
+            name: 'loop-refresh-prompt',
+            systemPrompt: (context) => `agents:${context.agentsMd ?? ''}`,
+            tools: [],
+          }),
+        );
+        expect(localProfile.getSystemPrompt()).toContain('v1 instructions');
+
+        writeFileSync(join(workDir, 'AGENTS.md'), 'v2 instructions', 'utf-8');
+        localProfile.requestSystemPromptRefresh();
+        expect(localProfile.getSystemPrompt()).toContain('v1 instructions');
+
+        local.mockNextResponse({ type: 'text', text: 'done' });
+        await local.rpc.prompt({ input: [{ type: 'text', text: 'Next' }] });
+        await local.untilTurnEnd();
+
+        expect(localProfile.getSystemPrompt()).toContain('v2 instructions');
+        // The turn's first request froze the refreshed prompt into its turn config.
+        expect(local.llmCalls[0]!.systemPrompt).toContain('v2 instructions');
+      } finally {
+        await local.dispose();
+      }
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the turn alive when the drained refresh fails and never retries it on later turns', async () => {
+    profile.update({ activeToolNames: [] });
+    const refreshSpy = vi
+      .spyOn(profile, 'refreshSystemPrompt')
+      .mockRejectedValue(new Error('refresh boom'));
+    profile.requestSystemPromptRefresh();
+
+    ctx.mockNextResponse({ type: 'text', text: 'first' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'First' }] });
+    await ctx.untilTurnEnd();
+    expect(ctx.llmCalls).toHaveLength(1);
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+    ctx.mockNextResponse({ type: 'text', text: 'second' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Second' }] });
+    await ctx.untilTurnEnd();
+    expect(ctx.llmCalls).toHaveLength(2);
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 });
 

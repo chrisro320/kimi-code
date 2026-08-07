@@ -72,7 +72,15 @@
  * own default applies when nothing is configured. `bind` gates on the freeze
  * before materializing the model, whose resolution reads the identity through
  * the host-headers port — a fast bootstrap must wait, not trip the pre-freeze
- * guard. Bound at Agent scope.
+ * guard. The prompt's `${now}` slot is pinned to the Agent's construction time
+ * (`sessionStartedAt`): the system prompt is large, and a changed line near
+ * its front invalidates the provider's whole prompt-cache prefix from there
+ * on, so re-rendering a fresh timestamp mid-session would silently defeat the
+ * cache. `requestSystemPromptRefresh` / `flushPendingSystemPromptRefresh`
+ * defer a refresh to the next turn boundary (the loop drains it at the start
+ * of `runTurn`), so a refresh requested mid-turn — e.g. right after full
+ * compaction — never changes the prefix the current turn's requests already
+ * froze into their turn config. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -252,6 +260,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IFlagService private readonly flags: IFlagService,
   ) {
     super();
+    this.sessionStartedAt = this.clock.now();
     this.states.register(profileActiveToolNamesOverlayKey);
     this.states.register(profileAgentsMdWarningKey);
     this.states.register(profileEmittedThinkingEffortWarningsKey);
@@ -284,6 +293,9 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       }),
     );
   }
+
+  private readonly sessionStartedAt: Date;
+  private pendingSystemPromptRefresh = false;
 
   private get activeToolNamesOverlay(): readonly string[] | undefined {
     return this.states.get(profileActiveToolNamesOverlayKey);
@@ -531,6 +543,24 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     this.seedAgentsMdReminder(context);
     this.cacheAgentsMdWarning(context);
     this.publishAgentsMdWarning();
+  }
+
+  requestSystemPromptRefresh(): void {
+    this.pendingSystemPromptRefresh = true;
+  }
+
+  async flushPendingSystemPromptRefresh(): Promise<void> {
+    if (!this.pendingSystemPromptRefresh) return;
+    this.pendingSystemPromptRefresh = false;
+    try {
+      await this.refreshSystemPrompt();
+    } catch (error) {
+      this.eventBus.publish({
+        type: 'warning',
+        message: `System prompt refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        code: 'system-prompt-refresh-failed',
+      });
+    }
   }
 
   private seedAgentsMdReminder(context: SystemPromptContext): void {
@@ -931,7 +961,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     );
     const skills = await this.resolveSkillListing();
     const pluginSections = await this.resolvePluginSections();
-    const now = this.clock.now();
     const timeZone = this.clock.timeZone();
     return {
       ...base,
@@ -939,7 +968,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       osKind: this.env.osKind,
       shellName: this.env.shellName,
       shellPath: this.env.shellPath,
-      now: now.toISOString(),
+      now: this.sessionStartedAt.toISOString(),
       timeZone,
       skills,
       pluginSections,

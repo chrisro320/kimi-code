@@ -24,6 +24,7 @@ import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import { IHostClock } from '#/os/interface/hostClock';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
@@ -215,6 +216,11 @@ function buildHost(key: string): {
   host.stub(IModelCatalog, modelCatalog);
   host.stub(IProtocolAdapterRegistry, createProtocolRegistryStub());
   host.stub(IHostEnvironment, stubUnused());
+  host.stub(IHostClock, {
+    _serviceBrand: undefined,
+    now: () => new Date('2026-01-01T00:00:00.000Z'),
+    timeZone: () => 'UTC',
+  } satisfies IHostClock);
   host.stub(IHostFileSystem, stubUnused());
   host.stub(IBootstrapService, stubUnused());
   host.stub(ISessionContext, createSessionContextStub());
