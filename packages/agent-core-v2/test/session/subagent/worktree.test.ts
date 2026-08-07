@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,7 @@ import {
   acquireSubagentWorktree,
   applySubagentWorktreeCandidate,
   isSubagentWorktreeUnsupported,
+  type EditingCandidateDraft,
   type SubagentWorktreeHandle,
   type SubagentWorktreeServices,
 } from '#/session/subagent/worktree';
@@ -215,5 +216,52 @@ describe('subagent worktree isolation (real git integration)', () => {
     await expect(
       applySubagentWorktreeCandidate(services, result.candidate!, ['a.txt']),
     ).rejects.toThrow('candidate_identity_mismatch');
+  });
+
+  async function outsideScopeCandidate(content: string): Promise<EditingCandidateDraft> {
+    const handle = await acquire(['a.txt']);
+    writeFileSync(join(handle.cwd, 'b.txt'), content);
+    const result = await handle.finish({ kind: 'success' });
+    if (result.candidate === undefined) throw new Error('expected a scope-expansion candidate');
+    return result.candidate;
+  }
+
+  it('resumes an interrupted apply as a no-op when the delta already landed', async () => {
+    const candidate = await outsideScopeCandidate('outside scope\n');
+    await applySubagentWorktreeCandidate(services, candidate, candidate.requestedScope);
+
+    const resumed = await applySubagentWorktreeCandidate(
+      services,
+      candidate,
+      candidate.requestedScope,
+      { resume: true },
+    );
+
+    expect(resumed).toEqual({ applied: true, reconciled: 'already_applied' });
+    expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('outside scope\n');
+  });
+
+  it('resumes an interrupted apply by applying when the delta never landed', async () => {
+    const candidate = await outsideScopeCandidate('outside scope\n');
+
+    const resumed = await applySubagentWorktreeCandidate(
+      services,
+      candidate,
+      candidate.requestedScope,
+      { resume: true },
+    );
+
+    expect(resumed).toEqual({ applied: true });
+    expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('outside scope\n');
+  });
+
+  it('refuses a resumed apply when the workspace matches neither baseline nor result', async () => {
+    const candidate = await outsideScopeCandidate('outside scope\n');
+    writeFileSync(join(repo, 'b.txt'), 'someone else wrote this\n');
+
+    await expect(
+      applySubagentWorktreeCandidate(services, candidate, candidate.requestedScope, { resume: true }),
+    ).rejects.toThrow('candidate_path_diverged');
+    expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('someone else wrote this\n');
   });
 });

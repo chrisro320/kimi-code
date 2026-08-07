@@ -54,6 +54,29 @@ import { stubContextMemory } from '../contextMemory/stubs';
 import { stubLoopWithHooks } from '../loop/stubs';
 import type { TaskServiceTestManager } from './stubs';
 
+/** Records what the resolver asked the apply path to do, so a test can assert
+ * that a replay applied nothing and that a resumed apply was flagged as such. */
+const applyMock = vi.hoisted(() => ({
+  calls: [] as { resume: boolean }[],
+  onApply: undefined as undefined | (() => Promise<void>),
+}));
+vi.mock('#/session/subagent/worktree', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('#/session/subagent/worktree')>();
+  return {
+    ...actual,
+    applySubagentWorktreeCandidate: async (
+      _services: never,
+      _draft: never,
+      _scope: never,
+      options?: { readonly resume?: boolean },
+    ) => {
+      applyMock.calls.push({ resume: options?.resume === true });
+      await applyMock.onApply?.();
+      return { applied: true };
+    },
+  };
+});
+
 function fakeProcessTask(): AgentTask {
   return {
     idPrefix: 'test',
@@ -642,6 +665,219 @@ describe('AgentTaskService', () => {
     const subLost = await sub.reconcile();
     expect(subLost.map((info) => info.taskId)).toEqual(['bash-abcdef01']);
     expect(subLost[0]?.status).toBe('lost');
+  });
+
+  const RESTORED_SCOPE = 'sessions/test-ws/test-session/agents/agent-1/tasks';
+  const RESTORED_TASK_ID = 'agent-abcdef02';
+  const RESTORED_SCOPE_REQUEST = ['src/**', 'docs/readme.md'];
+
+  /** Seeds what a process that died holding an unresolved candidate leaves
+   * behind: an `input_required` task record plus its candidate manifest. */
+  async function seedCandidateGhost(
+    docs: IAtomicDocumentStore,
+    resolution?: { kind: 'approved_applied' | 'denied'; resolvedAt: string; phase?: 'pending' },
+  ): Promise<void> {
+    await docs.set(RESTORED_SCOPE, `${RESTORED_TASK_ID}.json`, {
+      taskId: RESTORED_TASK_ID,
+      kind: 'agent',
+      description: 'scope expansion candidate',
+      startedAt: 1,
+      endedAt: null,
+      status: 'input_required',
+      detached: true,
+      candidate: {
+        hash: 'hash-1',
+        requestedScope: RESTORED_SCOPE_REQUEST,
+        paths: ['docs/readme.md'],
+      },
+    });
+    await docs.set(RESTORED_SCOPE, `${RESTORED_TASK_ID}.candidate.json`, {
+      version: 1,
+      taskId: RESTORED_TASK_ID,
+      repoRoot: '/repo',
+      commonDir: '/repo/.git',
+      headCommit: 'c0ffee',
+      originalScope: ['src/**'],
+      requestedScope: RESTORED_SCOPE_REQUEST,
+      candidateHash: 'hash-1',
+      createdAt: new Date(0).toISOString(),
+      paths: [
+        {
+          relPath: 'docs/readme.md',
+          classification: 'outside-scope',
+          before: { kind: 'absent' },
+          after: { kind: 'absent' },
+          beforePayload: false,
+          afterPayload: false,
+        },
+      ],
+      resolution,
+    });
+  }
+
+  async function restoredAgent(
+    docs: IAtomicDocumentStore,
+    bytes: IFileSystemStorageService,
+  ): Promise<{ svc: TaskServiceTestManager; lost: readonly AgentTaskInfo[] }> {
+    const svc = buildAgentIx('agent-1', docs, bytes).get(
+      IAgentTaskService,
+    ) as TaskServiceTestManager;
+    await svc.loadFromDisk();
+    const lost = await svc.reconcile();
+    return { svc, lost };
+  }
+
+  it('keeps a restored task with an unresolved candidate resolvable instead of lost', async () => {
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs);
+
+    const { svc, lost } = await restoredAgent(docs, new InMemoryStorageService());
+
+    expect(lost).toEqual([]);
+    expect(svc.getTask(RESTORED_TASK_ID)?.status).toBe('input_required');
+  });
+
+  it('still marks a restored task lost when its candidate is already resolved', async () => {
+    // Guards the skip above from widening into "any input_required task survives":
+    // a resolved candidate has nothing left to approve, and so does a task whose
+    // manifest is gone.
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs, { kind: 'denied', resolvedAt: new Date(0).toISOString() });
+
+    const { svc, lost } = await restoredAgent(docs, new InMemoryStorageService());
+
+    expect(lost.map((info) => info.taskId)).toEqual([RESTORED_TASK_ID]);
+    expect(svc.getTask(RESTORED_TASK_ID)?.status).toBe('lost');
+  });
+
+  it('marks a restored task lost when its candidate manifest is missing', async () => {
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs);
+    await docs.delete(RESTORED_SCOPE, `${RESTORED_TASK_ID}.candidate.json`);
+
+    const { lost } = await restoredAgent(docs, new InMemoryStorageService());
+
+    expect(lost.map((info) => info.taskId)).toEqual([RESTORED_TASK_ID]);
+  });
+
+  it('approves a candidate that outlived the process that produced it', async () => {
+    applyMock.calls = [];
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs);
+    const { svc } = await restoredAgent(docs, new InMemoryStorageService());
+    // The intent has to be durable before the workspace is touched, or a crash
+    // during the apply leaves no record that the apply was ever attempted.
+    let phaseDuringApply: string | undefined;
+    applyMock.onApply = async () => {
+      const manifest = await docs.get<{ resolution?: { phase?: string } }>(
+        RESTORED_SCOPE,
+        `${RESTORED_TASK_ID}.candidate.json`,
+      );
+      phaseDuringApply = manifest?.resolution?.phase;
+    };
+
+    const result = await svc.resolveScopeExpansion({
+      taskId: RESTORED_TASK_ID,
+      candidateHash: 'hash-1',
+      requestedScope: RESTORED_SCOPE_REQUEST,
+      action: 'approve',
+    });
+
+    applyMock.onApply = undefined;
+    expect(applyMock.calls).toEqual([{ resume: false }]);
+    expect(phaseDuringApply).toBe('pending');
+    expect(result).toMatchObject({ resolution: 'approved_applied', idempotent: false });
+    expect(svc.getTask(RESTORED_TASK_ID)?.status).toBe('completed');
+    const stored = await docs.get<{ status: string }>(RESTORED_SCOPE, `${RESTORED_TASK_ID}.json`);
+    expect(stored?.status).toBe('completed');
+  });
+
+  it('denies a candidate that outlived the process without touching the workspace', async () => {
+    applyMock.calls = [];
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs);
+    const { svc } = await restoredAgent(docs, new InMemoryStorageService());
+
+    const result = await svc.resolveScopeExpansion({
+      taskId: RESTORED_TASK_ID,
+      candidateHash: 'hash-1',
+      requestedScope: RESTORED_SCOPE_REQUEST,
+      action: 'deny',
+    });
+
+    expect(applyMock.calls).toEqual([]);
+    expect(result).toMatchObject({ resolution: 'denied' });
+    expect(svc.getTask(RESTORED_TASK_ID)?.status).toBe('expansion_denied');
+  });
+
+  it('replays a resolved candidate on a restored task without applying again', async () => {
+    applyMock.calls = [];
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs, {
+      kind: 'approved_applied',
+      resolvedAt: new Date(0).toISOString(),
+    });
+    const svc = buildAgentIx('agent-1', docs, new InMemoryStorageService()).get(
+      IAgentTaskService,
+    ) as TaskServiceTestManager;
+    await svc.loadFromDisk();
+
+    const result = await svc.resolveScopeExpansion({
+      taskId: RESTORED_TASK_ID,
+      candidateHash: 'hash-1',
+      requestedScope: RESTORED_SCOPE_REQUEST,
+      action: 'approve',
+    });
+
+    expect(applyMock.calls).toEqual([]);
+    expect(result).toMatchObject({ resolution: 'approved_applied', idempotent: true });
+  });
+
+  it('resumes an apply whose resolution was never written', async () => {
+    // The process died between the apply and the manifest write, so the record
+    // says `pending`: the workspace, not the record, decides whether the delta
+    // landed — the apply path is re-entered in resume mode to find out.
+    applyMock.calls = [];
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs, {
+      kind: 'approved_applied',
+      resolvedAt: new Date(0).toISOString(),
+      phase: 'pending',
+    });
+    const { svc, lost } = await restoredAgent(docs, new InMemoryStorageService());
+    expect(lost).toEqual([]);
+
+    const result = await svc.resolveScopeExpansion({
+      taskId: RESTORED_TASK_ID,
+      candidateHash: 'hash-1',
+      requestedScope: RESTORED_SCOPE_REQUEST,
+      action: 'approve',
+    });
+
+    expect(applyMock.calls).toEqual([{ resume: true }]);
+    expect(result).toMatchObject({ resolution: 'approved_applied', idempotent: false });
+    const manifest = await docs.get<{ resolution?: { phase?: string } }>(
+      RESTORED_SCOPE,
+      `${RESTORED_TASK_ID}.candidate.json`,
+    );
+    expect(manifest?.resolution?.phase).toBeUndefined();
+  });
+
+  it('rejects a restored candidate whose requested scope does not match', async () => {
+    applyMock.calls = [];
+    const docs = mapBackedDocs();
+    await seedCandidateGhost(docs);
+    const { svc } = await restoredAgent(docs, new InMemoryStorageService());
+
+    await expect(
+      svc.resolveScopeExpansion({
+        taskId: RESTORED_TASK_ID,
+        candidateHash: 'hash-1',
+        requestedScope: ['src/**'],
+        action: 'approve',
+      }),
+    ).rejects.toThrow(/candidate_identity_mismatch/);
+    expect(applyMock.calls).toEqual([]);
   });
 
   it('main restore claims a previous v2 session task with its legacy output path', async () => {

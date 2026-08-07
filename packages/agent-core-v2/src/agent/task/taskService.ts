@@ -31,7 +31,12 @@
  * surfaces `candidate` and waits; `resolveScopeExpansion` (serialized per
  * task) applies the candidate through the guarded worktree apply path on
  * approve, marks the task `expansion_denied` on deny, and both are
- * idempotent through the persisted resolution.
+ * idempotent through the persisted resolution. A candidate outlives the
+ * process that produced it: reconciliation keeps a restored task
+ * `input_required` while its manifest still has work to do instead of
+ * marking it lost, and resolution accepts such a task as a ghost — the
+ * manifest carries everything the apply path needs, so only the write-back
+ * target differs from the live path.
  * The plain-data task state (`ghosts`, `scheduledNotificationKeys`,
  * `deliveredNotificationKeys`, `activeTaskReminderPending`) is registered
  * into `agentState` (`IAgentStateService`) and read/written through it; the
@@ -965,6 +970,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     const persistence = this.persistence;
     for (const [taskId, info] of this.ghosts) {
       if (TERMINAL_STATUSES.has(info.status)) continue;
+      if (await this.hasResolvableCandidate(info)) continue;
       const updated: AgentTaskInfo = {
         ...info,
         status: 'lost',
@@ -975,6 +981,16 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       lostTasks.push(updated);
     }
     return lostTasks;
+  }
+
+  private async hasResolvableCandidate(info: AgentTaskInfo): Promise<boolean> {
+    if (info.status !== 'input_required') return false;
+    if (info.kind !== 'agent' || info.candidate === undefined) return false;
+    const manifest = await this.persistence
+      .readEditingCandidateManifest(info.taskId)
+      .catch(() => undefined);
+    if (manifest === undefined) return false;
+    return manifest.resolution === undefined || manifest.resolution.phase === 'pending';
   }
 
   private persistLive(entry: ManagedTask): Promise<void> {
@@ -1357,12 +1373,18 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     request: ScopeExpansionResolutionRequest,
   ): Promise<ScopeExpansionResolutionResult> {
     const entry = this.tasks.get(request.taskId);
-    if (entry === undefined) throw new Error(`Task not found: ${request.taskId}`);
-    if (entry.task?.kind !== 'agent') {
+    const ghost = entry === undefined ? this.ghosts.get(request.taskId) : undefined;
+    if (entry === undefined && ghost === undefined) {
+      throw new Error(`Task not found: ${request.taskId}`);
+    }
+    const held = entry !== undefined
+      ? { kind: entry.task?.kind, candidate: entry.candidate, status: entry.status }
+      : { kind: ghost!.kind, candidate: ghost!.kind === 'agent' ? ghost!.candidate : undefined, status: ghost!.status };
+    if (held.kind !== 'agent') {
       throw new Error('candidate_identity_mismatch: task is not an agent task');
     }
-    if (entry.candidate === undefined) {
-      throw new Error(`candidate_already_resolved: task status is ${entry.status}`);
+    if (held.candidate === undefined) {
+      throw new Error(`candidate_already_resolved: task status is ${held.status}`);
     }
     // The durable manifest, not the in-memory status, decides whether this
     // resolution already happened: the first approve/deny moves the task to a
@@ -1372,8 +1394,8 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     if (
       manifest.candidateHash !== request.candidateHash ||
       JSON.stringify(manifest.requestedScope) !== JSON.stringify(request.requestedScope) ||
-      entry.candidate.hash !== request.candidateHash ||
-      JSON.stringify(entry.candidate.requestedScope) !== JSON.stringify(manifest.requestedScope)
+      held.candidate.hash !== request.candidateHash ||
+      JSON.stringify(held.candidate.requestedScope) !== JSON.stringify(manifest.requestedScope)
     ) {
       throw new Error('candidate_identity_mismatch: candidate hash or requested scope does not match');
     }
@@ -1381,14 +1403,20 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     if (manifest.resolution !== undefined && manifest.resolution.kind !== resolutionKind) {
       throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
     }
-    if (manifest.resolution === undefined && entry.status !== 'input_required') {
-      throw new Error(`candidate_already_resolved: task status is ${entry.status}`);
+    if (manifest.resolution === undefined && held.status !== 'input_required') {
+      throw new Error(`candidate_already_resolved: task status is ${held.status}`);
     }
-    if (request.action === 'approve' && manifest.resolution === undefined) {
+    const intent = await this.persistence.beginEditingCandidateResolution(
+      request.taskId,
+      request.candidateHash,
+      resolutionKind,
+    );
+    if (request.action === 'approve' && intent.replay !== 'resolved') {
       await applySubagentWorktreeCandidate(
         this.worktreeServices(),
         draft,
         request.requestedScope,
+        { resume: intent.replay === 'pending' },
       );
     }
     const write = await this.persistence.writeEditingCandidateResolution(
@@ -1396,7 +1424,24 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       request.candidateHash,
       { kind: resolutionKind, resolvedAt: new Date().toISOString() },
     );
-    entry.status = request.action === 'approve' ? 'completed' : 'expansion_denied';
+    const nextStatus = request.action === 'approve' ? 'completed' : 'expansion_denied';
+    const task = entry !== undefined
+      ? await this.settleResolvedLiveTask(entry, nextStatus)
+      : await this.settleResolvedGhostTask(request.taskId, ghost!, nextStatus);
+    return {
+      task,
+      candidateHash: manifest.candidateHash,
+      requestedScope: manifest.requestedScope,
+      resolution: resolutionKind,
+      idempotent: write.idempotent,
+    };
+  }
+
+  private async settleResolvedLiveTask(
+    entry: ManagedTask,
+    status: AgentTaskStatus,
+  ): Promise<AgentTaskInfo> {
+    entry.status = status;
     entry.endedAt = Date.now();
     entry.foregroundSignalCleanup?.();
     entry.foregroundSignalCleanup = undefined;
@@ -1404,13 +1449,18 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     this.fireTerminalEffects(entry);
     entry.foregroundRelease?.resolve('terminal');
     this.resolveWaiters(entry);
-    return {
-      task: this.toInfo(entry),
-      candidateHash: manifest.candidateHash,
-      requestedScope: manifest.requestedScope,
-      resolution: resolutionKind,
-      idempotent: write.idempotent,
-    };
+    return this.toInfo(entry);
+  }
+
+  private async settleResolvedGhostTask(
+    taskId: string,
+    ghost: AgentTaskInfo,
+    status: AgentTaskStatus,
+  ): Promise<AgentTaskInfo> {
+    const updated: AgentTaskInfo = { ...ghost, status, endedAt: Date.now() };
+    this.ghosts.set(taskId, updated);
+    await this.persistence.writeTask(updated);
+    return updated;
   }
 
   private worktreeServices(): SubagentWorktreeServices {
