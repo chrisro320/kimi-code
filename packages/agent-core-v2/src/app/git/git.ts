@@ -8,6 +8,18 @@
  * Session's execution environment, so it never depends on a Session. Path
  * confinement is the caller's responsibility — the service receives
  * already-resolved absolute `cwd` and repo-relative paths.
+ *
+ * The worktree-isolation additions (`repoInfo`, `createDetachedWorktree`,
+ * `removeWorktree`, `diffChangedPaths`, `untrackedPaths`, `trackedPaths`,
+ * `headEntry`) back the editing-subagent isolation (design D-B6-2).
+ * `repoInfo` resolves the top-level repo root, the shared metadata dir
+ * (`--git-common-dir`; under `.git` in single-worktree repositories, outside
+ * the working tree in linked ones) and the current HEAD — `null` when the
+ * cwd is not inside a git repository, and a `headCommit` of `null` for an
+ * unborn branch. `headEntry` reconstructs one repo-relative path's HEAD
+ * state (`absent` when unknown to HEAD, `unreadable` for submodule gitlinks
+ * or git failures so callers fail closed, `regular` with the blob payload
+ * for files, `symlink` with the link target).
  */
 
 import { z } from 'zod';
@@ -65,12 +77,31 @@ export const fsDiffResponseSchema = z.object({
 });
 export type FsDiffResponse = z.infer<typeof fsDiffResponseSchema>;
 
+export interface GitRepoInfo {
+  readonly repoRoot: string;
+  readonly commonDir: string;
+  readonly headCommit: string | null;
+}
+
+export type GitHeadEntry =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly error: string }
+  | { readonly kind: 'regular'; readonly mode: number; readonly blob: Uint8Array }
+  | { readonly kind: 'symlink'; readonly target: string };
+
 export interface IGitService {
   readonly _serviceBrand: undefined;
 
   status(cwd: string, pathFilter?: ReadonlySet<string>): Promise<FsGitStatusResponse>;
   diff(cwd: string, relPath: string, absPath: string): Promise<FsDiffResponse>;
   findWorkTree(cwd: string): Promise<GitWorkTree | null>;
+  repoInfo(cwd: string): Promise<GitRepoInfo | null>;
+  createDetachedWorktree(repoRoot: string, worktreeRoot: string, headCommit: string): Promise<void>;
+  removeWorktree(repoRoot: string, worktreeRoot: string): Promise<void>;
+  diffChangedPaths(repoRoot: string): Promise<string[]>;
+  untrackedPaths(repoRoot: string): Promise<string[]>;
+  trackedPaths(repoRoot: string): Promise<string[]>;
+  headEntry(repoRoot: string, relPath: string): Promise<GitHeadEntry>;
 }
 
 export const IGitService: ServiceIdentifier<IGitService> =

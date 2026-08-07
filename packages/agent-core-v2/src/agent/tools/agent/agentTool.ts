@@ -38,6 +38,7 @@ import {
 import { Error2, ErrorCodes, isError2 } from '#/errors';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { matchesGlobRuleSubject } from '#/tool/rule-match';
+import type { TokenUsage } from '#/kosong/contract/usage';
 import {
   IAgentTaskService,
   type RegisterAgentTaskOptions,
@@ -93,7 +94,19 @@ import {
   stripSubagentModelParameter,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
-import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { SECONDARY_MODEL_FLAG_ID, SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
+import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
+import { IGitService } from '#/app/git/git';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostProcessService } from '#/os/interface/hostProcess';
+import {
+  acquireSubagentWorktree,
+  discardSpawnWorktree,
+  isSubagentWorktreeUnsupported,
+  type SubagentWorktreeFinishResult,
+  type SubagentWorktreeHandle,
+  type SubagentWorktreeServices,
+} from '#/session/subagent/worktree';
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
@@ -105,7 +118,7 @@ import {
   USER_INTERRUPTED_SUBAGENT_MESSAGE,
   type SubagentToolInput,
 } from './agent';
-import { SubagentTask, type SubagentHandle } from './subagent-task';
+import { SubagentTask, type SubagentCompletion, type SubagentHandle } from './subagent-task';
 
 import AGENT_BACKGROUND_DISABLED_DESCRIPTION from './agent-background-disabled.md?raw';
 import AGENT_BACKGROUND_DESCRIPTION from './agent-background-enabled.md?raw';
@@ -153,6 +166,9 @@ export class SubagentTool implements ISubagentTool {
     private readonly subagentRouting: ISessionSubagentRoutingService,
     @ISessionSubagentCircuitService
     private readonly subagentCircuit: ISessionSubagentCircuitService,
+    @IGitService private readonly git: IGitService,
+    @IHostFileSystem private readonly fs: IHostFileSystem,
+    @IHostProcessService private readonly proc: IHostProcessService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -266,6 +282,7 @@ export class SubagentTool implements ISubagentTool {
     let profileName: string;
     let promptText = args.prompt;
     let releasePoolSlot: (() => void) | undefined;
+    let worktree: SubagentWorktreeHandle | undefined;
     // R-A2 (Case 8): records a non-retryable provider/model/route failure
     // against the resolved route's circuit (no-op for resume spawns and
     // unrouted bindings — only routed fresh spawns carry a circuit key).
@@ -350,6 +367,12 @@ export class SubagentTool implements ISubagentTool {
         let created: IAgentScopeHandle;
         try {
           this.modelCatalog.get(final.model);
+          if (
+            this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
+            isEditingCapableCatalogProfile(profile)
+          ) {
+            worktree = await this.acquireIsolatedWorktree(args, profile.name);
+          }
           created = await this.lifecycle.create({
             binding: {
               profile: profile.name,
@@ -357,6 +380,7 @@ export class SubagentTool implements ISubagentTool {
               thinking: final.thinking,
             },
             labels: subagentLabels(this.callerAgentId),
+            workspaceCwd: worktree?.cwd,
           });
         } catch (error) {
           throw wrapSubagentModelError(error, final.model, own.modelAlias);
@@ -373,6 +397,8 @@ export class SubagentTool implements ISubagentTool {
           log: this.log,
         });
       } catch (error) {
+        await discardSpawnWorktree(worktree);
+        worktree = undefined;
         recordCircuitFailure(error);
         releasePoolSlot?.();
         releasePoolSlot = undefined;
@@ -396,6 +422,8 @@ export class SubagentTool implements ISubagentTool {
         { signal: controller.signal },
       );
     } catch (error) {
+      await discardSpawnWorktree(worktree);
+      worktree = undefined;
       recordCircuitFailure(error);
       releasePoolSlot?.();
       releasePoolSlot = undefined;
@@ -410,8 +438,17 @@ export class SubagentTool implements ISubagentTool {
       },
     });
     const completion = mirrored.then(
-      (r) => ({ result: r.summary, usage: r.usage }),
-      (error: unknown) => {
+      async (r) => {
+        if (worktree === undefined) return { result: r.summary, usage: r.usage };
+        const finishResult = await worktree.finish({ kind: 'success' });
+        return this.completeWithWorktree(r, finishResult);
+      },
+      async (error: unknown) => {
+        if (worktree !== undefined) {
+          await worktree
+            .finish({ kind: 'incomplete', reason: errorMessage(error) })
+            .catch(() => {});
+        }
         recordCircuitFailure(error);
         throw error;
       },
@@ -436,11 +473,58 @@ export class SubagentTool implements ISubagentTool {
     };
   }
 
+  private async acquireIsolatedWorktree(
+    args: SubagentToolInput,
+    profileName: string,
+  ): Promise<SubagentWorktreeHandle> {
+    const services: SubagentWorktreeServices = {
+      git: this.git,
+      fs: this.fs,
+      proc: this.proc,
+      log: this.log,
+    };
+    const acquisition = await acquireSubagentWorktree(services, this.workspace.workDir, {
+      scope: args.dispatch?.scope,
+    });
+    if (isSubagentWorktreeUnsupported(acquisition)) {
+      throw new Error(
+        `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
+      );
+    }
+    if (acquisition === null) {
+      throw new Error('Editing subagent isolation could not be created; dispatch was refused.');
+    }
+    return acquisition;
+  }
+
+  private completeWithWorktree(
+    r: { readonly summary: string; readonly usage?: TokenUsage },
+    finishResult: SubagentWorktreeFinishResult,
+  ): SubagentCompletion {
+    if (finishResult.applied) return { result: r.summary, usage: r.usage };
+    if (finishResult.reason === 'scope-expansion-required' && finishResult.candidate !== undefined) {
+      return {
+        result: r.summary,
+        usage: r.usage,
+        editingCandidate: {
+          draft: finishResult.candidate,
+          acknowledgePersisted: finishResult.acknowledgePersisted,
+        },
+      };
+    }
+    const recovery =
+      finishResult.recoveryPath === undefined
+        ? ''
+        : ` Recovery data preserved at ${finishResult.recoveryPath}.`;
+    throw new Error(
+      `Editing subagent changes were not applied: ${finishResult.reason ?? 'unknown reason'}${recovery}`,
+    );
+  }
+
   private async ensureOwnedIdleSubagent(
     agentId: string,
     target: IAgentScopeHandle,
-  ): Promise<void> {
-    const meta = (await this.sessionMetadata.read()).agents?.[agentId];
+  ): Promise<void> {    const meta = (await this.sessionMetadata.read()).agents?.[agentId];
     if (!isSubagentMeta(meta)) {
       throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
         details: { agentId },
@@ -568,6 +652,22 @@ export class SubagentTool implements ISubagentTool {
         output: formatForegroundAgentSuccess(handle, await this.tasks.readOutput(taskId)),
       };
     }
+    if (info?.status === 'input_required' && info.kind === 'agent' && info.candidate !== undefined) {
+      return {
+        output: formatForegroundInputRequired(taskId, handle, info.candidate),
+        isError: false,
+      };
+    }
+    if (info?.status === 'expansion_denied') {
+      return {
+        output: formatForegroundAgentFailure(
+          handle,
+          'The scope expansion was denied; the subagent work candidate was discarded. Re-dispatch with an explicitly wider dispatch.scope if the change is still wanted.',
+          false,
+        ),
+        isError: true,
+      };
+    }
     const timedOut = info?.status === 'timed_out';
     const message = timedOut
       ? `Agent timed out after ${formatSubagentTimeoutDescription(timeoutMs)}.`
@@ -577,6 +677,27 @@ export class SubagentTool implements ISubagentTool {
       isError: true,
     };
   }
+}
+
+function formatForegroundInputRequired(
+  taskId: string,
+  handle: SubagentHandle,
+  candidate: { readonly hash: string; readonly requestedScope: readonly string[]; readonly paths: readonly string[] },
+): string {
+  return [
+    `agent_id: ${handle.agentId}`,
+    `actual_subagent_type: ${handle.profileName}`,
+    'status: input_required',
+    `task_id: ${taskId}`,
+    `candidate_hash: ${candidate.hash}`,
+    `requested_scope: ${JSON.stringify(candidate.requestedScope)}`,
+    '',
+    'The subagent finished but touched paths outside its declared scope:',
+    ...candidate.paths.map((path) => `- ${path}`),
+    '',
+    'Its work is preserved as a durable candidate and has NOT been applied.',
+    `Inspect it with TaskOutput(task_id="${taskId}"), then either apply it with TaskOutput(task_id="${taskId}", action="approve_scope_expansion", candidate_hash="${candidate.hash}", requested_scope=${JSON.stringify(candidate.requestedScope)}) or discard it with action="deny_scope_expansion".`,
+  ].join('\n');
 }
 
 registerAgentToolService(ISubagentTool, SubagentTool, { name: 'Agent', domain: 'subagent' });

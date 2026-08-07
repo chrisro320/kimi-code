@@ -332,6 +332,12 @@ function mapStatus(s: AgentTaskInfo['status']): TaskStatus {
       return 'cancelled';
     case 'lost':
       return 'failed';
+    case 'input_required':
+      // Not terminal: the task waits on a scope-expansion decision, so it
+      // stays visible as running on the wire.
+      return 'running';
+    case 'expansion_denied':
+      return 'cancelled';
   }
 }
 

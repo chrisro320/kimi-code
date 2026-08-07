@@ -12,6 +12,12 @@
  * compaction, then disposing the child scope. Fans session-level
  * permission-mode switches out to every live agent. Bound at Session scope.
  *
+ * A `CreateAgentOptions.workspaceCwd` seeds a per-agent workspace-context
+ * override (worktree isolation): the child scope resolves
+ * `ISessionWorkspaceContext` to a view rooted at that directory instead of
+ * the session work directory, so editing subagents operate inside their
+ * isolated worktree while path confinement semantics stay identical.
+ *
  * No agent id is special here: the main agent is simply the agent created
  * with the conventional `MAIN_AGENT_ID`, and `fork` requires its source to
  * exist. MCP readiness is not awaited here: the workspace's shared manager
@@ -27,6 +33,7 @@ import { join } from 'pathe';
 import {
   createScopedChildHandle,
   type IAgentScopeHandle,
+  type ScopeSeed,
   LifecycleScope,
   ScopeActivation,
   registerScopedService,
@@ -51,6 +58,8 @@ import { IAgentToolActivationService } from '#/agent/toolActivation/toolActivati
 import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { IWireService } from '#/wire/wire';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { makeWorkspaceContextView } from '#/session/workspaceContext/workspaceContextView';
 import {
   type AgentListFilter,
   type CreateAgentOptions,
@@ -83,6 +92,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     @IConfigService private readonly config: IConfigService,
     @ISessionInteractionService private readonly interaction: ISessionInteractionService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
   ) {
     super();
     this._register(this.onDidCreate((handle) => this.subscribeInteractionBus(handle)));
@@ -145,15 +155,39 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const agentScope = this.ctx.scope(`agents/${agentId}`);
     const agentHomedir = join(this.bootstrap.homeDir, agentScope);
+    const workspaceSeeds: ScopeSeed = opts.workspaceCwd === undefined
+      ? []
+      : [
+          [ISessionWorkspaceContext, makeWorkspaceContextView(opts.workspaceCwd, this.workspace.additionalDirs)],
+          // Tools and prompt rendering read the working directory through
+          // ISessionContext.cwd (Bash, profile prompt), not only through the
+          // workspace context — override it too so an isolated subagent's
+          // entire tool surface is rooted at the worktree. All other fields
+          // pass through to the session context.
+          [
+            ISessionContext,
+            {
+              _serviceBrand: undefined,
+              sessionId: this.ctx.sessionId,
+              workspaceId: this.ctx.workspaceId,
+              sessionDir: this.ctx.sessionDir,
+              metaScope: this.ctx.metaScope,
+              cwd: opts.workspaceCwd,
+              scope: (subKey?: string) => this.ctx.scope(subKey),
+            },
+          ],
+        ];
+    const extra: ScopeSeed = [
+      [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
+      [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
+      ...workspaceSeeds,
+    ];
     const handle = createScopedChildHandle(
       this.instantiation,
       LifecycleScope.Agent,
       agentId,
       {
-        extra: [
-          [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
-          [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
-        ],
+        extra,
       },
     ) as IAgentScopeHandle;
     this.handles.set(agentId, handle);

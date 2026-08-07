@@ -4,7 +4,9 @@ export type AgentTaskStatus =
   | 'failed'
   | 'timed_out'
   | 'killed'
-  | 'lost';
+  | 'lost'
+  | 'input_required'
+  | 'expansion_denied';
 
 export const TERMINAL_STATUSES: ReadonlySet<AgentTaskStatus> = new Set<AgentTaskStatus>([
   'completed',
@@ -12,12 +14,17 @@ export const TERMINAL_STATUSES: ReadonlySet<AgentTaskStatus> = new Set<AgentTask
   'timed_out',
   'killed',
   'lost',
+  'expansion_denied',
 ]);
-export type AgentTaskSettlementStatus = 'completed' | 'failed' | 'timed_out' | 'killed';
+export type AgentTaskSettlementStatus = 'completed' | 'failed' | 'timed_out' | 'killed' | 'input_required';
 
 export interface AgentTaskSettlement {
   readonly status: AgentTaskSettlementStatus;
   readonly stopReason?: string;
+  readonly editingCandidate?: {
+    readonly draft: import('#/session/subagent/worktree').EditingCandidateDraft;
+    readonly acknowledgePersisted?: () => Promise<void>;
+  };
 }
 
 export interface AgentTaskInfoBase {

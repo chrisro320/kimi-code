@@ -196,6 +196,92 @@ describe('AgentTaskService', () => {
     };
   }
 
+  /** The default stubs above answer every read with `undefined`; candidate
+   * resolution needs a store that actually round-trips what it wrote. */
+  function candidateStore(): void {
+    const docs = new Map<string, unknown>();
+    ix.stub(IAtomicDocumentStore, {
+      get: async (scope: string, name: string) => docs.get(`${scope}/${name}`),
+      set: async (scope: string, name: string, value: unknown) => {
+        docs.set(`${scope}/${name}`, value);
+      },
+      delete: async (scope: string, name: string) => {
+        docs.delete(`${scope}/${name}`);
+      },
+      list: async () => [...docs.keys()],
+    } as unknown as IAtomicDocumentStore);
+  }
+
+  function candidateTask(): AgentTask {
+    return {
+      idPrefix: 'agent',
+      kind: 'agent',
+      description: 'scope expansion candidate',
+      start: async (sink: { settle: (s: unknown) => Promise<void> }) => {
+        await sink.settle({
+          status: 'input_required',
+          editingCandidate: {
+            draft: {
+              version: 1,
+              candidateHash: 'hash-1',
+              repoRoot: '/repo',
+              commonDir: '/repo/.git',
+              headCommit: 'c0ffee',
+              scope: ['src/**'],
+              requestedScope: ['src/**', 'docs/readme.md'],
+              paths: [
+                {
+                  relPath: 'docs/readme.md',
+                  classification: 'outside-scope',
+                  before: { state: { kind: 'absent' } },
+                  after: { state: { kind: 'absent' } },
+                },
+              ],
+            },
+          },
+        });
+      },
+      toInfo: (base: object) => ({ ...base, kind: 'agent' }),
+    } as unknown as AgentTask;
+  }
+
+  it('replays the recorded resolution when the same deny is resent', async () => {
+    // The first deny moves the task to a terminal status, so gating on
+    // `input_required` would make every resend throw `candidate_already_resolved`
+    // and leave the advertised idempotent path unreachable.
+    candidateStore();
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask(candidateTask());
+    await svc.wait(taskId, 1000);
+    expect(svc.getTask(taskId)?.status).toBe('input_required');
+
+    const request = {
+      taskId,
+      candidateHash: 'hash-1',
+      requestedScope: ['src/**', 'docs/readme.md'],
+      action: 'deny',
+    } as const;
+    const first = await svc.resolveScopeExpansion(request);
+    const second = await svc.resolveScopeExpansion(request);
+
+    expect(first).toMatchObject({ resolution: 'denied', idempotent: false });
+    expect(second).toMatchObject({ resolution: 'denied', idempotent: true });
+  });
+
+  it('rejects the opposite action after a candidate was resolved', async () => {
+    candidateStore();
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask(candidateTask());
+    await svc.wait(taskId, 1000);
+
+    const requestedScope = ['src/**', 'docs/readme.md'];
+    await svc.resolveScopeExpansion({ taskId, candidateHash: 'hash-1', requestedScope, action: 'deny' });
+
+    await expect(
+      svc.resolveScopeExpansion({ taskId, candidateHash: 'hash-1', requestedScope, action: 'approve' }),
+    ).rejects.toThrow(/candidate_already_resolved/);
+  });
+
   it('task.terminated dispatch carries the retained output tail as outputTail', async () => {
     const { dispatched } = capturingWire();
     const svc = ix.get(IAgentTaskService);

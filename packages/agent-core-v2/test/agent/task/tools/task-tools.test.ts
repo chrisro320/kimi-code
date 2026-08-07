@@ -13,6 +13,8 @@ import type {
   IAgentTaskEntry,
   IAgentTaskService,
   RegisterAgentTaskOptions,
+  ScopeExpansionResolutionRequest,
+  ScopeExpansionResolutionResult,
 } from '#/agent/task/task';
 import { TERMINAL_STATUSES } from '#/agent/task/types';
 import { TaskListInputSchema } from '#/agent/tools/task/task-list/task-list';
@@ -142,6 +144,12 @@ class FakeTaskService implements IAgentTaskService {
 
   getTask(taskId: string): AgentTaskInfo | undefined {
     return this.entries.get(taskId)?.info;
+  }
+
+  resolveScopeExpansion(
+    _request: ScopeExpansionResolutionRequest,
+  ): Promise<ScopeExpansionResolutionResult> {
+    throw new Error('resolveScopeExpansion is not implemented in FakeTaskService.');
   }
 
   list(activeOnly = true, limit?: number): readonly AgentTaskInfo[] {
@@ -382,16 +390,26 @@ describe('TaskOutputTool', () => {
 
     expect(tool.name).toBe('TaskOutput');
     expect(TaskOutputInputSchema.safeParse({ task_id: 'bash-1' }).success).toBe(true);
-    expect(tool.parameters).toMatchObject({
-      type: 'object',
-      additionalProperties: false,
-      required: ['task_id'],
-      properties: {
-        task_id: { type: 'string' },
-      },
-    });
-    expect(JSON.stringify(tool.parameters)).not.toContain('"block"');
-    expect(JSON.stringify(tool.parameters)).not.toContain('"timeout"');
+    expect(
+      TaskOutputInputSchema.safeParse({
+        action: 'approve_scope_expansion',
+        task_id: 'bash-1',
+        candidate_hash: 'abc123',
+        requested_scope: ['src/a.ts'],
+      }).success,
+    ).toBe(true);
+    expect(TaskOutputInputSchema.safeParse({ task_id: 'bash-1', block: true, timeout: 5 }).success).toBe(true);
+    expect(
+      TaskOutputInputSchema.safeParse({
+        action: 'deny_scope_expansion',
+        task_id: 'bash-1',
+        candidate_hash: 'abc123',
+        requested_scope: ['src/a.ts'],
+      }).success,
+    ).toBe(true);
+    expect(JSON.stringify(tool.parameters)).toContain('approve_scope_expansion');
+    expect(JSON.stringify(tool.parameters)).toContain('deny_scope_expansion');
+    expect(JSON.stringify(tool.parameters)).toContain('candidate_hash');
   });
 
   it('returns error for unknown task', async () => {
@@ -495,13 +513,19 @@ describe('TaskOutputTool', () => {
     expect(tasks.waitCalls).toEqual([]);
   });
 
-  it('rejects stale block/timeout args at the validator instead of waiting', () => {
+  it('accepts inspect block/timeout and rejects them on resolution', () => {
     const validator = compileToolArgsValidator(new TaskOutputTool(new FakeTaskService()).parameters);
 
     expect(validateToolArgs(validator, { task_id: 'bash-1' })).toBeNull();
-    const stale = validateToolArgs(validator, { task_id: 'bash-1', block: true, timeout: 1 });
+    expect(validateToolArgs(validator, { task_id: 'bash-1', block: true, timeout: 1 })).toBeNull();
+    const stale = validateToolArgs(validator, {
+      action: 'approve_scope_expansion',
+      task_id: 'bash-1',
+      candidate_hash: 'abc123',
+      requested_scope: ['src/a.ts'],
+      block: true,
+    });
     expect(stale).toContain("must NOT have additional property 'block'");
-    expect(stale).toContain("must NOT have additional property 'timeout'");
   });
 
   it('surfaces timeout terminal metadata', async () => {
@@ -738,8 +762,7 @@ describe('task tool descriptions', () => {
     const description = new TaskOutputTool(tasks).description;
 
     expect(description).toMatch(/background/i);
-    expect(description).toMatch(/non-blocking/);
-    expect(description).not.toContain('block=');
+    expect(description).toMatch(/non-blocking/i);
     expect(description).toMatch(/output_path/);
     expect(description).toMatch(/Read/);
     expect(description).toContain('run that task in the foreground instead');

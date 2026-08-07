@@ -6,10 +6,15 @@ import {
   type AgentTaskInfoBase,
   type AgentTaskSink,
 } from '#/agent/task/types';
+import type { EditingCandidateDraft } from '#/session/subagent/worktree';
 
-type SubagentCompletion = {
+export type SubagentCompletion = {
   readonly result: string;
   readonly usage?: TokenUsage;
+  readonly editingCandidate?: {
+    readonly draft: EditingCandidateDraft;
+    readonly acknowledgePersisted?: () => Promise<void>;
+  };
 };
 
 export type SubagentHandle = {
@@ -22,6 +27,11 @@ export interface SubagentTaskInfo extends AgentTaskInfoBase {
   readonly kind: 'agent';
   readonly agentId?: string;
   readonly subagentType?: string;
+  readonly candidate?: {
+    readonly hash: string;
+    readonly requestedScope: readonly string[];
+    readonly paths: readonly string[];
+  };
 }
 
 declare module '#/agent/task/types' {
@@ -91,6 +101,13 @@ export class SubagentTask implements AgentTask {
     try {
       const outcome = await this.handle.completion;
       sink.appendOutput(outcome.result);
+      if (outcome.editingCandidate !== undefined) {
+        await sink.settle({
+          status: 'input_required',
+          editingCandidate: outcome.editingCandidate,
+        });
+        return;
+      }
       await sink.settle({ status: 'completed' });
     } catch (error: unknown) {
       if (sink.signal.aborted && (isAbortError(error) || error === sink.signal.reason)) {
