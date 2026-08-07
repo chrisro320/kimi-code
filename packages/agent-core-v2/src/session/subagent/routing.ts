@@ -21,8 +21,10 @@ import { SUBAGENT_SECTION, type SubagentConfig, type SubagentPoolRoute } from '.
 export const INTERNAL_SUBAGENT_BACKEND = 'kimi';
 
 /**
- * The route a spawn resolves to. Only the in-process variant exists for now;
- * `kind` stays explicit so an external variant can join the union without
+ * The route a spawn resolves to. The in-process variant is the only one this
+ * engine runs: driving another CLI as a subagent is an orchestration concern
+ * that lives outside it. `kind` stays explicit so the rejection below has
+ * something to name, and so a future variant could join the union without
  * changing call sites.
  */
 export interface ResolvedSubagentRoute {
@@ -48,8 +50,9 @@ export function resolveSubagentRoute(
  * selection: given an explicit backend name (`undefined`/`"kimi"` for the
  * in-process subagent) and model string, validate internal Kimi aliases
  * against `config.models` and produce a `ResolvedSubagentRoute`. Any other
- * backend name is an external route, which this engine does not implement
- * yet — it fails loudly instead of silently running the in-process route.
+ * backend name is an external route, which this engine deliberately does not
+ * run — it fails loudly instead of silently falling back to the in-process
+ * route, so a misconfigured backend name is never mistaken for a working one.
  */
 export function resolveRouteByNames(
   config: IConfigService,
@@ -72,7 +75,7 @@ export function resolveRouteByNames(
   }
   throw new Error2(
     ErrorCodes.CONFIG_INVALID,
-    `Subagent backend "${backendName}" is an external backend; external subagent backends are not implemented in the v2 engine yet (batch B7).`,
+    `Subagent backend "${backendName}" is an external backend; the v2 engine runs only the in-process "${INTERNAL_SUBAGENT_BACKEND}" backend. Drive another CLI through an orchestrator instead of routing a subagent at it.`,
     { details: { backend: backendName } },
   );
 }

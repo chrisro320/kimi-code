@@ -77,7 +77,7 @@ describe('resolveSubagentRoute', () => {
 
   it('rejects a non-kimi backend loudly instead of falling back to internal', () => {
     expect(() => resolveSubagentRoute(config, 'explore')).toThrow(
-      'Subagent backend "custom-cli" is an external backend; external subagent backends are not implemented in the v2 engine yet',
+      'Subagent backend "custom-cli" is an external backend; the v2 engine runs only the in-process "kimi" backend.',
     );
   });
 });
