@@ -47,7 +47,10 @@
  * every path already at its `after` state means the previous attempt
  * completed and nothing is written; every path still at `before` means it
  * did not and the delta applies normally; anything else is a genuine
- * divergence and fails closed, exactly as a first attempt would.
+ * divergence and fails closed, exactly as a first attempt would. That last
+ * case, and a rollback that could not restore every touched path, raise
+ * `SubagentCandidateApplyDirtyError`: the workspace is at neither end state
+ * and no caller may treat the decision as still open.
  *
  * Ported from v1 `session/subagent-worktree.ts` (design D-B6-1/2): git
  * operations go through `git` (`IGitService`), filesystem operations
@@ -535,6 +538,17 @@ async function assertCandidateBaseline(
   }
 }
 
+/** Thrown when an apply failed *and* its guarded rollback could not put every
+ * touched path back, i.e. the workspace is neither `before` nor `after`. Every
+ * other apply failure leaves the workspace at `before`, which is what lets a
+ * caller distinguish "nothing happened, the decision is still open" from "the
+ * workspace needs a human". */
+export class SubagentCandidateApplyDirtyError extends Error {}
+
+export function candidateApplyLeftWorkspaceDirty(error: unknown): boolean {
+  return error instanceof SubagentCandidateApplyDirtyError;
+}
+
 async function classifyCandidateApplyState(
   services: SubagentWorktreeServices,
   repoRoot: string,
@@ -577,7 +591,9 @@ export async function applySubagentWorktreeCandidate(
         throw new Error('backend does not support safe POSIX state materialization');
       }
       const state = await classifyCandidateApplyState(services, candidate.repoRoot, deltas);
-      if (state === 'diverged') throw new Error('candidate_path_diverged: resumed apply');
+      if (state === 'diverged') {
+        throw new SubagentCandidateApplyDirtyError('candidate_path_diverged: resumed apply');
+      }
       if (state === 'after') {
         alreadyApplied = true;
         return;
@@ -642,7 +658,11 @@ async function applyDeltaPlan(
           rollbackErrors.push(`${delta.relPath}: ${errorMessage(rollbackError)}`);
         }
       }
-      if (rollbackErrors.length > 0) throw new Error(`${errorMessage(error)}; guarded rollback incomplete: ${rollbackErrors.join('; ')}`);
+      if (rollbackErrors.length > 0) {
+        throw new SubagentCandidateApplyDirtyError(
+          `${errorMessage(error)}; guarded rollback incomplete: ${rollbackErrors.join('; ')}`,
+        );
+      }
       throw error;
     }
   } finally {

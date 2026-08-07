@@ -18,6 +18,7 @@ import {
   __testing,
   acquireSubagentWorktree,
   applySubagentWorktreeCandidate,
+  candidateApplyLeftWorkspaceDirty,
   isSubagentWorktreeUnsupported,
   type EditingCandidateDraft,
   type SubagentWorktreeHandle,
@@ -259,9 +260,32 @@ describe('subagent worktree isolation (real git integration)', () => {
     const candidate = await outsideScopeCandidate('outside scope\n');
     writeFileSync(join(repo, 'b.txt'), 'someone else wrote this\n');
 
-    await expect(
-      applySubagentWorktreeCandidate(services, candidate, candidate.requestedScope, { resume: true }),
-    ).rejects.toThrow('candidate_path_diverged');
+    // The message has to name the resumed classifier, not the ordinary baseline
+    // guard: both refuse this input, so a bare `candidate_path_diverged` match
+    // would pass with the resume branch removed.
+    const failure = await applySubagentWorktreeCandidate(
+      services,
+      candidate,
+      candidate.requestedScope,
+      { resume: true },
+    ).catch((error: unknown) => error);
+    expect((failure as Error).message).toBe('candidate_path_diverged: resumed apply');
+    expect(candidateApplyLeftWorkspaceDirty(failure)).toBe(true);
     expect(readFileSync(join(repo, 'b.txt'), 'utf8')).toBe('someone else wrote this\n');
+  });
+
+  it('reports a first-attempt baseline refusal as leaving the workspace clean', async () => {
+    // Nothing was written, so the decision is still open and the caller may
+    // still deny — the dirty flag is what carries that distinction.
+    const candidate = await outsideScopeCandidate('outside scope\n');
+    writeFileSync(join(repo, 'b.txt'), 'someone else wrote this\n');
+
+    const failure = await applySubagentWorktreeCandidate(
+      services,
+      candidate,
+      candidate.requestedScope,
+    ).catch((error: unknown) => error);
+    expect((failure as Error).message).toContain('candidate_path_diverged: b.txt');
+    expect(candidateApplyLeftWorkspaceDirty(failure)).toBe(false);
   });
 });

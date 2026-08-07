@@ -34,9 +34,21 @@
  * idempotent through the persisted resolution. A candidate outlives the
  * process that produced it: reconciliation keeps a restored task
  * `input_required` while its manifest still has work to do instead of
- * marking it lost, and resolution accepts such a task as a ghost — the
- * manifest carries everything the apply path needs, so only the write-back
- * target differs from the live path.
+ * marking it lost, settles it at the status the manifest already recorded
+ * when only the task record lagged behind, and treats a manifest that could
+ * not be read as undecided rather than spending the one-way `lost` status on
+ * a transient storage failure. Resolution accepts such a task as a ghost —
+ * the manifest carries everything the apply path needs, so only the
+ * write-back target differs from the live path, and a resolved ghost reaches
+ * the wire and telemetry exactly as a live one does. Restored candidates are
+ * listed among the active tasks: they are the only non-terminal ghosts, and
+ * one the agent cannot see is one nobody resolves. Only an approve records a
+ * pending intent and loads the candidate draft — a deny touches neither the
+ * workspace nor the path payloads, so making it depend on either would leave
+ * a diverged or partially lost candidate impossible to dismiss as well as
+ * impossible to apply. An approve whose apply failed with the workspace back
+ * at its baseline clears that intent again, because a pending resolution
+ * both blocks the opposite action and holds the task out of the lost sweep.
  * The plain-data task state (`ghosts`, `scheduledNotificationKeys`,
  * `deliveredNotificationKeys`, `activeTaskReminderPending`) is registered
  * into `agentState` (`IAgentStateService`) and read/written through it; the
@@ -94,6 +106,7 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
 import {
   applySubagentWorktreeCandidate,
+  candidateApplyLeftWorkspaceDirty,
   type SubagentWorktreeServices,
 } from '#/session/subagent/worktree';
 import {
@@ -557,12 +570,10 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       result.push(info);
       if (limit !== undefined && result.length >= limit) return result;
     }
-    if (!activeOnly) {
-      for (const ghost of this.ghosts.values()) {
-        if (!shouldListTask(ghost, activeOnly)) continue;
-        result.push(ghost);
-        if (limit !== undefined && result.length >= limit) return result;
-      }
+    for (const ghost of this.ghosts.values()) {
+      if (!shouldListTask(ghost, activeOnly)) continue;
+      result.push(ghost);
+      if (limit !== undefined && result.length >= limit) return result;
     }
     return result;
   }
@@ -970,10 +981,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     const persistence = this.persistence;
     for (const [taskId, info] of this.ghosts) {
       if (TERMINAL_STATUSES.has(info.status)) continue;
-      if (await this.hasResolvableCandidate(info)) continue;
+      const settled = await this.restoredCandidateOutcome(info);
+      if (settled === 'keep') continue;
       const updated: AgentTaskInfo = {
         ...info,
-        status: 'lost',
+        status: settled,
         endedAt: info.endedAt ?? Date.now(),
       };
       this.ghosts.set(taskId, updated);
@@ -983,14 +995,23 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     return lostTasks;
   }
 
-  private async hasResolvableCandidate(info: AgentTaskInfo): Promise<boolean> {
-    if (info.status !== 'input_required') return false;
-    if (info.kind !== 'agent' || info.candidate === undefined) return false;
-    const manifest = await this.persistence
-      .readEditingCandidateManifest(info.taskId)
-      .catch(() => undefined);
-    if (manifest === undefined) return false;
-    return manifest.resolution === undefined || manifest.resolution.phase === 'pending';
+  /** What reconciliation should do with a restored non-terminal task: keep it
+   * waiting, or settle it at the returned status. */
+  private async restoredCandidateOutcome(
+    info: AgentTaskInfo,
+  ): Promise<AgentTaskStatus | 'keep'> {
+    if (info.status !== 'input_required') return 'lost';
+    if (info.kind !== 'agent' || info.candidate === undefined) return 'lost';
+    let manifest;
+    try {
+      manifest = await this.persistence.readEditingCandidateManifest(info.taskId);
+    } catch {
+      return 'keep';
+    }
+    if (manifest === undefined) return 'lost';
+    const resolution = manifest.resolution;
+    if (resolution === undefined || resolution.phase === 'pending') return 'keep';
+    return resolution.kind === 'approved_applied' ? 'completed' : 'expansion_denied';
   }
 
   private persistLive(entry: ManagedTask): Promise<void> {
@@ -1390,7 +1411,10 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     // resolution already happened: the first approve/deny moves the task to a
     // terminal status, so gating on `input_required` here would make a repeat
     // of the same action throw instead of replaying its recorded outcome.
-    const { manifest, draft } = await this.persistence.readEditingCandidate(request.taskId);
+    const manifest = await this.persistence.readEditingCandidateManifest(request.taskId);
+    if (manifest === undefined) {
+      throw new Error('candidate_corrupt: candidate persistence is unavailable');
+    }
     if (
       manifest.candidateHash !== request.candidateHash ||
       JSON.stringify(manifest.requestedScope) !== JSON.stringify(request.requestedScope) ||
@@ -1406,18 +1430,30 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     if (manifest.resolution === undefined && held.status !== 'input_required') {
       throw new Error(`candidate_already_resolved: task status is ${held.status}`);
     }
-    const intent = await this.persistence.beginEditingCandidateResolution(
-      request.taskId,
-      request.candidateHash,
-      resolutionKind,
-    );
-    if (request.action === 'approve' && intent.replay !== 'resolved') {
-      await applySubagentWorktreeCandidate(
-        this.worktreeServices(),
-        draft,
-        request.requestedScope,
-        { resume: intent.replay === 'pending' },
+    if (request.action === 'approve') {
+      const intent = await this.persistence.beginEditingCandidateResolution(
+        request.taskId,
+        request.candidateHash,
+        resolutionKind,
       );
+      if (intent.replay !== 'resolved') {
+        const { draft } = await this.persistence.readEditingCandidate(request.taskId);
+        try {
+          await applySubagentWorktreeCandidate(
+            this.worktreeServices(),
+            draft,
+            request.requestedScope,
+            { resume: intent.replay === 'pending' },
+          );
+        } catch (error) {
+          if (!candidateApplyLeftWorkspaceDirty(error)) {
+            await this.persistence
+              .clearEditingCandidateResolution(request.taskId, request.candidateHash)
+              .catch(() => {});
+          }
+          throw error;
+        }
+      }
     }
     const write = await this.persistence.writeEditingCandidateResolution(
       request.taskId,
@@ -1459,7 +1495,8 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   ): Promise<AgentTaskInfo> {
     const updated: AgentTaskInfo = { ...ghost, status, endedAt: Date.now() };
     this.ghosts.set(taskId, updated);
-    await this.persistence.writeTask(updated);
+    await this.persistence.writeTask(updated).catch(() => {});
+    this.recordTaskTerminated(updated);
     return updated;
   }
 

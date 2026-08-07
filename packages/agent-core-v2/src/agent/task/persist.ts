@@ -22,7 +22,10 @@
  * steps — first as `phase: 'pending'` before the workspace is touched, then
  * without a phase once the apply is confirmed — so a process that dies
  * mid-apply leaves a record the next process can reconcile against the
- * workspace instead of a candidate that can never be resolved. Not
+ * workspace instead of a candidate that can never be resolved. A pending
+ * step is an intent, not a decision: an apply that fails without leaving the
+ * workspace dirty clears it again, because a recorded intent that outlives a
+ * failed attempt would lock the user out of the opposite action. Not
  * scope-bound.
  */
 
@@ -301,6 +304,15 @@ export class AgentTaskPersistence {
     };
     await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, updated);
     return { manifest: updated, replay: 'none' };
+  }
+
+  async clearEditingCandidateResolution(taskId: string, candidateHash: string): Promise<void> {
+    const manifest = await this.readEditingCandidateManifest(taskId);
+    if (manifest === undefined) return;
+    if (manifest.candidateHash !== candidateHash) return;
+    if (manifest.resolution?.phase !== 'pending') return;
+    const { resolution: _dropped, ...withoutResolution } = manifest;
+    await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, withoutResolution);
   }
 
   async readEditingCandidate(taskId: string): Promise<LoadedEditingCandidate> {
