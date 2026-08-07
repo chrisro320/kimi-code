@@ -18,7 +18,15 @@
  * persist under the task's scope too: path payloads into byte storage
  * (`candidate/<side>/<relPath>`), the state-only manifest as an atomic
  * document (`<taskId>.candidate.json`), with resolutions folded back into
- * the manifest for idempotent re-resolution. Not scope-bound.
+ * the manifest for idempotent re-resolution. A resolution is recorded in two
+ * steps — first as `phase: 'pending'` before the workspace is touched, then
+ * without a phase once the apply is confirmed — so a process that dies
+ * mid-apply leaves a record the next process can reconcile against the
+ * workspace instead of a candidate that can never be resolved. A pending
+ * step is an intent, not a decision: an apply that fails without leaving the
+ * workspace dirty clears it again, because a recorded intent that outlives a
+ * failed attempt would lock the user out of the opposite action. Not
+ * scope-bound.
  */
 
 import { join } from 'pathe';
@@ -52,9 +60,20 @@ export interface EditingCandidateManifestPath {
   readonly afterPayload: boolean;
 }
 
-export type EditingCandidateResolution =
-  | { readonly kind: 'approved_applied'; readonly resolvedAt: string }
-  | { readonly kind: 'denied'; readonly resolvedAt: string };
+export type EditingCandidateResolutionKind = 'approved_applied' | 'denied';
+
+export type EditingCandidateResolution = {
+  readonly kind: EditingCandidateResolutionKind;
+  readonly resolvedAt: string;
+  readonly phase?: 'pending';
+};
+
+export type EditingCandidateResolutionReplay = 'none' | 'pending' | 'resolved';
+
+export interface EditingCandidateResolutionIntent {
+  readonly manifest: EditingCandidateManifestV1;
+  readonly replay: EditingCandidateResolutionReplay;
+}
 
 export interface EditingCandidateManifestV1 {
   readonly version: 1;
@@ -250,12 +269,54 @@ export class AgentTaskPersistence {
     return manifest;
   }
 
-  async readEditingCandidate(taskId: string): Promise<LoadedEditingCandidate> {
+  async readEditingCandidateManifest(
+    taskId: string,
+  ): Promise<EditingCandidateManifestV1 | undefined> {
     validateTaskId(taskId);
-    const manifest = await this.docs.get<EditingCandidateManifestV1>(
+    return await this.docs.get<EditingCandidateManifestV1>(
       this.tasksScope(),
       `${taskId}.candidate.json`,
     );
+  }
+
+  async beginEditingCandidateResolution(
+    taskId: string,
+    candidateHash: string,
+    kind: EditingCandidateResolutionKind,
+  ): Promise<EditingCandidateResolutionIntent> {
+    const manifest = await this.readEditingCandidateManifest(taskId);
+    if (manifest === undefined) {
+      throw new Error('candidate_corrupt: candidate persistence is unavailable');
+    }
+    if (manifest.candidateHash !== candidateHash) {
+      throw new Error('candidate_identity_mismatch: candidate hash does not match');
+    }
+    const existing = manifest.resolution;
+    if (existing !== undefined) {
+      if (existing.kind !== kind) {
+        throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
+      }
+      return { manifest, replay: existing.phase === 'pending' ? 'pending' : 'resolved' };
+    }
+    const updated: EditingCandidateManifestV1 = {
+      ...manifest,
+      resolution: { kind, resolvedAt: new Date().toISOString(), phase: 'pending' },
+    };
+    await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, updated);
+    return { manifest: updated, replay: 'none' };
+  }
+
+  async clearEditingCandidateResolution(taskId: string, candidateHash: string): Promise<void> {
+    const manifest = await this.readEditingCandidateManifest(taskId);
+    if (manifest === undefined) return;
+    if (manifest.candidateHash !== candidateHash) return;
+    if (manifest.resolution?.phase !== 'pending') return;
+    const { resolution: _dropped, ...withoutResolution } = manifest;
+    await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, withoutResolution);
+  }
+
+  async readEditingCandidate(taskId: string): Promise<LoadedEditingCandidate> {
+    const manifest = await this.readEditingCandidateManifest(taskId);
     if (manifest === undefined) {
       throw new Error('candidate_corrupt: candidate persistence is unavailable');
     }
@@ -287,16 +348,21 @@ export class AgentTaskPersistence {
     candidateHash: string,
     resolution: EditingCandidateResolution,
   ): Promise<EditingCandidateResolutionWriteResult> {
-    validateTaskId(taskId);
-    const { manifest, draft } = await this.readEditingCandidate(taskId);
+    const manifest = await this.readEditingCandidateManifest(taskId);
+    if (manifest === undefined) {
+      throw new Error('candidate_corrupt: candidate persistence is unavailable');
+    }
     if (manifest.candidateHash !== candidateHash) {
       throw new Error('candidate_identity_mismatch: candidate hash does not match');
     }
     if (manifest.resolution !== undefined && manifest.resolution.kind !== resolution.kind) {
       throw new Error('candidate_already_resolved: candidate has an incompatible resolution');
     }
-    const idempotent = manifest.resolution !== undefined;
-    const updated: EditingCandidateManifestV1 = { ...manifest, resolution };
+    const idempotent = manifest.resolution !== undefined && manifest.resolution.phase !== 'pending';
+    const updated: EditingCandidateManifestV1 = {
+      ...manifest,
+      resolution: { kind: resolution.kind, resolvedAt: resolution.resolvedAt },
+    };
     await this.docs.set(this.tasksScope(), `${taskId}.candidate.json`, updated);
     return { manifest: updated, idempotent };
   }

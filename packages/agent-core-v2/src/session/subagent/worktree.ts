@@ -40,6 +40,18 @@
  * to prevent. Failed or refused applies preserve the worker's state under
  * the recovery directory with a manifest instead of discarding it.
  *
+ * Resuming an interrupted apply: the caller records its intent before the
+ * workspace is touched, so a process that dies mid-apply leaves an intent
+ * with no way to tell from the record alone whether the delta landed. A
+ * `resume` apply therefore classifies the workspace inside the apply lock —
+ * every path already at its `after` state means the previous attempt
+ * completed and nothing is written; every path still at `before` means it
+ * did not and the delta applies normally; anything else is a genuine
+ * divergence and fails closed, exactly as a first attempt would. That last
+ * case, and a rollback that could not restore every touched path, raise
+ * `SubagentCandidateApplyDirtyError`: the workspace is at neither end state
+ * and no caller may treat the decision as still open.
+ *
  * Ported from v1 `session/subagent-worktree.ts` (design D-B6-1/2): git
  * operations go through `git` (`IGitService`), filesystem operations
  * through `fs` (`IHostFileSystem`) plus POSIX commands through `proc`
@@ -526,11 +538,40 @@ async function assertCandidateBaseline(
   }
 }
 
+/** Thrown when an apply failed *and* its guarded rollback could not put every
+ * touched path back, i.e. the workspace is neither `before` nor `after`. Every
+ * other apply failure leaves the workspace at `before`, which is what lets a
+ * caller distinguish "nothing happened, the decision is still open" from "the
+ * workspace needs a human". */
+export class SubagentCandidateApplyDirtyError extends Error {}
+
+export function candidateApplyLeftWorkspaceDirty(error: unknown): boolean {
+  return error instanceof SubagentCandidateApplyDirtyError;
+}
+
+async function classifyCandidateApplyState(
+  services: SubagentWorktreeServices,
+  repoRoot: string,
+  deltas: readonly Delta[],
+): Promise<'before' | 'after' | 'diverged'> {
+  let matchesBefore = true;
+  let matchesAfter = true;
+  for (const delta of deltas) {
+    const current = await capturePath(services, pathe.join(repoRoot, delta.relPath));
+    if (!snapshotsEqual(current, delta.before)) matchesBefore = false;
+    if (!snapshotsEqual(current, delta.after)) matchesAfter = false;
+    if (!matchesBefore && !matchesAfter) return 'diverged';
+  }
+  if (matchesAfter) return 'after';
+  return matchesBefore ? 'before' : 'diverged';
+}
+
 export async function applySubagentWorktreeCandidate(
   services: SubagentWorktreeServices,
   candidate: EditingCandidateDraft,
   approvedScope: readonly string[],
-): Promise<{ readonly applied: true }> {
+  options?: { readonly resume?: boolean },
+): Promise<{ readonly applied: true; readonly reconciled?: 'already_applied' }> {
   assertSubagentWorktreeCandidateIntegrity(candidate);
   const normalizedScope = normalizeScope(approvedScope);
   if (JSON.stringify(normalizedScope) !== JSON.stringify(candidate.requestedScope)) {
@@ -543,11 +584,25 @@ export async function applySubagentWorktreeCandidate(
   }
   const capabilities = getCapabilities();
   const deltas: Delta[] = candidate.paths.map(({ relPath, before, after }) => ({ relPath, before, after }));
+  let alreadyApplied = false;
   await withRepoApplyLock(services, candidate.commonDir, async () => {
+    if (options?.resume === true) {
+      if (!capabilities.stateMaterialization) {
+        throw new Error('backend does not support safe POSIX state materialization');
+      }
+      const state = await classifyCandidateApplyState(services, candidate.repoRoot, deltas);
+      if (state === 'diverged') {
+        throw new SubagentCandidateApplyDirtyError('candidate_path_diverged: resumed apply');
+      }
+      if (state === 'after') {
+        alreadyApplied = true;
+        return;
+      }
+    }
     await assertCandidateBaseline(services, candidate.repoRoot, capabilities, deltas, 'candidate_path_diverged');
     await applyDeltaPlan(services, candidate.repoRoot, deltas);
   });
-  return { applied: true };
+  return alreadyApplied ? { applied: true, reconciled: 'already_applied' } : { applied: true };
 }
 async function applyDeltaPlan(
   services: SubagentWorktreeServices,
@@ -603,7 +658,11 @@ async function applyDeltaPlan(
           rollbackErrors.push(`${delta.relPath}: ${errorMessage(rollbackError)}`);
         }
       }
-      if (rollbackErrors.length > 0) throw new Error(`${errorMessage(error)}; guarded rollback incomplete: ${rollbackErrors.join('; ')}`);
+      if (rollbackErrors.length > 0) {
+        throw new SubagentCandidateApplyDirtyError(
+          `${errorMessage(error)}; guarded rollback incomplete: ${rollbackErrors.join('; ')}`,
+        );
+      }
       throw error;
     }
   } finally {
