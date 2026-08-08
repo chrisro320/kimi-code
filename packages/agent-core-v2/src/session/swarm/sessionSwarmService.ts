@@ -49,7 +49,11 @@ import {
 } from '#/session/agentLifecycle/subagentMetadata';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
-import { wrapSubagentModelError } from '#/session/subagent/configSection';
+import { IConfigService } from '#/app/config/config';
+import {
+  resolveSubagentIsolationMode,
+  wrapSubagentModelError,
+} from '#/session/subagent/configSection';
 import { SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
 import {
   acquireSubagentWorktree,
@@ -145,6 +149,7 @@ export class SessionSwarmService implements ISessionSwarmService {
     @IGitService private readonly git: IGitService,
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @IHostProcessService private readonly proc: IHostProcessService,
+    @IConfigService private readonly config: IConfigService,
   ) {}
 
   /** Records `error` against the agent's circuit when it is a non-retryable route failure. */
@@ -312,7 +317,7 @@ export class SessionSwarmService implements ISessionSwarmService {
           this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
           isEditingCapableCatalogProfile(profile)
         ) {
-          worktree = await this.acquireIsolatedWorktree(callerCwd, editingScope.value);
+          worktree = (await this.acquireIsolatedWorktree(callerCwd, editingScope.value)) ?? undefined;
         }
         child = await this.lifecycle.create({
           binding: {
@@ -488,7 +493,7 @@ export class SessionSwarmService implements ISessionSwarmService {
   private async acquireIsolatedWorktree(
     callerCwd: string,
     scope: readonly string[],
-  ): Promise<SubagentWorktreeHandle> {
+  ): Promise<SubagentWorktreeHandle | null> {
     const services: SubagentWorktreeServices = {
       git: this.git,
       fs: this.fs,
@@ -497,9 +502,16 @@ export class SessionSwarmService implements ISessionSwarmService {
     };
     const acquisition = await acquireSubagentWorktree(services, callerCwd, { scope });
     if (isSubagentWorktreeUnsupported(acquisition)) {
-      throw new Error(
-        `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
-      );
+      if (resolveSubagentIsolationMode(this.config) === 'strict') {
+        throw new Error(
+          `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
+        );
+      }
+      this.log.warn('subagent worktree: dispatching without isolation', {
+        cwd: callerCwd,
+        reason: acquisition.unsupported,
+      });
+      return null;
     }
     if (acquisition === null) {
       throw new Error('Editing subagent isolation could not be created; dispatch was refused.');

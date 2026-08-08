@@ -390,6 +390,7 @@ timeout_ms = 7200000
 # fallback_chain: object[] — one entry per item:
   # backend: string
   # model: string
+# isolation: "strict" | "best-effort"
 
 # ##########################################################################
 # task

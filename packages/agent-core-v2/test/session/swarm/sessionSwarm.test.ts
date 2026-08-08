@@ -53,7 +53,7 @@ import {
 import { ISessionSwarmService, type SessionSwarmSpawnTask, type SessionSwarmTask } from '#/session/swarm/sessionSwarm';
 import { Error2 } from '#/_base/errors/errors';
 import { ErrorCodes } from '#/errors';
-import type { IConfigService } from '#/app/config/config';
+import { IConfigService } from '#/app/config/config';
 import { MODELS_SECTION } from '#/app/kosongConfig/configSection';
 import { SUBAGENT_SECTION } from '#/session/subagent/configSection';
 import {
@@ -907,6 +907,10 @@ describe('SessionSwarmService metadata compatibility', () => {
       // inherited into the test process).
       enabled: () => false,
     } as unknown as IFlagService);
+    // Unstubbed services resolve to undefined rather than throwing, so a
+    // constructor dependency only surfaces on the path that reads it — here,
+    // the isolation-mode lookup inside the worktree acquire.
+    ix.stub(IConfigService, { _serviceBrand: undefined, get: () => undefined } as unknown as IConfigService);
     ix.stub(IAgentLifecycleService, lifecycle);
     ix.stub(ISessionSubagentService, subagents);
     ix.stub(ISessionAgentProfileCatalog, {

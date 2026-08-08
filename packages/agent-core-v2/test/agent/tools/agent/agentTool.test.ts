@@ -78,6 +78,7 @@ function makeTool(deps: {
   flagsEnabled?: boolean;
   profile?: AgentProfile;
   run?: ReturnType<typeof vi.fn>;
+  isolation?: 'strict' | 'best-effort';
 }): SubagentTool {
   const accessor = {
     get: (id: unknown) => {
@@ -116,7 +117,9 @@ function makeTool(deps: {
     { read: async () => ({}) } as unknown as ISessionMetadata,
     { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } as unknown as ILogService,
     { mode: 'acceptEdits', setMode: () => {} } as unknown as IAgentPermissionModeService,
-    { get: () => undefined } as unknown as IConfigService,
+    {
+      get: () => (deps.isolation === undefined ? undefined : { isolation: deps.isolation }),
+    } as unknown as IConfigService,
     { enabled: (id: string) => (deps.flagsEnabled ?? true) || id === 'secondary-model' } as unknown as IFlagService,
     { get: () => ({}) } as unknown as IModelCatalog,
     deps.routing as unknown as ISessionSubagentRoutingService,
@@ -165,6 +168,7 @@ describe('SubagentTool worktree isolation wiring', () => {
       },
       git: { repoInfo: async () => null }, // not a git repository → unsupported
       create,
+      isolation: 'strict', // best-effort would dispatch unisolated instead of refusing
     });
 
     const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
@@ -219,6 +223,7 @@ describe('SubagentTool worktree isolation wiring', () => {
       routing: { resolveSpawnRoute: async () => undefined },
       git: { repoInfo: async () => null },
       create,
+      isolation: 'strict', // best-effort would dispatch unisolated instead of refusing
       profile: editingProfile(undefined),
     });
 
@@ -286,6 +291,43 @@ describe('SubagentTool worktree isolation wiring', () => {
     });
     expect(releaseCalls).toBe(1);
   });
+
+  // A workspace that cannot host a worktree at all is not the same as isolation
+  // failing: `best-effort` (the default) dispatches unisolated with a warning,
+  // `strict` refuses. Without this, turning the isolation flag on by default
+  // would break every user who runs kimi outside a git repository.
+  it.each([
+    ['best-effort', 'best-effort' as const],
+    ['unset (defaults to best-effort)', undefined],
+  ])(
+    'dispatches unisolated when the workspace cannot host a worktree — isolation: %s',
+    async (_label: string, isolation: 'best-effort' | undefined) => {
+      // Reaching `create` at all is the assertion: under `strict` the dispatch
+      // is refused before it. What it throws afterwards is not this test's
+      // subject — the other cases in this file cover the spawn-failure paths.
+      const create = vi.fn(async (_options: { readonly workspaceCwd?: string }) => {
+        throw new Error('spawn stops here');
+      });
+      const tool = makeTool({
+        routing: {
+          resolveSpawnRoute: async () => ({ route: { circuitKey: 'k' }, releasePoolSlot }),
+        },
+        git: { repoInfo: async () => null }, // not a git repository → unsupported
+        create,
+        isolation,
+      });
+
+      const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
+      const result = await execution.execute({
+        toolCallId: 'call-1',
+        signal: new AbortController().signal,
+      } as never);
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(create.mock.calls[0]?.[0]).toMatchObject({ workspaceCwd: undefined });
+      expect(JSON.stringify(result)).not.toContain('isolation is unavailable here');
+    },
+  );
 
   // The guard sits on the spawn path itself, not behind the isolation flag —
   // v1 refuses the dispatch outright, and an unscoped editing subagent writes
