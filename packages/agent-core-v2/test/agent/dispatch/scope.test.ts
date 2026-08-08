@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { isEditingCapableProfile } from '#/agent/dispatch/profile';
-import { normalizeScopeEntry, normalizeScopeList, scopesOverlap } from '#/agent/dispatch/scope';
+import {
+  normalizeScopeEntry,
+  normalizeScopeList,
+  resolveEditingDispatchScope,
+  scopesOverlap,
+} from '#/agent/dispatch/scope';
 
 describe('normalizeScopeEntry (v1 parity)', () => {
   it('trims and normalizes separators and dot segments', () => {
@@ -93,5 +98,40 @@ describe('isEditingCapableProfile (v1 parity)', () => {
   it('is read-only without Write or Edit', () => {
     expect(isEditingCapableProfile({ tools: ['Read', 'Grep', 'Bash'] })).toBe(false);
     expect(isEditingCapableProfile({ tools: [] })).toBe(false);
+  });
+});
+
+describe('resolveEditingDispatchScope (v1 parity)', () => {
+  it('refuses an editing dispatch that declares no scope', () => {
+    const message = 'An editing-capable dispatch requires at least one scope entry.';
+    expect(resolveEditingDispatchScope(true, undefined)).toEqual({
+      ok: false,
+      error: 'malformed',
+      message,
+    });
+    expect(resolveEditingDispatchScope(true, [])).toEqual({
+      ok: false,
+      error: 'malformed',
+      message,
+    });
+  });
+
+  it('normalizes a declared editing scope', () => {
+    expect(resolveEditingDispatchScope(true, ['  src//./pkg  ', 'docs'])).toEqual({
+      ok: true,
+      value: ['src/pkg', 'docs'],
+    });
+  });
+
+  it('propagates the first invalid entry instead of silently dropping it', () => {
+    expect(resolveEditingDispatchScope(true, ['src', '/etc/passwd'])).toMatchObject({
+      ok: false,
+      error: 'malformed',
+    });
+  });
+
+  it('leaves a read-only dispatch unconstrained', () => {
+    expect(resolveEditingDispatchScope(false, undefined)).toEqual({ ok: true, value: [] });
+    expect(resolveEditingDispatchScope(false, [])).toEqual({ ok: true, value: [] });
   });
 });

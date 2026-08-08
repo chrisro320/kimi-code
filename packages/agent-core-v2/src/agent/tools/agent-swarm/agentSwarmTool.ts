@@ -70,6 +70,7 @@ interface AgentSwarmSpawnSpec {
   readonly index: number;
   readonly item: string;
   readonly prompt: string;
+  readonly dispatchScope?: readonly string[];
 }
 
 interface AgentSwarmResumeSpec {
@@ -214,6 +215,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
+        dispatchScope: spec.kind === 'spawn' ? spec.dispatchScope : undefined,
         signal,
         timeout: timeoutMs,
       };
@@ -250,7 +252,11 @@ async function createAgentSwarmSpecs(
     agentId: agentId.trim(),
     prompt: prompt.trim(),
   }));
-  const items = (args.items ?? []).map((item) => item.trim());
+  const items = (args.items ?? []).map((item) =>
+    typeof item === 'string'
+      ? { value: item.trim(), dispatchScope: undefined }
+      : { value: item.value.trim(), dispatchScope: item.dispatch?.scope },
+  );
   const itemCount = items.length;
   const resumeCount = resumeEntries.length;
   const totalCount = resumeCount + itemCount;
@@ -296,7 +302,7 @@ async function createAgentSwarmSpecs(
   if (items.length > 0) {
     const itemPromptTemplate = promptTemplate!;
     items.forEach((item, index) => {
-      const prompt = itemPromptTemplate.split(PROMPT_TEMPLATE_PLACEHOLDER).join(item);
+      const prompt = itemPromptTemplate.split(PROMPT_TEMPLATE_PLACEHOLDER).join(item.value);
       const previousIndex = seenPrompts.get(prompt);
       if (previousIndex !== undefined) {
         throw new Error2(
@@ -309,8 +315,9 @@ async function createAgentSwarmSpecs(
       specs.push({
         kind: 'spawn',
         index: specs.length + 1,
-        item,
+        item: item.value,
         prompt,
+        dispatchScope: item.dispatchScope,
       });
     });
   }

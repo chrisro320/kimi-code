@@ -87,6 +87,27 @@ export function normalizeScopeList(raw: readonly string[]): ScopeListResult {
   return { ok: true, value: normalized };
 }
 
+/**
+ * Resolve the scope an editing-capable dispatch may write to, rejecting a
+ * dispatch that declares none. A read-only dispatch resolves to the empty
+ * scope, which is what the worktree apply path reads as "nothing to confine".
+ */
+export function resolveEditingDispatchScope(
+  isEditingCapable: boolean,
+  raw: readonly string[] | undefined,
+): ScopeListResult {
+  if (!isEditingCapable) return { ok: true, value: [] };
+  const declared = raw ?? [];
+  if (declared.length === 0) {
+    return {
+      ok: false,
+      error: 'malformed',
+      message: 'An editing-capable dispatch requires at least one scope entry.',
+    };
+  }
+  return normalizeScopeList(declared);
+}
+
 /** The literal path portion before the first glob metacharacter, trimmed to a whole segment. */
 function staticPrefix(path: string): string {
   const metaIndex = path.search(GLOB_METACHARACTERS);

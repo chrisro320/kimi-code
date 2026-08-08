@@ -131,6 +131,7 @@ const args = (): SubagentToolInput => ({
   prompt: 'do the thing',
   description: 'ac3 test',
   subagent_type: 'coder',
+  dispatch: { scope: ['src'] },
 });
 
 describe('SubagentTool worktree isolation wiring', () => {
@@ -285,4 +286,38 @@ describe('SubagentTool worktree isolation wiring', () => {
     });
     expect(releaseCalls).toBe(1);
   });
+
+  // The guard sits on the spawn path itself, not behind the isolation flag —
+  // v1 refuses the dispatch outright, and an unscoped editing subagent writes
+  // straight back to the workspace when isolation is off.
+  it.each([true, false])(
+    'refuses an editing dispatch with no scope (isolation flag: %s)',
+    async (flagsEnabled: boolean) => {
+      const create = vi.fn();
+      const tool = makeTool({
+        routing: {
+          resolveSpawnRoute: async () => ({ route: { circuitKey: 'k' }, releasePoolSlot }),
+        },
+        git: {},
+        create,
+        flagsEnabled,
+      });
+
+      const execution = (await tool.resolveExecution({
+        ...args(),
+        dispatch: undefined,
+      })) as RunnableToolExecution;
+      const result = await execution.execute({
+        toolCallId: 'call-1',
+        signal: new AbortController().signal,
+      } as never);
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain(
+        'An editing-capable dispatch requires at least one scope entry.',
+      );
+      expect(create).not.toHaveBeenCalled();
+      expect(releaseCalls).toBe(1);
+    },
+  );
 });

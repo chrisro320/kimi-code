@@ -17,6 +17,27 @@ import { type AgentTool } from '#/tool/toolContract';
 export const PROMPT_TEMPLATE_PLACEHOLDER = '{{item}}';
 export const MAX_AGENT_SWARM_SUBAGENTS = 128;
 
+const AgentSwarmItemSchema = z.union([
+  z.string().trim().min(1),
+  z
+    .object({
+      value: z.string().trim().min(1),
+      dispatch: z
+        .object({
+          scope: z
+            .array(z.string())
+            .optional()
+            .describe(
+              'Workspace-relative files, directories, or globs this one subagent may change. Give each item a non-overlapping scope.',
+            ),
+        })
+        .optional(),
+    })
+    .strict(),
+]);
+
+export type AgentSwarmItem = z.infer<typeof AgentSwarmItemSchema>;
+
 export const AgentSwarmToolInputSchema = z
   .object({
     description: z
@@ -41,11 +62,11 @@ export const AgentSwarmToolInputSchema = z
         `Prompt template for each subagent. The ${PROMPT_TEMPLATE_PLACEHOLDER} placeholder is replaced with each item value.`,
       ),
     items: z
-      .array(z.string().trim().min(1))
+      .array(AgentSwarmItemSchema)
       .max(MAX_AGENT_SWARM_SUBAGENTS)
       .optional()
       .describe(
-        `Values used to fill ${PROMPT_TEMPLATE_PLACEHOLDER}. Each item launches one new subagent.`,
+        `Values used to fill ${PROMPT_TEMPLATE_PLACEHOLDER}. Each item launches one new subagent. An item may be a bare string, or an object carrying that value plus its own dispatch scope — an editing-capable subagent_type requires the object form, since a dispatch that declares no scope is refused.`,
       ),
     resume_agent_ids: z
       .record(z.string().trim().min(1), z.string().trim().min(1))

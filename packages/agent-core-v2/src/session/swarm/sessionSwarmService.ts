@@ -63,6 +63,7 @@ import { ISessionSubagentRoutingService } from '#/session/subagent/routingServic
 import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
 import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
 import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
+import { resolveEditingDispatchScope } from '#/agent/dispatch/scope';
 import { IFlagService } from '#/app/flag/flag';
 import { IGitService } from '#/app/git/git';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -231,7 +232,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         // profile-resolution error.
         const isEditingCapable =
           profile === undefined ? false : isEditingCapableCatalogProfile(profile);
-        return { isEditingCapable, scope: undefined };
+        return { isEditingCapable, scope: task.dispatchScope };
       });
       return await resolveEffectiveMaxConcurrency(items, configured, {
         workspaceDir: this.sessionContext.cwd,
@@ -297,6 +298,13 @@ export class SessionSwarmService implements ISessionSwarmService {
               model: spawnRoute.route.modelAlias ?? binding.model,
               thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
             };
+      const editingScope = resolveEditingDispatchScope(
+        isEditingCapableCatalogProfile(profile),
+        options.dispatchScope,
+      );
+      if (!editingScope.ok) {
+        throw new Error(`Dispatch rejected (${editingScope.error}-scope): ${editingScope.message}`);
+      }
       let child: IAgentScopeHandle;
       try {
         this.modelCatalog.get(final.model);
@@ -304,7 +312,7 @@ export class SessionSwarmService implements ISessionSwarmService {
           this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
           isEditingCapableCatalogProfile(profile)
         ) {
-          worktree = await this.acquireIsolatedWorktree(callerCwd);
+          worktree = await this.acquireIsolatedWorktree(callerCwd, editingScope.value);
         }
         child = await this.lifecycle.create({
           binding: {
@@ -477,14 +485,17 @@ export class SessionSwarmService implements ISessionSwarmService {
     release();
   }
 
-  private async acquireIsolatedWorktree(callerCwd: string): Promise<SubagentWorktreeHandle> {
+  private async acquireIsolatedWorktree(
+    callerCwd: string,
+    scope: readonly string[],
+  ): Promise<SubagentWorktreeHandle> {
     const services: SubagentWorktreeServices = {
       git: this.git,
       fs: this.fs,
       proc: this.proc,
       log: this.log,
     };
-    const acquisition = await acquireSubagentWorktree(services, callerCwd);
+    const acquisition = await acquireSubagentWorktree(services, callerCwd, { scope });
     if (isSubagentWorktreeUnsupported(acquisition)) {
       throw new Error(
         `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
