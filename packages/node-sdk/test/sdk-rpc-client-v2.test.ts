@@ -20,6 +20,7 @@ import {
   KimiHarness,
   removeProviderFromConfig,
   SDKRpcClientV2,
+  type DispatchMode,
   type KimiConfig,
 } from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
@@ -442,6 +443,60 @@ describe('removeProviderFromConfig', () => {
     expect(Object.keys(next.models ?? {})).toEqual(['a/m1']);
     expect(next.defaultModel).toBe('a/m1');
     expect(next.defaultProvider).toBe('a');
+  });
+});
+
+describe('SDKRpcClientV2 dispatch mode', () => {
+  // The base class routes both dispatch-mode methods through v1's core RPCs,
+  // which have no v2 counterpart — without the overrides these round-trips
+  // fail and `getStatus` reports no dispatch mode at all.
+  it.each(['ask', 'off', 'auto'] as const)('round-trips %s', async (mode: DispatchMode) => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-dispatch-work-'));
+    tempDirs.push(workDir);
+    try {
+      const session = await harness.createSession({ id: `ses_dispatch_${mode}`, workDir });
+
+      await session.setDispatchMode(mode);
+
+      expect(await session.getDispatchMode()).toBe(mode);
+      expect((await session.getStatus()).dispatchMode).toBe(mode);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reports the default mode before anything sets one', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-dispatch-work-'));
+    tempDirs.push(workDir);
+    try {
+      const session = await harness.createSession({ id: 'ses_dispatch_default', workDir });
+
+      expect(await session.getDispatchMode()).toBe('auto');
+      expect((await session.getStatus()).dispatchMode).toBe('auto');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The mode is persisted as a `dispatch_mode.set` wire op, so it must survive
+  // a resume the same way v1's record log made it.
+  it('survives a resume', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-dispatch-work-'));
+    tempDirs.push(workDir);
+    try {
+      const session = await harness.createSession({ id: 'ses_dispatch_resume', workDir });
+      await session.setDispatchMode('off');
+      await session.close();
+
+      const resumed = await harness.resumeSession({ id: 'ses_dispatch_resume' });
+
+      expect(await resumed.getDispatchMode()).toBe('off');
+    } finally {
+      await harness.close();
+    }
   });
 });
 

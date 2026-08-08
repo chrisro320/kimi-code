@@ -161,6 +161,7 @@ import {
   ensureMainAgent,
   IAgentActivityView,
   IAgentContextMemoryService,
+  IAgentDispatchModeService,
   IAgentFullCompactionService,
   IAgentGoalService,
   IAgentLifecycleService,
@@ -243,6 +244,7 @@ import {
   type ReloadSessionRpcInput,
   type SessionIdRpcInput,
   type SessionPromptRpcInput,
+  type SetSessionDispatchModeRpcInput,
   type SetSessionModelRpcInput,
   type SetSessionModelRpcResult,
   type SetSessionPermissionRpcInput,
@@ -260,6 +262,7 @@ import type {
   ConfigDiagnostics,
   CreateGoalInput,
   CreateSessionOptions,
+  DispatchMode,
   ExportSessionInput,
   ExportSessionResult,
   ForkSessionInput,
@@ -946,6 +949,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       } as ResumedAgentState['permission'],
       plan: plan as ResumedAgentState['plan'],
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      dispatchMode: agent.accessor.get(IAgentDispatchModeService).mode,
       usage: usage as ResumedAgentState['usage'],
       tools: agent.accessor.get(IAgentRPCService).getTools({}) as ResumedAgentState['tools'],
       toolStore: folded.toolStore,
@@ -1434,11 +1438,12 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
 
   /**
    * The base class aggregates v1's per-agent `getConfig` / `getContext` /
-   * `getPermission` / `getPlan` / `getSwarmMode` / `getUsage` RPCs. The v2
-   * rebuild reads the same six slices: the profile's bound model alias and
-   * resolved thinking level + capabilities (v1's agent `getConfig` — its
-   * `provider?.model` fallback is unreachable without an alias), the
-   * facade's context/plan/usage, and the permission-mode and swarm services.
+   * `getPermission` / `getPlan` / `getSwarmMode` / `getDispatchMode` /
+   * `getUsage` RPCs. The v2 rebuild reads the same seven slices: the profile's
+   * bound model alias and resolved thinking level + capabilities (v1's agent
+   * `getConfig` — its `provider?.model` fallback is unreachable without an
+   * alias), the facade's context/plan/usage, and the permission-mode, swarm
+   * and dispatch-mode services.
    */
   override async getStatus(input: SessionIdRpcInput): Promise<SessionStatus> {
     const agent = await this.agentScope(input.sessionId);
@@ -1463,6 +1468,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       permission: agent.accessor.get(IAgentPermissionModeService).mode,
       planMode: plan !== null,
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      dispatchMode: agent.accessor.get(IAgentDispatchModeService).mode,
       contextTokens,
       maxContextTokens,
       contextUsage,
@@ -1778,6 +1784,27 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async swarm(input: SessionPromptRpcInput): Promise<void> {
     await this.setSwarmMode({ sessionId: input.sessionId, enabled: true, trigger: 'task' });
     return this.prompt(input);
+  }
+
+  /**
+   * Through the agent scope (`IAgentDispatchModeService`) — no klient facade
+   * exists. The base class routes both dispatch-mode methods through v1's
+   * `getDispatchMode` / `setDispatchMode` core RPCs, which have no v2
+   * counterpart; without these overrides the v2 client falls through to a
+   * surface that is not there, and `getStatus` reports no dispatch mode at all.
+   * The v2 service is the port of v1's `DispatchModeState`: the mode lives in
+   * the wire `DispatchModeModel` (default `auto`) and is mutated only through
+   * the `dispatch_mode.set` op, so a set is durable across resume the same way
+   * v1's record log made it.
+   */
+  override async getDispatchMode(input: SessionIdRpcInput): Promise<DispatchMode> {
+    const agent = await this.agentScope(input.sessionId);
+    return agent.accessor.get(IAgentDispatchModeService).mode;
+  }
+
+  override async setDispatchMode(input: SetSessionDispatchModeRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    agent.accessor.get(IAgentDispatchModeService).setMode(input.mode);
   }
 
   // -----------------------------------------------------------------------
