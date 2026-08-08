@@ -90,6 +90,7 @@ import {
   buildSubagentModelDescriptions,
   formatSubagentTimeoutDescription,
   resolveSubagentBinding,
+  resolveSubagentIsolationMode,
   resolveSubagentTimeoutMs,
   stripSubagentModelParameter,
   wrapSubagentModelError,
@@ -379,7 +380,7 @@ export class SubagentTool implements ISubagentTool {
             this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
             isEditingCapableCatalogProfile(profile)
           ) {
-            worktree = await this.acquireIsolatedWorktree(editingScope.value, profile.name);
+            worktree = (await this.acquireIsolatedWorktree(editingScope.value, profile.name)) ?? undefined;
           }
           created = await this.lifecycle.create({
             binding: {
@@ -484,7 +485,7 @@ export class SubagentTool implements ISubagentTool {
   private async acquireIsolatedWorktree(
     scope: readonly string[],
     profileName: string,
-  ): Promise<SubagentWorktreeHandle> {
+  ): Promise<SubagentWorktreeHandle | null> {
     const services: SubagentWorktreeServices = {
       git: this.git,
       fs: this.fs,
@@ -495,9 +496,17 @@ export class SubagentTool implements ISubagentTool {
       scope,
     });
     if (isSubagentWorktreeUnsupported(acquisition)) {
-      throw new Error(
-        `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
-      );
+      if (resolveSubagentIsolationMode(this.config) === 'strict') {
+        throw new Error(
+          `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
+        );
+      }
+      this.log.warn('subagent worktree: dispatching without isolation', {
+        cwd: this.workspace.workDir,
+        profile: profileName,
+        reason: acquisition.unsupported,
+      });
+      return null;
     }
     if (acquisition === null) {
       throw new Error('Editing subagent isolation could not be created; dispatch was refused.');

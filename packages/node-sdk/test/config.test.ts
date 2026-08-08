@@ -329,6 +329,15 @@ describe('KimiHarness config API', () => {
 
   it('returns experimental feature metadata through the harness', async () => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    // The blanket switch above does not mask a per-flag override, so a developer
+    // running with one of these exported would see `enabled: true`. Unset rather
+    // than zero them: the assertions below expect `source: 'default'`, and any
+    // value at all — including "0" — makes the resolver report `source: 'env'`.
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('KIMI_CODE_EXPERIMENTAL_') && key !== 'KIMI_CODE_EXPERIMENTAL_FLAG') {
+        vi.stubEnv(key, undefined);
+      }
+    }
     const homeDir = await makeTempDir();
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
 

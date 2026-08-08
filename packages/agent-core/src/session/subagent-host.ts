@@ -1232,9 +1232,14 @@ export class SessionSubagentHost {
     if (isSubagentWorktreeUnsupported(worktree)) {
       // A `discardChanges` dispatch promises the caller that nothing the child
       // writes survives the run, and only the worktree can keep that promise —
-      // so it is refused even in best-effort mode. The opt-in experimental flag
-      // is an explicit request for isolation and is treated the same way.
-      if (discardChanges || explicitlyEnabled || this.isolationMode() === 'strict') {
+      // so it is refused even in best-effort mode.
+      //
+      // The flag being on is deliberately NOT such a request: it will become the
+      // default, at which point treating it as "the user explicitly asked for
+      // isolation" would refuse every dispatch outside a git repository. Asking
+      // for isolation unconditionally is what `subagent.isolation = "strict"` is
+      // for.
+      if (discardChanges || this.isolationMode() === 'strict') {
         throw new Error(
           `Editing subagent isolation is unavailable here: ${worktree.unsupported}. Dispatch was refused.`,
         );

@@ -128,6 +128,14 @@ export const SubagentConfigSchema = z.object({
    * what order.
    */
   fallbackChain: z.array(SubagentFallbackRouteSchema).optional(),
+  /**
+   * How a workspace that cannot support worktree isolation at all (not a git
+   * repository, no commit yet, non-POSIX backend) is handled when an editing
+   * subagent is dispatched. `best-effort` dispatches unisolated with a warning;
+   * `strict` refuses the dispatch. Isolation that should have worked and failed
+   * always refuses, in both modes.
+   */
+  isolation: z.enum(['strict', 'best-effort']).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
@@ -253,6 +261,12 @@ export function resolveSubagentTimeoutMs(config: IConfigService): number {
     config.get<SubagentConfig | undefined>(SUBAGENT_SECTION)?.timeoutMs ??
     DEFAULT_SUBAGENT_TIMEOUT_MS
   );
+}
+
+export type SubagentIsolationMode = 'strict' | 'best-effort';
+
+export function resolveSubagentIsolationMode(config: IConfigService): SubagentIsolationMode {
+  return config.get<SubagentConfig | undefined>(SUBAGENT_SECTION)?.isolation ?? 'best-effort';
 }
 
 export type SubagentModelChoice = AgentModelPreference;
