@@ -61,12 +61,12 @@ export const SubagentToolInputSchema = z.preprocess(
           .array(z.string())
           .optional()
           .describe(
-            'Workspace-relative files, directories, or globs this subagent may change. Changes outside this scope trigger a scope-expansion approval flow instead of being applied or discarded.',
+            'Workspace-relative files, directories, or globs this subagent may change. Required for an editing-capable subagent_type — a dispatch that declares no scope is refused. Changes outside this scope trigger a scope-expansion approval flow instead of being applied or discarded.',
           ),
       })
       .optional()
       .describe(
-        'Dispatch control options for editing subagents: declare the change scope (scope).',
+        'Dispatch control options for editing subagents: declare the change scope (scope). Required whenever subagent_type can edit.',
       ),
     model: z
       .enum(['secondary', 'primary'])

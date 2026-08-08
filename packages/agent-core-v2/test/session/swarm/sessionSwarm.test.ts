@@ -71,7 +71,9 @@ import { stubLog } from '../../_base/log/stubs';
 // observe what the spawn path does with it; when it is unset every caller
 // still runs the real implementation.
 const worktreeMock = vi.hoisted(() => ({
-  acquire: undefined as undefined | ((cwd: string) => unknown),
+  acquire: undefined as
+    | undefined
+    | ((cwd: string, options?: { readonly scope?: readonly string[] }) => unknown),
 }));
 
 vi.mock('#/session/subagent/worktree', async (importOriginal) => {
@@ -81,7 +83,7 @@ vi.mock('#/session/subagent/worktree', async (importOriginal) => {
     acquireSubagentWorktree: async (services: never, cwd: string, options: never) =>
       worktreeMock.acquire === undefined
         ? await actual.acquireSubagentWorktree(services, cwd, options)
-        : worktreeMock.acquire(cwd),
+        : worktreeMock.acquire(cwd, options),
   };
 });
 
@@ -1852,6 +1854,7 @@ describe('SessionSwarmService metadata compatibility', () => {
   describe('worktree isolation wiring', () => {
     const PARENT_WORKTREE = '/repo/.git/kimi-code-subagent-worktrees/parent';
     let acquiredFrom: string[];
+    let acquiredScopes: (readonly string[] | undefined)[];
     let finish: ReturnType<typeof vi.fn>;
 
     function isolationEnabled(): void {
@@ -1873,15 +1876,57 @@ describe('SessionSwarmService metadata compatibility', () => {
 
     beforeEach(() => {
       acquiredFrom = [];
+      acquiredScopes = [];
       finish = vi.fn(async () => ({ applied: false, reason: 'discarded' }));
-      worktreeMock.acquire = (cwd: string) => {
+      worktreeMock.acquire = (cwd: string, options?: { readonly scope?: readonly string[] }) => {
         acquiredFrom.push(cwd);
+        acquiredScopes.push(options?.scope);
         return { cwd: '/repo/.git/kimi-code-subagent-worktrees/child', finish };
       };
     });
 
     afterEach(() => {
       worktreeMock.acquire = undefined;
+    });
+
+    // AgentSwarm had no scope field at all, so every swarm-spawned editing
+    // worker reached the apply path with an empty scope — which that path reads
+    // as "unrestricted" and writes back wholesale. The guard is on the spawn
+    // path itself, so it holds with the isolation flag off too.
+    it.each([true, false])(
+      'refuses a swarm-spawned editing worker with no scope (isolation flag: %s)',
+      async (flagEnabled: boolean) => {
+        if (flagEnabled) isolationEnabled();
+        catalogWith(['Write', 'Edit']);
+        const service = ix.get(ISessionSwarmService);
+        const unscoped: SessionSwarmSpawnTask = {
+          ...spawnSessionTask('src/a.ts'),
+          kind: 'spawn',
+          dispatchScope: undefined,
+        };
+
+        const results = await service.run({ callerAgentId: 'main', tasks: [unscoped] });
+
+        expect(JSON.stringify(results)).toContain(
+          'An editing-capable dispatch requires at least one scope entry.',
+        );
+        expect(acquiredFrom).toEqual([]);
+      },
+    );
+
+    it('carries each item declared scope through to its own worktree', async () => {
+      isolationEnabled();
+      catalogWith(['Write', 'Edit']);
+      const service = ix.get(ISessionSwarmService);
+      const scoped: SessionSwarmSpawnTask = {
+        ...spawnSessionTask('src/a.ts'),
+        kind: 'spawn',
+        dispatchScope: ['  src//./a.ts  '],
+      };
+
+      await service.run({ callerAgentId: 'main', tasks: [scoped] });
+
+      expect(acquiredScopes).toEqual([['src/a.ts']]);
     });
 
     it('branches a nested swarm off the caller worktree, not the session workspace', async () => {
@@ -1984,6 +2029,7 @@ function spawnSessionTask(swarmItem?: string): SessionSwarmSpawnTask {
     description: 'Review #1 (coder)',
     swarmIndex: 1,
     swarmItem,
+    dispatchScope: ['src'],
     runInBackground: false,
   };
 }

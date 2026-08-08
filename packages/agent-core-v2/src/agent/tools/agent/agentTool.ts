@@ -96,6 +96,7 @@ import {
 } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID, SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
 import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
+import { resolveEditingDispatchScope } from '#/agent/dispatch/scope';
 import { IGitService } from '#/app/git/git';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
@@ -364,6 +365,13 @@ export class SubagentTool implements ISubagentTool {
                 model: spawnRoute.route.modelAlias ?? binding.model,
                 thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
               };
+        const editingScope = resolveEditingDispatchScope(
+          isEditingCapableCatalogProfile(profile),
+          args.dispatch?.scope,
+        );
+        if (!editingScope.ok) {
+          throw new Error(`Dispatch rejected (${editingScope.error}-scope): ${editingScope.message}`);
+        }
         let created: IAgentScopeHandle;
         try {
           this.modelCatalog.get(final.model);
@@ -371,7 +379,7 @@ export class SubagentTool implements ISubagentTool {
             this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
             isEditingCapableCatalogProfile(profile)
           ) {
-            worktree = await this.acquireIsolatedWorktree(args, profile.name);
+            worktree = await this.acquireIsolatedWorktree(editingScope.value, profile.name);
           }
           created = await this.lifecycle.create({
             binding: {
@@ -474,7 +482,7 @@ export class SubagentTool implements ISubagentTool {
   }
 
   private async acquireIsolatedWorktree(
-    args: SubagentToolInput,
+    scope: readonly string[],
     profileName: string,
   ): Promise<SubagentWorktreeHandle> {
     const services: SubagentWorktreeServices = {
@@ -484,7 +492,7 @@ export class SubagentTool implements ISubagentTool {
       log: this.log,
     };
     const acquisition = await acquireSubagentWorktree(services, this.workspace.workDir, {
-      scope: args.dispatch?.scope,
+      scope,
     });
     if (isSubagentWorktreeUnsupported(acquisition)) {
       throw new Error(
