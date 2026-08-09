@@ -199,20 +199,39 @@ export function resolveThinkingEffortForModel(
   const configured = normalizeRequestedThinkingEffort(defaults?.effort);
   const normalized = normalizeRequestedThinkingEffort(requested);
   let effort: ThinkingEffort;
+  // Whether `effort` came from the global `[thinking].effort` rather than from
+  // something chosen for this model.
+  let fromGlobalDefault = false;
   if (normalized !== undefined) {
     effort = normalized;
   } else if (defaults?.enabled === false) {
     effort = 'off';
   } else {
     effort = configured ?? defaultThinkingEffortForModel(model);
+    fromGlobalDefault = configured !== undefined;
   }
 
   if (effort === 'off' && model?.alwaysThinking === true) {
-    effort =
-      configured !== undefined && configured !== 'off'
-        ? configured
-        : defaultThinkingEffortForModel(model);
+    const useConfigured = configured !== undefined && configured !== 'off';
+    effort = useConfigured ? configured : defaultThinkingEffortForModel(model);
+    fromGlobalDefault = useConfigured;
   }
+
+  // A global default the model does not declare was never a choice about this
+  // model: it is whatever the last model happened to leave in config.toml. On a
+  // non-strict provider nothing downstream corrects it, so the agent silently
+  // runs at a level outside `support_efforts` — v4flash declares [high, max]
+  // and would run at the global `medium`. Defer to the model's own default;
+  // a level the model does declare still wins, and an effort requested for
+  // this model explicitly is left alone (an unlisted one is deliberate, see
+  // `/effort`).
+  if (fromGlobalDefault && effort !== 'off' && effort !== 'on') {
+    const efforts = effortsFor(model);
+    if (efforts.length > 0 && !efforts.includes(effort)) {
+      effort = defaultThinkingEffortForModel(model);
+    }
+  }
+
   return normalizeThinkingEffortForModel(effort, model, strictValidation);
 }
 

@@ -78,6 +78,31 @@ describe('resolveThinkingEffortForModel', () => {
     expect(resolveThinkingEffortForModel(undefined, { enabled: false }, thinkingModel, true)).toBe('off');
   });
 
+  // The global `[thinking].effort` is whatever the last model left behind. When
+  // the current model does not declare it, a non-strict provider passes it
+  // straight through and the agent runs below every declared level.
+  it('defers a global default the model does not declare to the model default', () => {
+    const declaresHighMax = {
+      capabilities: ['thinking', 'always_thinking'],
+      alwaysThinking: true,
+      supportEfforts: ['high', 'max'],
+      defaultEffort: 'max',
+    };
+
+    expect(resolveThinkingEffortForModel(undefined, { effort: 'medium' }, declaresHighMax, false)).toBe('max');
+    expect(resolveThinkingEffortForModel(undefined, { effort: 'medium' }, declaresHighMax, true)).toBe('max');
+  });
+
+  it('keeps a global default the model does declare', () => {
+    expect(resolveThinkingEffortForModel(undefined, { effort: 'low' }, thinkingModel, false)).toBe('low');
+  });
+
+  it('leaves an effort requested for this model alone even when undeclared', () => {
+    // `/effort` lets an unlisted level through on purpose; only the global
+    // default is second-guessed.
+    expect(resolveThinkingEffortForModel('extreme', { effort: 'low' }, thinkingModel, false)).toBe('extreme');
+  });
+
   it('picks the middle effort when the model declares no default', () => {
     expect(
       defaultThinkingEffortForModel({ capabilities: ['thinking'], supportEfforts: ['low', 'medium', 'high'] }),
