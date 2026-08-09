@@ -142,6 +142,15 @@ interface ModelSelectorDriver extends MessageDriver {
   ): Promise<{ alias: string; thinking: boolean } | undefined>;
 }
 
+interface MakeDriverOptions {
+  /**
+   * Materialize an active session after init (the historical v1
+   * eager-create behavior) even when an explicit startupInput is passed.
+   * Defaults to true when no startupInput is given, false otherwise.
+   */
+  ensureSession?: boolean;
+}
+
 function makeStartupInput(): KimiTUIStartupInput {
   return {
     cliOptions: {
@@ -322,14 +331,16 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
 async function makeDriver(
   session = makeSession(),
   harnessOverrides: Record<string, unknown> = {},
-  startupInput: KimiTUIStartupInput = makeStartupInput(),
+  startupInput: KimiTUIStartupInput | undefined = undefined,
+  opts: MakeDriverOptions = {},
 ): Promise<{
   driver: MessageDriver;
   session: ReturnType<typeof makeSession>;
   harness: ReturnType<typeof makeHarness>;
 }> {
+  const effectiveStartupInput = startupInput ?? makeStartupInput();
   const harness = makeHarness(session, harnessOverrides);
-  const driver = new KimiTUI(harness as never, startupInput) as unknown as MessageDriver;
+  const driver = new KimiTUI(harness as never, effectiveStartupInput) as unknown as MessageDriver;
   vi.spyOn(driver.state.ui, 'requestRender').mockImplementation(() => {});
   vi.spyOn(driver.state.terminal, 'setProgress').mockImplementation(() => {});
   driver.persistInputHistory = vi.fn(async () => {});
@@ -338,9 +349,11 @@ async function makeDriver(
   // pass an explicit startupInput assume an active session (the historical
   // v1 eager-create behavior), so materialize it the same way the first
   // message would. Tests that pass their own startupInput own the startup
-  // state (session-less scenarios) and are left untouched.
+  // state (session-less scenarios) unless they opt in via
+  // `{ ensureSession: true }`.
+  const ensureSessionByDefault = startupInput === undefined;
   if (
-    arguments.length < 3 &&
+    (opts.ensureSession ?? ensureSessionByDefault) &&
     (driver as unknown as { session: unknown }).session === undefined
   ) {
     await (driver as unknown as { ensureSession(): Promise<unknown> }).ensureSession();

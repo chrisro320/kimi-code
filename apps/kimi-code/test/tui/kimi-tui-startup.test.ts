@@ -772,6 +772,29 @@ describe('KimiTUI startup', () => {
     );
   });
 
+  it('passes the --agent/--agent-file binding to the lazy-created first session', async () => {
+    const harness = makeHarness();
+    const driver = makeDriver(
+      harness,
+      {
+        ...makeStartupInput({ model: 'k2', agentFiles: ['agent.md'] }),
+        agentProfile: 'reviewer',
+      },
+    );
+
+    await expect(driver.init()).resolves.toBe(false);
+    await (driver as unknown as { ensureSession(): Promise<unknown> }).ensureSession();
+
+    expect(harness.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workDir: '/tmp/proj-a',
+        model: 'k2',
+        agentProfile: 'reviewer',
+        agentFiles: ['agent.md'],
+      }),
+    );
+  });
+
   it('applies the CLI model override when resuming a startup session', async () => {
     let model = 'k2';
     const session = makeSession({
