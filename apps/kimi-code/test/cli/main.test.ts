@@ -359,13 +359,17 @@ describe('main entry command handling', () => {
     expect(mocks.parse).toHaveBeenCalledWith(process.argv);
   });
 
-  it('sets the process title during startup', () => {
+  it('sets the process title to the command name during startup', () => {
     const originalTitle = process.title;
     try {
       process.title = 'kimi-test-runner';
       main();
 
-      expect(process.title).toBe('kimi-code');
+      // Host tooling identifies a running agent by the foreground process name
+      // and expects the command it launched — Orca refuses to supervise a pane
+      // reporting anything else. Asserted against the literal rather than
+      // CLI_COMMAND_NAME so renaming the command cannot silently pass.
+      expect(process.title).toBe('kimi');
     } finally {
       process.title = originalTitle;
     }
