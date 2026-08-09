@@ -13,7 +13,6 @@ import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile'
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
-import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { SECONDARY_MODEL_SECTION } from '#/app/kosongConfig/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';

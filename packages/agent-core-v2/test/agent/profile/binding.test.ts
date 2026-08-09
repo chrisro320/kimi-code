@@ -877,7 +877,14 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
     await vi.waitFor(() => expect(svc.getSystemPrompt()).toContain('v2 instructions'));
   });
 
-  it('refreshes immediately on a plugin skill-catalog change instead of deferring to a turn boundary', async () => {
+  // 0.34.0 froze the plugin-derived prompt inputs for an agent's lifetime, so a
+  // live agent's prompt cannot move when plugins are installed / enabled /
+  // removed. That is the opposite of what this fork asserted before the merge —
+  // and it is the behaviour this fork wants: a mid-session system-prompt edit
+  // voids the request prefix cache from that point on (see B10 and the upstream
+  // runbook's pit 13). Plugin changes reach the model through /reload or a new
+  // session, which upstream's own docs already state.
+  it('keeps the plugin skill listing frozen for the agent lifetime', async () => {
     let listing = 'catalog-v1';
     const change = new Emitter<string>();
     ctx = createTestAgent(
@@ -898,7 +905,10 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
 
     listing = 'catalog-v2';
     change.fire(PLUGIN_SKILL_SOURCE_ID);
-    await vi.waitFor(() => expect(svc.getSystemPrompt()).toContain('catalog-v2'));
+    // Give the refresh a chance to land before asserting it did not.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(svc.getSystemPrompt()).toContain('catalog-v1');
+    expect(svc.getSystemPrompt()).not.toContain('catalog-v2');
   });
 
   it('refreshes immediately on a session tool-policy change instead of deferring to a turn boundary', async () => {

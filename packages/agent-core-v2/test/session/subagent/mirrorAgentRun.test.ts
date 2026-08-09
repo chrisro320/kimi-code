@@ -58,7 +58,9 @@ function requesterHandle(
       }) as IAgentScopeHandle['accessor']['get'],
     },
     dispose: () => {},
-  } as IAgentScopeHandle;
+    // `as unknown` because 0.34.0 widened IAgentScopeHandle past what this
+    // partial stub covers; matching the other stubs in this file.
+  } as unknown as IAgentScopeHandle;
 }
 
 const USAGE = { inputOther: 1, output: 2, inputCacheRead: 3, inputCacheCreation: 4 };

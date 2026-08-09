@@ -50,7 +50,6 @@ import {
 } from '#/session/agentLifecycle/subagentMetadata';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
-import { IConfigService } from '#/app/config/config';
 import {
   resolveSubagentIsolationMode,
   subagentDisplayModel,

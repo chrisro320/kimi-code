@@ -15,7 +15,6 @@ import type {
   PromptPart,
   Session,
   SessionUsage,
-  TokenUsage,
   SkillSummary,
   TokenUsage,
   WorkspaceTrustInfo,
