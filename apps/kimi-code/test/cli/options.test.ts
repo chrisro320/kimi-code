@@ -241,6 +241,19 @@ describe('CLI options parsing', () => {
     });
   });
 
+  describe('--trust', () => {
+    // Same shape as --effort: `trust` is optional on CLIOptions, so a missing
+    // read in createProgram would type-check and silently drop the flag — and
+    // the symptom would be a worker pane hanging on a dialog nobody can answer.
+    it('parses --trust', () => {
+      expect(parse(['--trust']).trust).toBe(true);
+    });
+
+    it('defaults to false when absent', () => {
+      expect(parse([]).trust).toBe(false);
+    });
+  });
+
   describe('--effort', () => {
     // `effort` is optional on CLIOptions, so a missing read in createProgram
     // would type-check and silently drop the flag.

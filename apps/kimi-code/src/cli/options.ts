@@ -38,6 +38,8 @@ export interface CLIOptions {
   session: string | undefined;
   continue: boolean;
   yolo: boolean;
+  /** `--trust`: grant workspace trust non-interactively at startup. */
+  trust?: boolean;
   auto: boolean;
   plan: boolean;
   model: string | undefined;

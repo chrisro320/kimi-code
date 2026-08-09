@@ -489,6 +489,7 @@ export class KimiTUI {
         sessionFlag: startupInput.cliOptions.session,
         continueLast: startupInput.cliOptions.continue,
         yolo: startupInput.cliOptions.yolo,
+        trust: startupInput.cliOptions.trust,
         auto: startupInput.cliOptions.auto,
         plan: startupInput.cliOptions.plan,
         model: startupInput.cliOptions.model,
@@ -3692,6 +3693,20 @@ export class KimiTUI {
       return false;
     }
     if (info.trusted) return false;
+    if (this.options.startup.trust) {
+      // `--trust`: the launch already carries the decision, so grant it through
+      // the same path the prompt uses and start without a dialog. A pane opened
+      // by an orchestrator has nobody to answer the prompt, and an unanswered
+      // one swallows every keystroke sent to it — the dispatched work would
+      // vanish into the dialog and the coordinator would wait forever.
+      try {
+        await this.harness.trustWorkspace(workDir);
+        return false;
+      } catch {
+        // A failed write leaves the workspace untrusted. Fall through to the
+        // prompt rather than starting as if trust had been granted.
+      }
+    }
     this.startEventLoop();
     const choice = await new Promise<TrustPromptChoice>((resolve) => {
       this.state.activeDialog = 'trust-prompt';

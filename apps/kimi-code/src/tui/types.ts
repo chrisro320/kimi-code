@@ -344,6 +344,8 @@ export interface TUIStartupOptions {
   readonly sessionFlag?: string;
   readonly continueLast: boolean;
   readonly yolo: boolean;
+  /** `--trust`: grant workspace trust instead of prompting. */
+  readonly trust?: boolean;
   readonly auto: boolean;
   readonly plan: boolean;
   readonly model?: string;

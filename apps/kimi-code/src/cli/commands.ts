@@ -47,6 +47,11 @@ export function createProgram(
     .option('-c, --continue', 'Continue the previous session for the working directory.', false)
     .addOption(new Option('-C').hideHelp().default(false))
     .option('-y, --yolo', 'Auto-approve regular tool calls; the agent may still ask questions.', false)
+    .option(
+      '--trust',
+      'Trust this workspace without asking. For non-interactive launches, where the prompt has nobody to answer it.',
+      false,
+    )
     .option('--auto', 'Start in auto permission mode: fully autonomous, the agent will not ask questions.', false)
     .addOption(
       new Option(
@@ -160,6 +165,7 @@ export function createProgram(
       session: sessionValue,
       continue: raw['continue'] === true || raw['C'] === true,
       yolo: yoloValue,
+      trust: raw['trust'] === true,
       auto: autoValue,
       plan: raw['plan'] as boolean,
       model: raw['model'] as string | undefined,
