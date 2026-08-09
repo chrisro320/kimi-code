@@ -10,7 +10,6 @@ import {
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import { isKimiV2Enabled } from '#/cli/experimental-v2';
 import { getTuiConfigPath, parseTuiConfig } from '#/tui/config';
 
 interface WritableLike {
@@ -133,15 +132,10 @@ function resolveDeps(deps: Partial<DoctorDeps> | DoctorDeps | undefined): Resolv
     validateConfigToml:
       deps?.validateConfigToml ??
       (async (text, filePath) => {
-        if (isKimiV2Enabled()) {
-          // Default v2 route (same engine gate as `kimi -p`): validate with
-          // the agent-core-v2 section registry instead of the legacy schema.
-          // Loaded lazily so the v2 module graph stays off the legacy path.
-          const { validateConfigTomlV2 } = await import('../v2/validate-config');
-          return validateConfigTomlV2(text, filePath);
-        }
-        await getConfigRpc().validateConfigToml({ text, filePath });
-        return undefined;
+        // Validate against the agent-core-v2 section registry. Loaded lazily so
+        // the v2 module graph is built only when a validation actually runs.
+        const { validateConfigTomlV2 } = await import('../v2/validate-config');
+        return validateConfigTomlV2(text, filePath);
       }),
   };
 }

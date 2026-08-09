@@ -3,7 +3,7 @@ import { registerMigrateCommand } from '#/migration/index';
 import { Command, InvalidArgumentError, Option } from 'commander';
 
 import type { CLIOptions } from './options';
-import { registerAcpCommand } from './sub/acp';
+import { registerNativeAcpCommand } from './sub/acp-native';
 import { registerDoctorCommand } from './sub/doctor';
 import { registerExportCommand } from './sub/export';
 import { registerLoginCommand } from './sub/login';
@@ -115,7 +115,7 @@ export function createProgram(
 
   registerExportCommand(program);
   registerProviderCommand(program);
-  registerAcpCommand(program);
+  registerNativeAcpCommand(program);
   registerWebCommand(program);
   registerLoginCommand(program);
   registerDoctorCommand(program);
