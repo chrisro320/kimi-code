@@ -17,10 +17,18 @@ export function isThinkingOn(effort: ThinkingEffort): boolean {
  * and records just `enabled`, so the most expensive tier never becomes the
  * global default for every new session. When the model's levels are unknown
  * the concrete effort is persisted as-is.
+ *
+ * `explicitChoice` lifts the top-tier exception. That exception exists to stop
+ * an effort the user merely *saw* — the one a model picker carries alongside
+ * the model — from being promoted to the global default. It must not apply
+ * when the effort is the thing being chosen (`/effort`): there it makes the top
+ * tier unreachable as a default, and the write is dropped while the UI still
+ * reports the change.
  */
 export function thinkingEffortToConfig(
   effort: ThinkingEffort,
   supportEfforts?: readonly string[],
+  options?: { readonly explicitChoice?: boolean },
 ): {
   enabled: boolean;
   effort?: string;
@@ -28,7 +36,9 @@ export function thinkingEffortToConfig(
   if (effort === 'off') return { enabled: false };
   if (effort === 'on') return { enabled: true };
   const top = supportEfforts?.at(-1);
-  if (top !== undefined && effort === top) return { enabled: true };
+  if (top !== undefined && effort === top && options?.explicitChoice !== true) {
+    return { enabled: true };
+  }
   return { enabled: true, effort };
 }
 
