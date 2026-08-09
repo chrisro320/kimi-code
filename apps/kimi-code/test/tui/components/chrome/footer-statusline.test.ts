@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildCustomStatuslinePayload, buildStatuslineRow } from '#/tui/components/chrome/footer';
 import { currentTheme } from '#/tui/theme';
@@ -97,6 +97,11 @@ describe('buildStatuslineRow', () => {
   });
 
   it('shows a TTL countdown after a recent reply and hides it once expired', () => {
+    // Freeze the clock so the boundary assertions pin STATUSLINE_TTL_MS
+    // (1_800_000ms in footer.ts) exactly instead of merely bracketing it.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-15T12:00:00.000Z'));
+
     const live = stripAnsi(
       buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 60_000 }), currentTheme.palette) ??
         '',
@@ -107,12 +112,18 @@ describe('buildStatuslineRow', () => {
       buildStatuslineRow(makeState({ lastReplyAt: undefined }), currentTheme.palette) ?? '',
     );
     expect(none).not.toContain('ttl ');
-    // Older than the 10-min window → hidden.
-    const expired = stripAnsi(
-      buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 700_000 }), currentTheme.palette) ??
+    // 1ms inside the 30-min window: remaining = floor((1_800_000 - 1_799_000) / 1000) = 1s → visible.
+    const inside = stripAnsi(
+      buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 1_799_000 }), currentTheme.palette) ??
         '',
     );
-    expect(expired).not.toContain('ttl ');
+    expect(inside).toMatch(/ttl \d+:\d{2}/);
+    // Exactly at the window: remaining = 0 → hidden (ttlCell hides when remaining <= 0).
+    const atBoundary = stripAnsi(
+      buildStatuslineRow(makeState({ lastReplyAt: Date.now() - 1_800_000 }), currentTheme.palette) ??
+        '',
+    );
+    expect(atBoundary).not.toContain('ttl ');
   });
 
   it('preserves Agora data for custom statusline consumers', () => {
@@ -131,4 +142,9 @@ describe('buildStatuslineRow', () => {
   it('returns null when the statusline is disabled', () => {
     expect(buildStatuslineRow(makeState({ statusline: { enabled: false } }), currentTheme.palette)).toBeNull();
   });
+});
+
+afterEach(() => {
+  // The TTL case freezes the clock; make sure no other case inherits it.
+  vi.useRealTimers();
 });
