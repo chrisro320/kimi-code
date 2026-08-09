@@ -127,11 +127,7 @@ async function applyPlanMode(host: SlashCommandHost, session: Session, enabled: 
 
 export async function handleYoloCommand(host: SlashCommandHost, args: string): Promise<void> {
   const session = host.session;
-  if (session === undefined && !host.engineV2) {
-    host.showError(NO_ACTIVE_SESSION_MESSAGE);
-    return;
-  }
-  // v2 session-less: the chosen mode is recorded in appState and passed to the
+  // Session-less: the chosen mode is recorded in appState and passed to the
   // lazy-created session; apply the runtime permission only when one exists.
 
   const subcmd = args.trim().toLowerCase();
@@ -173,11 +169,7 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
 
 export async function handleAutoCommand(host: SlashCommandHost, args: string): Promise<void> {
   const session = host.session;
-  if (session === undefined && !host.engineV2) {
-    host.showError(NO_ACTIVE_SESSION_MESSAGE);
-    return;
-  }
-  // v2 session-less: the chosen mode is recorded in appState and passed to the
+  // Session-less: the chosen mode is recorded in appState and passed to the
   // lazy-created session; apply the runtime permission only when one exists.
 
   const subcmd = args.trim().toLowerCase();
@@ -484,7 +476,7 @@ async function performModelSwitch(
   effortExplicit = false,
 ): Promise<void> {
   let session = host.session;
-  if (session === undefined && host.engineV2) {
+  if (session === undefined) {
     // A first prompt may still be inside lazy creation: wait it out so the
     // switch lands on the new session instead of being overwritten by its
     // assembly.
@@ -920,12 +912,9 @@ async function applyPermissionChoice(host: SlashCommandHost, mode: PermissionMod
   try {
     if (host.session !== undefined) {
       await host.session.setPermission(mode);
-    } else if (!host.engineV2) {
-      host.showError(NO_ACTIVE_SESSION_MESSAGE);
-      return;
     }
-    // v2 session-less: the chosen mode is recorded in appState and passed to
-    // the lazy-created session.
+    // Session-less: the chosen mode is recorded in appState and passed to the
+    // lazy-created session.
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to set permission mode: ${msg}`);

@@ -121,10 +121,6 @@ export async function runShell(
     startupNotice: configWarning,
     migrationPlan,
     migrateOnly: runOptions.migrateOnly,
-    // Always true now that agent-core-v2 is the only engine. The flag still
-    // threads through the TUI (sessionless start, plugin/capability APIs);
-    // unwinding it there is part of retiring v1, not of dropping the gate.
-    engineV2: true,
   });
 
   initializeCliTelemetry({

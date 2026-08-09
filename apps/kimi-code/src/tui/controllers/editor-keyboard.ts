@@ -11,7 +11,6 @@ import {
   DOUBLE_ESC_WINDOW_MS,
   EXIT_CONFIRM_WINDOW_MS,
   LLM_NOT_SET_MESSAGE,
-  NO_ACTIVE_SESSION_MESSAGE,
 } from '../constant/kimi-tui';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { ImageAttachmentStore } from '../utils/image-attachment-store';
@@ -23,7 +22,6 @@ import type { BtwPanelController } from './btw-panel';
 export interface EditorKeyboardHost {
   state: TUIState;
   session: Session | undefined;
-  readonly engineV2: boolean;
   cancelInFlight: (() => void) | undefined;
   /**
    * The host's harness (KimiTUI always has one). Its `imageLimits` drives
@@ -221,12 +219,8 @@ export class EditorKeyboardController {
         host.handlePlanToggle(next);
       };
       if (host.session === undefined) {
-        if (!host.engineV2) {
-          host.showError(NO_ACTIVE_SESSION_MESSAGE);
-          return;
-        }
-        // v2 session-less: lazy-create the session, then toggle — the same
-        // path /plan takes.
+        // Session-less: lazy-create the session, then toggle — the same path
+        // /plan takes.
         void host.ensureSession().then((session) => {
           if (session !== undefined) togglePlan();
         });

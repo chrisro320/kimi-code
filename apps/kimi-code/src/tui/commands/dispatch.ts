@@ -116,8 +116,6 @@ export interface SlashCommandHost {
   state: TUIState;
   session: Session | undefined;
   readonly harness: KimiHarness;
-  /** agent-core-v2 engine; enables lazy session creation. */
-  readonly engineV2: boolean;
   cancelInFlight: (() => void) | undefined;
   deferUserMessages: boolean;
 
@@ -326,20 +324,15 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
 }
 
 /**
- * Lazy-create the session for a slash command that needs one (v2 engine).
- * v1 keeps the historical "no active session" error; on v2 a missing session
- * means the TUI started session-less, so commands create it on first use.
- * Returns undefined (error already shown) when creation fails.
+ * Lazy-create the session for a slash command that needs one. A missing
+ * session means the TUI started session-less, so commands create it on
+ * first use. Returns undefined (error already shown) when creation fails.
  */
 async function ensureSessionForCommand(host: SlashCommandHost): Promise<Session | undefined> {
-  if (!host.engineV2) {
-    host.showError(LLM_NOT_SET_MESSAGE);
-    return undefined;
-  }
   return host.ensureSession();
 }
 
-/** Builtin commands that need an active session; lazy-created on the v2 engine. */
+/** Builtin commands that need an active session; lazy-created on first use. */
 const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set([
   'btw',
   'compact',

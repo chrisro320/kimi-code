@@ -10,7 +10,6 @@ import {
 } from '@moonshot-ai/kimi-code-sdk';
 import { Markdown, Spacer } from '@moonshot-ai/pi-tui';
 
-import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
 import {
   PluginInstallTrustConfirmComponent,
   PluginMcpSelectorComponent,
@@ -72,16 +71,12 @@ type PluginApi = Pick<
 >;
 
 /**
- * Resolve the plugin-management API. On the v2 engine plugin state is
- * app-global, so a session-less startup still gets a working `/plugins`
- * through the harness's global facade; on v1 (and once a session exists) the
- * session's own API is used.
+ * Resolve the plugin-management API. Plugin state is app-global, so a
+ * session-less startup still gets a working `/plugins` through the harness's
+ * global facade; once a session exists the session's own API is used.
  */
 async function resolvePluginApi(host: SlashCommandHost): Promise<PluginApi> {
   if (host.session !== undefined) return host.session;
-  if (!host.engineV2) {
-    throw new Error(NO_ACTIVE_SESSION_MESSAGE);
-  }
   return {
     listPlugins: () => host.harness.listPlugins(),
     installPlugin: (source) => host.harness.installPlugin(source),
@@ -202,19 +197,14 @@ export async function handlePluginsCommand(host: SlashCommandHost, rawArgs: stri
 }
 
 /**
- * Resolve the capability API. Like plugin state, capability state is
- * app-global on the v2 engine, so a session-less startup still gets
- * readiness and installs through the harness's global facade; with a live
- * session the session's own API is used (v1 included, where the capability
- * surface then reports itself unavailable).
+ * Resolve the capability API. Capability state is app-global, so a
+ * session-less startup still gets readiness and installs through the
+ * harness's global facade; with a live session the session's own API is used.
  */
 type CapabilityApi = Pick<Session, 'listCapabilities' | 'getCapability' | 'installCapability'>;
 
 async function resolveCapabilityApi(host: SlashCommandHost): Promise<CapabilityApi> {
   if (host.session !== undefined) return host.session;
-  if (!host.engineV2) {
-    throw new Error(NO_ACTIVE_SESSION_MESSAGE);
-  }
   return host.harness;
 }
 
@@ -253,12 +243,10 @@ async function showPluginsPicker(
   }
 
   let capabilities: readonly CapabilityStatus[] = [];
-  if (host.engineV2) {
-    try {
-      capabilities = await (await resolveCapabilityApi(host)).listCapabilities();
-    } catch (error) {
-      log.warn('capability status unavailable', { error });
-    }
+  try {
+    capabilities = await (await resolveCapabilityApi(host)).listCapabilities();
+  } catch (error) {
+    log.warn('capability status unavailable', { error });
   }
 
   const installedIds = new Set(plugins.map((plugin) => plugin.id));
@@ -349,7 +337,7 @@ async function loadMarketplaceCatalog(
       workDir: host.state.appState.workDir,
       source,
       builtInEntries:
-        host.engineV2 && isDefaultMarketplaceCatalog(source)
+        isDefaultMarketplaceCatalog(source)
           ? capabilities.map(capabilityMarketplaceEntry)
           : undefined,
     });
@@ -443,7 +431,7 @@ const CAPABILITY_POLL_ATTEMPTS = 260; // ~3 minutes of runtime setup budget
  * Trust keys on the parser-proof `builtIn` flag — the `capability:<id>`
  * source string stays purely diagnostic. */
 function isCapabilityEntry(host: SlashCommandHost, entry: PluginMarketplaceEntry): boolean {
-  return host.engineV2 && entry.builtIn === true;
+  return entry.builtIn === true;
 }
 
 /**
@@ -452,10 +440,7 @@ function isCapabilityEntry(host: SlashCommandHost, entry: PluginMarketplaceEntry
  * entry's detector (seconds of probes) just to print one hint line.
  */
 function isCapabilityPluginId(host: SlashCommandHost, id: string): boolean {
-  return (
-    host.engineV2 &&
-    (id === 'kimi-cu' || id === 'kimi-cu-win' || id === 'kimi-webbridge')
-  );
+  return id === 'kimi-cu' || id === 'kimi-cu-win' || id === 'kimi-webbridge';
 }
 
 /** Poll a background capability install until it settles (or we run out of budget). */
