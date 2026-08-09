@@ -59,6 +59,7 @@ export const DEFAULT_STATUS_LINE_CONFIG: StatusLineConfig = {
 export const TuiConfigFileSchema = z.object({
   theme: TuiThemeSchema.optional(),
   disable_paste_burst: z.boolean().optional(),
+  cache_expiry_hint: z.boolean().optional(),
   editor: z
     .object({
       command: z.string().optional(),
@@ -87,6 +88,9 @@ export const TuiConfigFileSchema = z.object({
 export const TuiConfigSchema = z.object({
   theme: TuiThemeSchema,
   disablePasteBurst: z.boolean(),
+  /** Present in every normalized config; optional only so hand-built test
+   * fixtures from before this field existed still typecheck. */
+  cacheExpiryHint: z.boolean().optional(),
   editorCommand: z.string().nullable(),
   notifications: NotificationsConfigSchema,
   upgrade: UpgradePreferencesSchema,
@@ -121,6 +125,7 @@ export const DEFAULT_STATUSLINE_CONFIG: StatuslineConfig = {
 export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   theme: 'auto',
   disablePasteBurst: false,
+  cacheExpiryHint: true,
   editorCommand: null,
   notifications: DEFAULT_NOTIFICATIONS_CONFIG,
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
@@ -207,6 +212,7 @@ export function normalizeTuiConfig(
   return TuiConfigSchema.parse({
     theme: config.theme ?? DEFAULT_TUI_CONFIG.theme,
     disablePasteBurst: config.disable_paste_burst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
+    cacheExpiryHint: config.cache_expiry_hint ?? DEFAULT_TUI_CONFIG.cacheExpiryHint,
     editorCommand: command === undefined || command.length === 0 ? null : command,
     notifications: {
       enabled: config.notifications?.enabled ?? DEFAULT_NOTIFICATIONS_CONFIG.enabled,
@@ -259,6 +265,7 @@ export function renderTuiConfig(config: TuiConfig): string {
 
 theme = "${escapeTomlBasicString(config.theme)}" # "auto" | "dark" | "light" | custom theme name
 disable_paste_burst = ${String(config.disablePasteBurst)} # true disables non-bracketed paste-burst fallback
+cache_expiry_hint = ${String(config.cacheExpiryHint !== false)} # false disables the "cache expired" dialog on resume / idle submit
 
 [editor]
 command = "${escapeTomlBasicString(config.editorCommand ?? '')}" # Empty uses $VISUAL / $EDITOR

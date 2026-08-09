@@ -33,7 +33,7 @@ Plugins 把可复用的 Kimi Code CLI 能力打包成可安装单元——可以
 | `/plugins mcp enable <id> <server>` | 启用 plugin 声明的 MCP server |
 | `/plugins mcp disable <id> <server>` | 禁用 plugin 声明的 MCP server |
 
-**Installed** tab 列出已安装的 plugin，并在 marketplace 有更新版本时显示更新徽章。当一个使用了过时 plugin（其 MCP 工具或 `/<plugin>:<command>` 斜杠命令）的 turn 结束后，也会出现一次性提示，引导你到 `/plugins` 更新；每个新的 marketplace 版本只提醒一次。在默认 marketplace 中，**Official** 和 **Curated** tab 分别列出 Kimi 官方和合作伙伴 plugin；自定义 marketplace 的非官方条目也会放在 **Curated** 下，但不会显示为 Kimi 合作伙伴。**Custom** tab 从 URL 安装。在 v2 引擎下，**Official** tab 还会列出内置产品能力（Kimi Computer Use——仅限 macOS——和 Kimi WebBridge）。条目的身份和安装操作由客户端提供，marketplace 可以提供版本号，用于普通的 `install` / `installed` / `update` 状态；详细的运行时检查和安装进度写入日志，不再改变已安装状态。对可安装或可更新的条目按回车，会同时刷新二进制运行时和接线 plugin。安装或更新 Kimi WebBridge 时，旧的 standalone Skill 会先移动到 `$KIMI_CODE_HOME/backups/kimi-webbridge-skills/`，再由托管 plugin 接管；旧文件只备份，不删除。marketplace 目录会在需要时自动加载。每个安装会显示信任徽章：`kimi-official`（来自官方地址）、`curated`（来自精选地址）、`third-party`（其他所有情况）。安装第三方 plugin（任何非官方地址的 plugin，包括 Custom 安装）会先显示一个默认「取消」的确认提示，只有在你选择信任该来源后才会继续安装。
+**Installed** tab 列出已安装的 plugin，并在 marketplace 有更新版本时显示更新徽章。当一个使用了过时 plugin（其 MCP 工具或 `/<plugin>:<command>` 斜杠命令）的 turn 结束后，也会出现一次性提示，引导你到 `/plugins` 更新；每个新的 marketplace 版本只提醒一次。在默认 marketplace 中，**Official** 和 **Curated** tab 分别列出 Kimi 官方和合作伙伴 plugin；自定义 marketplace 的非官方条目也会放在 **Curated** 下，但不会显示为 Kimi 合作伙伴。**Custom** tab 从 URL 安装。在 v2 引擎下，**Official** tab 还会列出内置产品能力（支持 macOS 和 Windows x64 的 Kimi Computer Use，以及 Kimi WebBridge）。条目的身份和安装操作由客户端提供，marketplace 可以提供版本号，用于普通的 `install` / `installed` / `update` 状态；详细的运行时检查和安装进度写入日志，不再改变已安装状态。对可安装或可更新的条目按回车，会同时刷新二进制运行时和接线 plugin。安装或更新 Kimi WebBridge 时，旧的 standalone Skill 会先移动到 `$KIMI_CODE_HOME/backups/kimi-webbridge-skills/`，再由托管 plugin 接管；旧文件只备份，不删除。marketplace 目录会在需要时自动加载。每个安装会显示信任徽章：`kimi-official`（来自官方地址）、`curated`（来自精选地址）、`third-party`（其他所有情况）。安装第三方 plugin（任何非官方地址的 plugin，包括 Custom 安装）会先显示一个默认「取消」的确认提示，只有在你选择信任该来源后才会继续安装。
 
 ### 从 GitHub 安装
 
@@ -48,7 +48,7 @@ Plugins 把可复用的 Kimi Code CLI 能力打包成可安装单元——可以
 
 ### 注意事项
 
-- Plugin 变更需要通过 `/reload` 或新会话生效。安装、启用/禁用、移除后，运行 `/reload` 或 `/new`；当前会话不会更新。
+- Plugin 变更在新会话或 `/reload` 后生效：安装、启用、禁用或移除 plugin 后，运行 `/new` 或 `/reload` 应用变更。运行中的会话永远不会吸收 plugin 变更——它保持启动时的系统提示词和工具，并会在 plugin 集变化时收到一条 system reminder。新安装 plugin 的 MCP 工具不会注册到已打开的会话中；被移除 plugin 的 MCP 工具在已打开的会话中仍然可见，但调用会失败并返回移除提示。
 - 本地安装会被拷贝到 `$KIMI_CODE_HOME/plugins/managed/<id>/`，CLI 始终从这份托管副本运行。安装后编辑原始源目录不会生效，需重新安装。
 - 移除 plugin 只会删除安装记录，托管副本和原始源文件仍保留在磁盘上。
 - Plugin 目前按用户安装，对所有项目生效，暂不支持项目级安装范围。
@@ -188,7 +188,7 @@ Plugin 是一个带 manifest 的目录或 zip 文件。Manifest 可以放在以�
 
 `systemPrompt` 字段与 `systemPromptPath` 文件各限制为 32 KB（UTF-8 字节）：超限内容会被忽略，并显示在 plugin 的 diagnostics 中。一次提示词构建最多注入所有已启用 plugin 合计 64 KB 的指令；超出预算的贡献会被跳过并给出警告——单个 plugin 的内联文本与文件合计超过该预算时同样整体跳过。
 
-新会话和新建 Agent 会读取当前已启用 plugin 的指令。正在进行的请求会继续使用已有的系统提示词。`/plugins reload` 会刷新 plugin Skill 列表，并请求重建活跃 Agent 的提示词；如果需要让变更在下一轮前明确收敛，请使用这个命令。在 v2 引擎中，安装、启用、禁用或移除 plugin 会立即更新 catalog，后续的提示词重建（例如压缩上下文或修改工具策略后）可能会读取新的指令。legacy 引擎会让每个活跃 session 保留自己的 plugin 快照，直到 `/plugins reload` 或创建新 session。从磁盘恢复的 session 会先使用持久化的提示词，后续重建再遵循对应引擎的行为。切换 plugin 的 MCP server 不会改变系统提示词指令。
+新会话和新建 Agent 会读取当前已启用 plugin 的指令。每个 Agent 在首次构建系统提示词时快照 plugin 指令和 Skill 列表，因此运行中的会话永远不会吸收 plugin 变更——安装、启用、禁用或移除 plugin 都不会改写活跃会话的提示词，之后的提示词重建（例如压缩上下文或修改工具策略后）也会复用这份快照。运行 `/new` 或 `/reload` 即可让新会话读取当前的 plugin 指令。从磁盘恢复的会话会先使用持久化的提示词，后续重建遵循相同的快照规则。切换 plugin 的 MCP server 不会改变系统提示词指令。
 
 内置 Agent 提示词会自动包含已启用 plugin 的指令。自定义 `SYSTEM.md` 或 Agent 文件完全拥有自己的模板，因此应在希望出现 plugin 指令的位置加入 `${plugin_sections}`。如果自定义模板包含 `${base_prompt}`，且该有效默认提示词已经包含 plugin 块，就不要再重复加入 `${plugin_sections}`。完整变量表见 [自定义 Agent 与 SYSTEM.md](./agents.md#用-system-md-覆盖主-agent-的系统提示词)。
 
@@ -283,7 +283,7 @@ my-plugin/
     reviewer.md
 ```
 
-Plugin Agent 的优先级低于其他文件来源：同名时用户级、额外目录、项目级和 `--agent-file` 的 Agent 都会覆盖 plugin 提供的版本；替换内置 Agent 同样需要在 frontmatter 里显式写 `override: true`。安装、启用、禁用或移除 plugin 后，Agent 列表在新会话（或 `/reload`）时刷新；v2 引擎的当前会话还会在 `/plugins reload` 后刷新。
+Plugin Agent 的优先级低于其他文件来源：同名时用户级、额外目录、项目级和 `--agent-file` 的 Agent 都会覆盖 plugin 提供的版本；替换内置 Agent 同样需要在 frontmatter 里显式写 `override: true`。安装、启用、禁用或移除 plugin 后，Agent 列表在新会话或 `/reload` 后刷新。
 
 ## Plugin 中的 MCP servers
 
@@ -316,7 +316,7 @@ HTTP server（远程服务）：
 
 对于 stdio servers，`command` 可以是 `PATH` 上的命令，也可以是 plugin 根目录内以 `./` 开头的路径。`cwd` 同理，必须以 `./` 开头并位于 plugin 根目录内，否则该 server 会被忽略。
 
-Plugin MCP servers 会在 `/reload` 后或新会话中启动。启用或禁用某个 server：
+Plugin MCP servers 在新会话或 `/reload` 后生效。启用或禁用某个 server：
 
 ```sh
 /plugins mcp disable kimi-finance finance
@@ -325,6 +325,8 @@ Plugin MCP servers 会在 `/reload` 后或新会话中启动。启用或禁用�
 /plugins mcp enable kimi-finance finance
 /reload
 ```
+
+plugin 的 server 被移除或禁用后，它已加载到进行中的会话中的工具仍然可见，但调用会失败并返回移除提示；新会话完全不会注册这些工具。
 
 ## 插件中的 Hooks
 
@@ -357,5 +359,5 @@ Plugin 的加载范围有限，以下操作不会在安装或会话启动时发�
 
 - 不会执行命令型 plugin tools 或旧式工具运行时
 - 所有路径在解析符号链接后仍必须位于 plugin 根目录内
-- 已启用 plugin 的 MCP servers 会在 `/reload` 后或新会话中启动，且可随时从 `/plugins` 禁用
+- 已启用 plugin 的 MCP servers 在新会话或 `/reload` 后启动，且可随时从 `/plugins` 禁用
 - 损坏的 manifest 或不安全路径会显示在 `/plugins info <id>` 的 diagnostics 中，不影响其他会话

@@ -394,6 +394,10 @@ export interface AgentTaskInfo extends TaskInfoBase {
     readonly requestedScope: readonly string[];
     readonly paths: readonly string[];
   };
+  /** Display-normalized bound model alias (populated by the v2 engine). */
+  readonly model?: string;
+  /** The subagent's effective thinking effort at spawn (v2 engine). */
+  readonly thinkingEffort?: string;
 }
 
 export interface QuestionTaskInfo extends TaskInfoBase {
@@ -835,6 +839,13 @@ export interface SubagentSpawnedEvent {
   readonly swarmIndex?: number;
   readonly runInBackground: boolean;
   readonly dispatch?: SubagentDispatchMetadata;
+  /** Model alias the child is bound to, display-normalized (the derived
+   *  `__secondary__` entry resolves to its base alias). Optional so older
+   *  producers/consumers stay wire-compatible. */
+  readonly model?: string;
+  /** The child's effective thinking effort at spawn (same vocabulary as
+   *  `agent.status.updated`). Optional for cross-version tolerance. */
+  readonly thinkingEffort?: string;
 }
 
 export interface SubagentStartedEvent {
@@ -984,7 +995,7 @@ export interface McpServerStatusEvent {
 export interface McpServerStatusPayload {
   readonly name: string;
   readonly transport: 'stdio' | 'http' | 'sse';
-  readonly status: 'pending' | 'connected' | 'failed' | 'disabled' | 'needs-auth';
+  readonly status: 'pending' | 'connected' | 'failed' | 'disabled' | 'needs-auth' | 'removed';
   readonly toolCount: number;
   readonly error?: string;
 }
@@ -1414,6 +1425,8 @@ export const agentTaskInfoSchema = taskInfoBaseSchema.extend({
     requestedScope: z.array(z.string()),
     paths: z.array(z.string()),
   }).optional(),
+  model: z.string().optional(),
+  thinkingEffort: z.string().optional(),
 }) satisfies z.ZodType<AgentTaskInfo>;
 
 export const questionTaskInfoSchema = taskInfoBaseSchema.extend({
@@ -1792,6 +1805,8 @@ export const subagentSpawnedEventSchema = z.object({
       displayName: z.string().optional(),
     })
     .optional(),
+  model: z.string().optional(),
+  thinkingEffort: z.string().optional(),
 }) satisfies z.ZodType<SubagentSpawnedEvent>;
 
 export const subagentStartedEventSchema = z.object({
@@ -1918,7 +1933,7 @@ export const toolListUpdatedEventSchema = z.object({
 export const mcpServerStatusPayloadSchema = z.object({
   name: z.string(),
   transport: z.enum(['stdio', 'http']),
-  status: z.enum(['pending', 'connected', 'failed', 'disabled', 'needs-auth']),
+  status: z.enum(['pending', 'connected', 'failed', 'disabled', 'needs-auth', 'removed']),
   toolCount: z.number(),
   error: z.string().optional(),
 }) satisfies z.ZodType<McpServerStatusPayload>;

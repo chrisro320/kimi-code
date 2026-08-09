@@ -49,7 +49,7 @@ export interface TUIState {
   sessions: SessionRow[];
   loadingSessions: boolean;
   sessionsScope: 'cwd' | 'all';
-  activeDialog: 'session-picker' | 'help' | 'trust-prompt' | null;
+  activeDialog: 'session-picker' | 'help' | 'trust-prompt' | 'cache-hint' | null;
   tasksBrowser: TasksBrowserState | undefined;
   externalEditorRunning: boolean;
   queuedMessages: QueuedMessage[];

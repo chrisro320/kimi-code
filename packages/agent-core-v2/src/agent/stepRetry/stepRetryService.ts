@@ -22,7 +22,8 @@
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope } from '#/app/scopes';
+import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import {
   DEFAULT_MAX_RETRY_ATTEMPTS,
@@ -91,6 +92,7 @@ export const stepRetryCapacityAttemptsKey = defineState<number>(
 export const CAPACITY_RETRY_INTERVAL_MS = 60_000;
 export const CAPACITY_RETRY_BUDGET = 10;
 
+// NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentStepRetryService extends Disposable implements IAgentStepRetryService {
   declare readonly _serviceBrand: undefined;
 

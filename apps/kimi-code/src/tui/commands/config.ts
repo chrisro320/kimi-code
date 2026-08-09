@@ -52,14 +52,16 @@ function hasConversationHistory(host: SlashCommandHost): boolean {
   );
 }
 
-function currentTuiConfig(host: SlashCommandHost): TuiConfig {
+export function currentTuiConfig(host: Pick<SlashCommandHost, 'state'>): TuiConfig {
   return {
     theme: host.state.appState.theme,
     editorCommand: host.state.appState.editorCommand,
     disablePasteBurst: host.state.appState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
+    cacheExpiryHint: host.state.appState.cacheExpiryHint ?? DEFAULT_TUI_CONFIG.cacheExpiryHint,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
     statusline: host.state.appState.statusline ?? DEFAULT_TUI_CONFIG.statusline,
+    statusLine: host.state.appState.statusLine ?? DEFAULT_TUI_CONFIG.statusLine,
   };
 }
 

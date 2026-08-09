@@ -30,11 +30,11 @@ import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { Emitter } from '#/_base/event';
 import { Error2, ErrorCodes } from '#/errors';
 import { join } from 'pathe';
+import { LifecycleScope } from '#/app/scopes';
 import {
   createScopedChildHandle,
   type IAgentScopeHandle,
   type ScopeSeed,
-  LifecycleScope,
   ScopeActivation,
   registerScopedService,
 } from '#/_base/di/scope';
@@ -69,6 +69,7 @@ import {
 
 let nextAgentId = 0;
 
+// NOTE: stays Disposable — its own 'get' and 'config' collide with the Fiber
 export class AgentLifecycleService extends Disposable implements IAgentLifecycleService {
   declare readonly _serviceBrand: undefined;
   private readonly handles = new Map<string, IAgentScopeHandle>();

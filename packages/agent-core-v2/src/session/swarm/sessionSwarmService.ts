@@ -28,8 +28,8 @@
 
 import type { TokenUsage } from '#/kosong/contract/usage';
 import { IModelCatalog } from '#/kosong/model/catalog';
-
-import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope } from '#/app/scopes';
+import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Error2, ErrorCodes } from '#/errors';
 import { linkAbortSignal } from '#/_base/utils/abort';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
@@ -38,6 +38,7 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus } from '#/app/event/eventBus';
+import { IConfigService } from '#/app/config/config';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
@@ -52,6 +53,7 @@ import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent
 import { IConfigService } from '#/app/config/config';
 import {
   resolveSubagentIsolationMode,
+  subagentDisplayModel,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
@@ -351,6 +353,10 @@ export class SessionSwarmService implements ISessionSwarmService {
         description: options.description,
         swarmIndex: options.swarmIndex,
         runInBackground: options.runInBackground,
+        // `final.model`, not `binding.model`: a [subagent.routing.<profile>]
+        // route overrides the binding, and the label has to name the model the
+        // subagent actually runs on.
+        model: subagentDisplayModel(this.config, final.model),
       });
       const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
         cwd: worktree?.cwd ?? callerCwd,
@@ -395,6 +401,7 @@ export class SessionSwarmService implements ISessionSwarmService {
     const profileName =
       child.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_PROFILE_FALLBACK;
     if (!retryTurn) {
+      const resumedModel = child.accessor.get(IAgentProfileService).data().modelAlias;
       emitAgentRunSpawned(caller, agentId, {
         profileName,
         parentToolCallId: options.parentToolCallId,
@@ -402,6 +409,10 @@ export class SessionSwarmService implements ISessionSwarmService {
         description: options.description,
         swarmIndex: options.swarmIndex,
         runInBackground: options.runInBackground,
+        model:
+          resumedModel === undefined
+            ? undefined
+            : subagentDisplayModel(this.config, resumedModel),
       });
     }
     const request = retryTurn

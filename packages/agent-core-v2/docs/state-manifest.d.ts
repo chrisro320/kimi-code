@@ -94,7 +94,7 @@
 //     media.registeredKey                             src/agent/media/mediaToolsRegistrar.ts
 //     media.resolved                                  src/agent/media/videoResolverService.ts
 //     permissionMode.lastMode                         src/agent/permissionMode/injection/permissionModeInjection.ts
-//     plan.wasActive                                  src/agent/plan/injection/planModeInjection.ts
+//     plan.wasActive                                  src/features/plan/injection/planModeInjection.ts
 //     profile.activeToolNamesOverlay                  src/agent/profile/profileService.ts
 //     profile.agentsMdWarning                         src/agent/profile/profileService.ts
 //     profile.emittedPluginBudgetWarnings             src/agent/profile/profileService.ts
@@ -468,6 +468,7 @@ export interface SessionStateSnapshot {
       readonly swarmItem?: string;
     }>>;
     readonly custom?: Record<string, unknown>;
+    readonly lastTurnReason?: 'completed' | 'cancelled' | 'failed';
   } | undefined;
   // src/session/sessionSkillCatalog/skillCatalogService.ts
   'sessionSkillCatalog.contributions': Map<string, {
@@ -1178,8 +1179,6 @@ export interface AgentStateSnapshot {
   }>;
   // src/agent/permissionMode/injection/permissionModeInjection.ts
   'permissionMode.lastMode': 'manual' | 'yolo' | 'auto' | undefined;
-  // src/agent/plan/injection/planModeInjection.ts
-  'plan.wasActive': boolean;
   // src/agent/profile/profileService.ts
   'profile.activeToolNamesOverlay': readonly string[] | undefined;
   'profile.agentsMdWarning': string | undefined;
@@ -1219,6 +1218,8 @@ export interface AgentStateSnapshot {
       readonly requestedScope: readonly string[];
       readonly paths: readonly string[];
     };
+    readonly model?: string;
+    readonly thinkingEffort?: string;
     readonly taskId: string;
     readonly description: string;
     readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
@@ -1268,6 +1269,8 @@ export interface AgentStateSnapshot {
     inputCacheCreation: number;
   } | undefined;
   'usage.currentTurnId': number | undefined;
+  // src/features/plan/injection/planModeInjection.ts
+  'plan.wasActive': boolean;
 }
 
 export type AgentStateKey = keyof AgentStateSnapshot;

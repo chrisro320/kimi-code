@@ -95,6 +95,8 @@ export interface ToolCallSubagentSnapshot {
   readonly agentName: string | undefined;
   /** Display name of the model the subagent is bound to, when known (live only). */
   readonly model?: string;
+  /** Thinking effort, present only for concrete levels (on/off hidden). */
+  readonly effort?: string;
   readonly phase: SubagentPhase | undefined;
   readonly toolCount: number;
   readonly elapsedSeconds: number | undefined;
@@ -601,6 +603,8 @@ export class ToolCallComponent extends Container {
   private subagentUsage: TokenUsage | undefined;
   /** Display name of the model the subagent is bound to (from its `agent.status.updated`). */
   private subagentModel: string | undefined;
+  /** Thinking effort, set only for concrete levels (boolean on/off hidden). */
+  private subagentEffort: string | undefined;
   private subagentResultSummary: string | undefined;
   private subagentError: string | undefined;
   private streamingProgressTimer: ReturnType<typeof setInterval> | undefined;
@@ -905,6 +909,7 @@ export class ToolCallComponent extends Container {
       toolCallDescription: str(this.toolCall.args['description']) || str(this.toolCall.description),
       agentName: this.subagentAgentName,
       model: this.subagentModel,
+      effort: this.subagentEffort,
       phase: derivedPhase,
       toolCount: finished,
       elapsedSeconds: this.getSubagentElapsedSeconds(),
@@ -1170,6 +1175,7 @@ export class ToolCallComponent extends Container {
     contextTokens?: number | undefined;
     usage?: TokenUsage | undefined;
     modelDisplay?: string | undefined;
+    effortDisplay?: string | undefined;
   }): void {
     if (payload.contextTokens !== undefined && payload.contextTokens > 0) {
       this.subagentContextTokens = payload.contextTokens;
@@ -1179,6 +1185,9 @@ export class ToolCallComponent extends Container {
     }
     if (payload.modelDisplay !== undefined) {
       this.subagentModel = payload.modelDisplay;
+    }
+    if (payload.effortDisplay !== undefined) {
+      this.subagentEffort = payload.effortDisplay;
     }
     this.headerText.setText(this.buildHeader());
     this.invalidate();
@@ -1797,6 +1806,7 @@ export class ToolCallComponent extends Container {
   private formatSingleSubagentStatsText(): string {
     const parts: string[] = [];
     if (this.subagentModel !== undefined) parts.push(this.subagentModel);
+    if (this.subagentEffort !== undefined) parts.push(this.subagentEffort);
     parts.push(`${String(this.subToolActivities.size)} tool${this.subToolActivities.size === 1 ? '' : 's'}`);
     const elapsed = this.getSubagentElapsedSeconds();
     if (elapsed !== undefined) parts.push(formatElapsed(elapsed));

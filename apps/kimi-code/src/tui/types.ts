@@ -110,6 +110,8 @@ export interface AppState {
   editorCommand: string | null;
   /** Mirrors the TUI config toggle; defaults to false when absent from older fixtures. */
   disablePasteBurst?: boolean;
+  /** Mirrors the TUI config toggle; defaults to true when absent from older fixtures. */
+  cacheExpiryHint?: boolean;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
   /** Client statusline preferences (bottom quota + cache-hit row). Optional so
@@ -196,6 +198,10 @@ export interface BackgroundAgentMetadata {
   readonly description?: string;
   readonly startedAtMs?: number;
   readonly tokens?: number;
+  /** Display name of the model the agent is bound to (resolved at spawn). */
+  readonly model?: string;
+  /** Thinking effort, set only for concrete levels (boolean on/off hidden). */
+  readonly effort?: string;
 }
 
 export interface ActiveBackgroundAgentStatus {

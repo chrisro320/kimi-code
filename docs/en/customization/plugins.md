@@ -33,7 +33,7 @@ You can also use slash commands directly:
 | `/plugins mcp enable <id> <server>` | Enable an MCP server declared by a plugin |
 | `/plugins mcp disable <id> <server>` | Disable an MCP server declared by a plugin |
 
-The **Installed** tab lists your installed plugins and shows an update badge when a newer version is available in the marketplace. When a turn that used an outdated plugin (its MCP tool or a `/<plugin>:<command>` slash command) ends, a one-time notice also points you to `/plugins` for the update; each new marketplace version is announced once. In the default marketplace, the **Official** and **Curated** tabs list Kimi-maintained and partner plugins; custom marketplaces also place their non-official entries under **Curated** without presenting them as Kimi partners. The **Custom** tab installs from a URL. On the v2 engine, the Official tab also lists the built-in product capabilities (Kimi Computer Use — macOS only — and Kimi WebBridge). Their identity and install action come from the client, while the marketplace may supply a version for the normal `install` / `installed` / `update` status. Detailed runtime checks and install progress go to the log instead of changing the installed state. Pressing Enter for an install or update refreshes the binary runtime and wiring plugin together. When Kimi WebBridge is installed or updated, legacy standalone copies of its Skill are moved to `$KIMI_CODE_HOME/backups/kimi-webbridge-skills/` before the managed plugin takes over; the old files are backed up, not deleted. Marketplace catalogs load automatically when needed. Each install shows a trust badge: `kimi-official` (from an official address), `curated` (from a curated address), or `third-party` (everything else). Installing a third-party plugin (anything not from the official address, including Custom installs) first shows a confirmation prompt that defaults to cancelling, so it is only installed if you choose to trust the source.
+The **Installed** tab lists your installed plugins and shows an update badge when a newer version is available in the marketplace. When a turn that used an outdated plugin (its MCP tool or a `/<plugin>:<command>` slash command) ends, a one-time notice also points you to `/plugins` for the update; each new marketplace version is announced once. In the default marketplace, the **Official** and **Curated** tabs list Kimi-maintained and partner plugins; custom marketplaces also place their non-official entries under **Curated** without presenting them as Kimi partners. The **Custom** tab installs from a URL. On the v2 engine, the Official tab also lists the built-in product capabilities (Kimi Computer Use on macOS and Windows x64, and Kimi WebBridge). Their identity and install action come from the client, while the marketplace may supply a version for the normal `install` / `installed` / `update` status. Detailed runtime checks and install progress go to the log instead of changing the installed state. Pressing Enter for an install or update refreshes the binary runtime and wiring plugin together. When Kimi WebBridge is installed or updated, legacy standalone copies of its Skill are moved to `$KIMI_CODE_HOME/backups/kimi-webbridge-skills/` before the managed plugin takes over; the old files are backed up, not deleted. Marketplace catalogs load automatically when needed. Each install shows a trust badge: `kimi-official` (from an official address), `curated` (from a curated address), or `third-party` (everything else). Installing a third-party plugin (anything not from the official address, including Custom installs) first shows a confirmation prompt that defaults to cancelling, so it is only installed if you choose to trust the source.
 
 ### Installing from GitHub
 
@@ -48,7 +48,7 @@ Network requests only go through `github.com` redirects and `codeload.github.com
 
 ### Notes
 
-- Plugin changes apply after `/reload` or in new sessions. After installing, enabling/disabling, or removing a plugin, run `/reload` or `/new`; the current session will not update.
+- Plugin changes apply in new sessions or after `/reload`: run `/new` or `/reload` after installing, enabling, disabling, or removing a plugin. A running session never picks up plugin changes — it keeps the system prompt and tools it started with, and receives a system reminder when the plugin set changes. MCP tools from a newly installed plugin are not registered in already-open sessions; tools from a removed plugin stay visible there, but calls to them fail with a removal notice.
 - Local installations are copied to `$KIMI_CODE_HOME/plugins/managed/<id>/`, and the CLI always runs from this managed copy. Editing the original source directory after installation has no effect; you must reinstall.
 - Removing a plugin only deletes the installation record; the managed copy and original source files remain on disk.
 - Plugins are currently installed per-user and apply to all projects; project-level installation scope is not yet supported.
@@ -188,7 +188,7 @@ System-prompt contributions take effect on every surface — the interactive TUI
 
 Each field — the inline `systemPrompt` and the `systemPromptPath` file — is limited to 32 KB (UTF-8 bytes): oversized content is ignored and reported in the plugin diagnostics. Across all enabled plugins, one prompt build injects at most 64 KB of instructions; contributions beyond the budget are skipped with a warning, including a single plugin whose inline text and file together exceed that budget.
 
-New sessions and newly created agents read the contributions from the plugins currently enabled. An in-flight request keeps its existing system prompt. `/plugins reload` refreshes the plugin skill list and requests prompt rebuilds for live agents; use it when you need the change to converge deliberately before the next turn. On the v2 engine, installing, enabling, disabling, or removing a plugin updates the catalog immediately and a later prompt rebuild — for example after compaction or a tool-policy change — may pick up the new sections. The legacy engine keeps each live session's plugin snapshot until `/plugins reload` or a new session. A resumed session starts from its persisted prompt, and later rebuilds follow the engine-specific behavior above. Toggling a plugin's MCP server does not change system-prompt sections.
+New sessions and newly created agents read the contributions from the plugins currently enabled. Each agent snapshots the plugin instructions and skill listing when its system prompt is first built, so a running session never picks up plugin changes — installing, enabling, disabling, or removing a plugin never rewrites a live prompt, and even later rebuilds, for example after compaction or a tool-policy change, reuse the snapshot. Run `/new` or `/reload` to start a session that picks up the current contributions. A resumed session starts from its persisted prompt, and later rebuilds follow the same snapshot rules. Toggling a plugin's MCP server does not change system-prompt sections.
 
 The built-in agent prompt includes instructions from enabled plugins automatically. A custom `SYSTEM.md` or agent file owns its template, so include `${plugin_sections}` where plugin-contributed instructions should appear. If the custom template includes `${base_prompt}` and that effective default already contains the plugin block, do not add `${plugin_sections}` again. See [Custom agents and SYSTEM.md](./agents.md#overriding-the-main-agent-s-system-prompt-with-system-md) for the complete variable table.
 
@@ -283,7 +283,7 @@ my-plugin/
     reviewer.md
 ```
 
-Plugin agents rank below every other file source: on a name collision, user-level, extra, project-level, and `--agent-file` agents all win over the plugin-provided one, and replacing a built-in agent still requires an explicit `override: true` in the frontmatter. After installing, enabling, disabling, or removing a plugin, the agent list refreshes in a new session (or on `/reload`); on the v2 engine the live session also refreshes after `/plugins reload`.
+Plugin agents rank below every other file source: on a name collision, user-level, extra, project-level, and `--agent-file` agents all win over the plugin-provided one, and replacing a built-in agent still requires an explicit `override: true` in the frontmatter. After installing, enabling, disabling, or removing a plugin, the agent list refreshes in a new session or after `/reload`.
 
 ## MCP Servers in Plugins
 
@@ -316,7 +316,7 @@ HTTP server (remote service):
 
 For stdio servers, `command` can be a command on `PATH` or a path starting with `./` within the plugin root directory. `cwd` likewise must start with `./` and be within the plugin root directory; otherwise the server is ignored.
 
-Plugin MCP servers start after `/reload` or in new sessions. To enable or disable a server:
+Plugin MCP servers take effect in new sessions or after `/reload`. To enable or disable a server:
 
 ```sh
 /plugins mcp disable kimi-finance finance
@@ -325,6 +325,8 @@ Plugin MCP servers start after `/reload` or in new sessions. To enable or disabl
 /plugins mcp enable kimi-finance finance
 /reload
 ```
+
+When a plugin's server is removed or disabled, tools it had loaded into an open session stay visible there, but calls to them fail with a removal notice, and new sessions do not register them at all.
 
 ## Hooks in Plugins
 
@@ -357,5 +359,5 @@ Plugins have a limited loading scope. The following operations do not occur duri
 
 - Command-type plugin tools and legacy tool runtimes are not executed
 - All paths must remain within the plugin root directory after symbolic link resolution
-- MCP servers of enabled plugins start after `/reload` or in new sessions and can be disabled at any time from `/plugins`
+- MCP servers of enabled plugins start in new sessions or after `/reload` and can be disabled at any time from `/plugins`
 - Broken manifests or unsafe paths appear in `/plugins info <id>` diagnostics and do not affect other sessions

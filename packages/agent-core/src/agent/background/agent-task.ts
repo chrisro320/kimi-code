@@ -18,6 +18,10 @@ export interface AgentBackgroundTaskInfo extends BackgroundTaskInfoBase {
     readonly requestedScope: readonly string[];
     readonly paths: readonly string[];
   };
+  /** Display-normalized bound model alias (populated by the v2 engine). */
+  readonly model?: string;
+  /** The subagent's effective thinking effort at spawn (v2 engine). */
+  readonly thinkingEffort?: string;
 }
 
 export class AgentBackgroundTask implements BackgroundTask {

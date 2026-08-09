@@ -21,9 +21,10 @@
  * requests the refresh and the loop applies it at the next turn boundary.
  */
 
-import { Disposable } from "#/_base/di/lifecycle";
+import { Service } from "#/_base/di/service";
 import { IInstantiationService } from '#/_base/di/instantiation';
-import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope } from '#/app/scopes';
+import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ILogService, type LogContext } from '#/_base/log/log';
 import { defineState } from '#/_base/state/stateRegistry';
 import { renderPrompt } from "#/_base/utils/render-prompt";
@@ -141,7 +142,7 @@ export const fullCompactionActiveTurnIdKey = defineState<number | undefined>(
   () => undefined as number | undefined,
 );
 
-export class AgentFullCompactionService extends Disposable implements IAgentFullCompactionService {
+export class AgentFullCompactionService extends Service implements IAgentFullCompactionService {
   declare readonly _serviceBrand: undefined;
   readonly hooks: IAgentFullCompactionService['hooks'] = {
     onWillCompact: new OrderedHookSlot<FullCompactionTask>(),
