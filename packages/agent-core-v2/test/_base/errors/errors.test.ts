@@ -35,6 +35,25 @@ describe('onUnexpectedError + setUnexpectedErrorHandler', () => {
     expect(bSeen).toHaveLength(1);
   });
 
+  it('setUnexpectedErrorHandler returns the replaced handler for later restore', () => {
+    const aSeen: unknown[] = [];
+    const bSeen: unknown[] = [];
+
+    setUnexpectedErrorHandler((err) => aSeen.push(err));
+    const previous = setUnexpectedErrorHandler((err) => bSeen.push(err));
+    onUnexpectedError(new Error('after-replace'));
+
+    expect(aSeen).toHaveLength(0);
+    expect(bSeen).toHaveLength(1);
+
+    // Re-installing the returned handler reactivates the replaced one.
+    setUnexpectedErrorHandler(previous);
+    onUnexpectedError(new Error('after-restore'));
+
+    expect(aSeen).toHaveLength(1);
+    expect(bSeen).toHaveLength(1);
+  });
+
   it('a throwing handler does not propagate', () => {
     setUnexpectedErrorHandler(() => {
       throw new Error('handler-boom');

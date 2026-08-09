@@ -83,6 +83,19 @@ export { SECONDARY_DERIVED_MODEL_ALIAS } from '@moonshot-ai/agent-core';
 // outbound fetch honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY.
 export { installGlobalProxyDispatcher } from '@moonshot-ai/agent-core';
 
+// Process-wide unexpected-error reporting hook (agent-core-v2 engine) —
+// surfaces exceptions thrown by engine-internal listener callbacks. The TUI
+// installs a handler for its lifetime so those errors render through the
+// managed status component instead of a raw stderr write to the PTY;
+// `setUnexpectedErrorHandler` returns the replaced handler so the installer
+// can restore exactly what it swapped out on shutdown.
+export {
+  onUnexpectedError,
+  resetUnexpectedErrorHandler,
+  setUnexpectedErrorHandler,
+} from '@moonshot-ai/agent-core-v2/_base/errors/unexpectedError';
+export type { UnexpectedErrorHandler } from '@moonshot-ai/agent-core-v2/_base/errors/unexpectedError';
+
 // Image compression — ingestion sites (e.g. the CLI's clipboard paste, the ACP
 // adapter) shrink oversized images while constructing the content part, before
 // it enters a prompt. Best effort: returns the original on any failure.

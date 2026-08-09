@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
-import { effectiveModelAlias, log } from '@moonshot-ai/kimi-code-sdk';
+import { effectiveModelAlias, log, setUnexpectedErrorHandler } from '@moonshot-ai/kimi-code-sdk';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -17,6 +17,7 @@ import type {
   SkillSummary,
   ThinkingEffort,
   TokenUsage,
+  UnexpectedErrorHandler,
   WorkspaceTrustInfo,
 } from '@moonshot-ai/kimi-code-sdk';
 import type { MigrationPlan } from '@moonshot-ai/migration-legacy';
@@ -275,6 +276,18 @@ function positiveNumber(value: unknown): number {
 }
 
 /**
+ * One-line message for the unexpected-error status component: the error
+ * message only (never the stack — a multi-line stack would break the status
+ * row's single-line rendering). KimiError payloads get the `[code] message`
+ * form via {@link formatErrorMessage}.
+ */
+function formatUnexpectedErrorStatus(err: unknown): string {
+  const message = formatErrorMessage(err);
+  const firstLine = message.split('\n')[0] ?? '';
+  return firstLine !== '' ? firstLine : String(err);
+}
+
+/**
  * Fold a per-model {@link SessionUsage} into the scalar totals the statusline
  * needs: total tokens (all input kinds + output), the input total, and the
  * cache-read portion (for cache-hit ratios).
@@ -379,6 +392,10 @@ export class KimiTUI {
   private uninstallRainbowDance: () => void;
   private signalCleanupHandlers: Array<() => void> = [];
   private isShuttingDown = false;
+  // The process-global unexpected-error handler this instance replaced while
+  // the TUI was live; restored (exactly this handler, not the module default)
+  // on stop() so nested TUI lifetimes chain correctly.
+  private unexpectedErrorHandlerToRestore: UnexpectedErrorHandler | undefined;
   private backgroundRefreshPromise: Promise<void> | undefined;
   private readonly migrationPlan: MigrationPlan | null;
   private readonly migrateOnly: boolean;
@@ -611,6 +628,9 @@ export class KimiTUI {
     startupTrace('tui:start');
     // Signal handlers must be installed before raw mode to avoid EIO loops.
     this.registerSignalHandlers();
+    // Route engine listener errors into the managed status for the whole TUI
+    // lifetime; restored in stop() / on startup failure below.
+    this.installUnexpectedErrorHandler();
     // Outer try rolls back signal listeners on startup failure.
     try {
       if (this.migrationPlan !== null) {
@@ -622,6 +642,7 @@ export class KimiTUI {
             const failed = migrationResult.decision === 'now' && migrationResult.migrated === false;
             this.disposeTerminalTracking();
             this.state.ui.stop();
+            this.restoreUnexpectedErrorHandler();
             await this.onExit?.(failed ? 1 : 0);
             return;
           }
@@ -662,6 +683,7 @@ export class KimiTUI {
       }
     } catch (error) {
       this.unregisterSignalHandlers();
+      this.restoreUnexpectedErrorHandler();
       throw error;
     }
   }
@@ -997,6 +1019,9 @@ export class KimiTUI {
       } catch {
         // best effort terminal restore.
       }
+      // The TUI render machinery is dead — hand the unexpected-error handler
+      // back to whoever owned it before this instance started.
+      this.restoreUnexpectedErrorHandler();
     }
     if (this.onExit) {
       await this.onExit(exitCode);
@@ -1638,6 +1663,27 @@ export class KimiTUI {
     } catch {
       return 0;
     }
+  }
+
+  // ── Unexpected-error reporting handler ──────────────────────────────────
+  // The engine reports listener-callback exceptions through a process-global
+  // handler whose default writes to stderr. While the TUI owns the screen, a
+  // raw stderr write bypasses the pi-tui ledger and drifts the cursor, so the
+  // TUI installs its own handler for its lifetime and routes the error into
+  // the managed status component instead. stop() restores the exact handler
+  // this instance replaced — never the module default — so nested or
+  // consecutive TUI lifetimes restore the chain correctly.
+  private installUnexpectedErrorHandler(): void {
+    if (this.unexpectedErrorHandlerToRestore !== undefined) return;
+    this.unexpectedErrorHandlerToRestore = setUnexpectedErrorHandler((err) => {
+      this.showError(formatUnexpectedErrorStatus(err));
+    });
+  }
+
+  private restoreUnexpectedErrorHandler(): void {
+    if (this.unexpectedErrorHandlerToRestore === undefined) return;
+    setUnexpectedErrorHandler(this.unexpectedErrorHandlerToRestore);
+    this.unexpectedErrorHandlerToRestore = undefined;
   }
 
   // ── Statusline background poller ────────────────────────────────────────

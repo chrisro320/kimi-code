@@ -12,8 +12,10 @@ const defaultHandler: UnexpectedErrorHandler = (err) => {
 
 let currentHandler: UnexpectedErrorHandler = defaultHandler;
 
-export function setUnexpectedErrorHandler(handler: UnexpectedErrorHandler): void {
+export function setUnexpectedErrorHandler(handler: UnexpectedErrorHandler): UnexpectedErrorHandler {
+  const previous = currentHandler;
   currentHandler = handler;
+  return previous;
 }
 
 export function resetUnexpectedErrorHandler(): void {
