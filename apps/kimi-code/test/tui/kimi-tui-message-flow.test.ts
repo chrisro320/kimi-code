@@ -2782,6 +2782,9 @@ command = "vim"
     vi.useFakeTimers();
     try {
       const { driver } = await makeDriver();
+      // Session activation starts the statusline poller (a 20s interval);
+      // drop it so runAllTimersAsync below does not loop on it forever.
+      (driver as unknown as { stopStatuslinePolling(): void }).stopStatuslinePolling();
       const sendQueued = vi.fn();
       driver.state.appState.streamingPhase = 'waiting';
       driver.state.appState.streamingStartTime = 1;
@@ -3393,6 +3396,9 @@ command = "vim"
     vi.useFakeTimers();
     try {
       const { driver } = await makeDriver();
+      // Session activation starts the statusline poller (a 20s interval);
+      // drop it so runAllTimersAsync below does not loop on it forever.
+      (driver as unknown as { stopStatuslinePolling(): void }).stopStatuslinePolling();
       const sendQueued = vi.fn();
       driver.sessionEventHandler.handleEvent(
         {

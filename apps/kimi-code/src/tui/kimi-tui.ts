@@ -1959,6 +1959,7 @@ export class KimiTUI {
     }
     this.sessionEventHandler.startSubscription();
     void this.showSessionWarnings(session);
+    this.startStatuslinePolling();
     // The session-only thinking override was consumed by this session; the
     // runtime status now owns the displayed effort.
     if (this.state.appState.lazySessionThinking !== undefined) {
@@ -2190,6 +2191,7 @@ export class KimiTUI {
       this.showError(`Failed to replay session history: ${msg}`);
     } finally {
       this.sessionEventHandler.startSubscription();
+      this.startStatuslinePolling();
     }
     const resumeState = session.getResumeState();
     if (resumeState?.warning !== undefined) {
@@ -2281,6 +2283,7 @@ export class KimiTUI {
     this.clearTranscriptAndRedraw();
     if (announce) this.showStatus(`Started a new session (${session.id}).`);
     void this.showSessionWarnings(session);
+    this.startStatuslinePolling();
     void this.showConfigWarningsIfAny();
     return session;
   }

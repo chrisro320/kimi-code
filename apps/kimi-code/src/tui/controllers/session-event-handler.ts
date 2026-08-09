@@ -924,6 +924,12 @@ export class SessionEventHandler {
   }
 
   private handleSessionWarning(event: WarningEvent): void {
+    if (event.code === 'compaction-replay-estimate') {
+      // D-1: post-compaction replay cost is informational — show the raw
+      // message as a dim status line (no `Warning:` prefix, no amber).
+      this.host.showStatus(event.message);
+      return;
+    }
     this.host.showStatus(`Warning: ${event.message}`, 'warning');
   }
 
