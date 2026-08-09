@@ -116,6 +116,13 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
   applyCompaction(input: ContextCompactionInput): ContextCompactionResult {
     const history = this.get();
     const result = buildContextCompactionShape(history, input, this.tokenEstimateFns);
+    if (result.estimateNote !== undefined) {
+      this.eventBus.publish({
+        type: 'warning',
+        code: 'compaction-replay-estimate',
+        message: result.estimateNote,
+      });
+    }
     this.wire.dispatch(
       contextApplyCompaction({
         summary: result.summary,
@@ -144,8 +151,9 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
       messages: [...result.messages],
       tokens: result.tokensAfter,
     });
-    const { messages: _messages, ...publicResult } = result;
+    const { messages: _messages, estimateNote: _estimateNote, ...publicResult } = result;
     void _messages;
+    void _estimateNote;
     return publicResult;
   }
 

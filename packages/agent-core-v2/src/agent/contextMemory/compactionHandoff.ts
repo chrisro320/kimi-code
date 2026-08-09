@@ -13,7 +13,6 @@
 
 import { estimateTokens, estimateTokensForMessage, estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { replayContribution, type CompactionCheckpoint } from '#/kosong/contract/compaction';
-import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import type { ContentPart } from '#/kosong/contract/message';
 import summaryPrefixTemplate from './compaction-summary-prefix.md?raw';
 import type { ContextMessage, PromptOrigin } from './types';
@@ -75,6 +74,10 @@ export interface ContextCompactionShape {
   readonly keptHeadUserMessageCount?: number;
   readonly droppedCount?: number;
   readonly checkpoint?: CompactionCheckpoint;
+  /** Present when the checkpoint replay cost is `unknown`: the caller (the
+   *  live path) surfaces this as a user-visible warning; replay paths have
+   *  no event bus and drop it silently. */
+  readonly estimateNote?: string;
   readonly messages: readonly ContextMessage[];
 }
 
@@ -120,14 +123,13 @@ export function buildContextCompactionShape(
   // a diagnostic) instead of adding to it: the checkpoint subsumes everything
   // the compacted tail covered, so counting both double-charges the budget.
   let replayTokens: number;
+  let estimateNote: string | undefined;
   if (input.checkpoint === undefined) {
     replayTokens = input.summaryOutputTokens ?? estimate.text(contextSummary);
   } else {
     const contribution = replayContribution(input.checkpoint);
     replayTokens = contribution.tokens;
-    if (contribution.diagnostic !== undefined) {
-      onUnexpectedError(new Error(contribution.diagnostic));
-    }
+    estimateNote = contribution.diagnostic;
   }
   const tokensAfter =
     input.tokensAfter ?? replayTokens + estimate.messages(keptMessages);
@@ -146,6 +148,7 @@ export function buildContextCompactionShape(
     keptHeadUserMessageCount,
     droppedCount: input.droppedCount,
     checkpoint: input.checkpoint,
+    estimateNote,
     messages: [...keptMessages, createCompactionSummaryMessage(contextSummary, input.checkpoint)],
   };
 }

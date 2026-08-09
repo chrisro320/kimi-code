@@ -32,6 +32,7 @@ import {
 } from '#/agent/tokenCounting/tokenCounting';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
+import type { WarningEvent } from '#/agent/profile/profileService';
 import type { CompactionCheckpoint } from '#/kosong/contract/compaction';
 import {
   estimateTokens,
@@ -76,6 +77,7 @@ interface Host {
   wire: IWireService;
   svc: IAgentContextMemoryService;
   log: IAppendLogStore;
+  eventBus: IEventBus;
 }
 
 let disposables: DisposableStore;
@@ -91,11 +93,12 @@ function buildHost(key: string): Host {
     estimateMessages: estimateTokensForMessages,
   } as unknown as IAgentTokenCountingService);
   ix.set(IAgentContextMemoryService, new SyncDescriptor(AgentContextMemoryService));
+  const eventBus = ix.get(IEventBus);
   const wire = registerTestAgentWire(ix, testWireScope(SCOPE, key), {
     log: ix.get(IAppendLogStore),
-    eventBus: ix.get(IEventBus),
+    eventBus,
   });
-  return { wire, svc: ix.get(IAgentContextMemoryService), log: ix.get(IAppendLogStore) };
+  return { wire, svc: ix.get(IAgentContextMemoryService), log: ix.get(IAppendLogStore), eventBus };
 }
 
 async function readRecords(log: IAppendLogStore, key: string): Promise<WireRecord[]> {
@@ -252,9 +255,10 @@ describe('compaction checkpoint carrier', () => {
     );
     // 500 (checkpoint replay) + 200 (two retained messages) — NOT + 1000 summary.
     expect(shape.tokensAfter).toBe(700);
+    expect(shape.estimateNote).toBeUndefined();
   });
 
-  it('checkpoint replay tokens REPLACE the summary contribution (unknown books 0 + diagnostic)', () => {
+  it('checkpoint replay tokens REPLACE the summary contribution (unknown books 0 + estimate note)', () => {
     const diagnostics: unknown[] = [];
     setUnexpectedErrorHandler((err) => diagnostics.push(err));
     const estimate: TokenEstimate = {
@@ -273,7 +277,91 @@ describe('compaction checkpoint carrier', () => {
       estimate,
     );
     expect(shape.tokensAfter).toBe(200);
-    expect(diagnostics.length).toBeGreaterThan(0);
+    // The unknown replay estimate is a NORMAL contract branch — it must not
+    // trip the unexpected-error handler; the diagnostic rides out as a note
+    // for the caller to surface as a warning instead.
+    expect(diagnostics).toEqual([]);
+    expect(shape.estimateNote).toBeTypeOf('string');
+    expect(shape.estimateNote!).toMatch(/replay cost is unknown/);
+  });
+
+  it('live applyCompaction publishes exactly one warning for an unknown replay estimate', () => {
+    const host = buildHost(KEY);
+    const diagnostics: unknown[] = [];
+    setUnexpectedErrorHandler((err) => diagnostics.push(err));
+    const warnings: WarningEvent[] = [];
+    disposables.add(
+      host.eventBus.subscribe('warning', (event) => {
+        warnings.push(event);
+      }),
+    );
+    host.svc.append(userMessage('old fact'));
+    host.svc.append(userMessage('recent question'));
+    host.svc.applyCompaction({
+      summary: 'summary of old fact',
+      compactedCount: 2,
+      tokensBefore: 1234,
+      checkpoint: makeCheckpoint({ replayInputTokens: { kind: 'unknown' } }),
+    });
+    expect(diagnostics).toEqual([]);
+    expect(warnings).toEqual([
+      {
+        type: 'warning',
+        code: 'compaction-replay-estimate',
+        message: expect.stringMatching(/post-compaction token count is an underestimate/) as string,
+      },
+    ]);
+  });
+
+  it('live applyCompaction with a measured replay estimate publishes no warning', () => {
+    const host = buildHost(KEY);
+    const warnings: WarningEvent[] = [];
+    disposables.add(
+      host.eventBus.subscribe('warning', (event) => {
+        warnings.push(event);
+      }),
+    );
+    host.svc.append(userMessage('old fact'));
+    host.svc.applyCompaction({
+      summary: 'summary of old fact',
+      compactedCount: 1,
+      tokensBefore: 1234,
+      checkpoint: makeCheckpoint(),
+    });
+    expect(warnings).toEqual([]);
+  });
+
+  it('replay with an unknown replay estimate stays silent (no warning, no unexpected error)', async () => {
+    const key = `${REPLAY_KEY}-unknown-silent`;
+    const host = buildHost(key);
+    const diagnostics: unknown[] = [];
+    setUnexpectedErrorHandler((err) => diagnostics.push(err));
+    const warnings: WarningEvent[] = [];
+    disposables.add(
+      host.eventBus.subscribe('warning', (event) => {
+        warnings.push(event);
+      }),
+    );
+    await restoreTestAgentWire(host.wire, host.log, testWireScope(SCOPE, key), [
+      { type: 'context.append_message', message: userMessage('old') },
+      {
+        type: 'context.apply_compaction',
+        summary: 'valid summary',
+        compactedCount: 1,
+        tokensBefore: 100,
+        tokensAfter: 20,
+        // Without this the record reads as the legacy tail shape, which never
+        // consults the checkpoint — the unknown branch must actually run.
+        keptUserMessageCount: 1,
+        checkpoint: makeCheckpoint({ replayInputTokens: { kind: 'unknown' } }),
+      },
+    ]);
+
+    const model = restoredModel(host);
+    expect(model.some((m) => m.origin?.kind === 'compaction_summary')).toBe(true);
+    // The replay path has no event bus — the estimate note is dropped silently.
+    expect(diagnostics).toEqual([]);
+    expect(warnings).toEqual([]);
   });
 
   it('a restored checkpoint is not double-counted by the message estimator', async () => {
