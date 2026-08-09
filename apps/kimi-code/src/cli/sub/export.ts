@@ -14,7 +14,6 @@ import {
   withTelemetryContext,
 } from '@moonshot-ai/kimi-telemetry';
 import {
-  createKimiHarness,
   createKimiHarnessV2,
   type ExportSessionInput,
   type ExportSessionResult,
@@ -30,8 +29,6 @@ import { createCliTelemetryBootstrap, initializeCliTelemetry } from '#/cli/telem
 import { detectInstallSource } from '#/cli/update/source';
 import { createKimiCodeHostIdentity } from '#/cli/version';
 import { detectShellEnvironment } from '#/utils/process/shell-env';
-
-import { isKimiV2Enabled } from '../experimental-v2';
 
 interface WritableLike {
   write(chunk: string): boolean;
@@ -155,9 +152,8 @@ function createDefaultExportDeps(overrides: Partial<ExportDeps> = {}): ExportDep
   };
   const getHarness = (): KimiHarness => {
     const currentTelemetryBootstrap = getTelemetryBootstrap();
-    // Same engine gate as `kimi -p` / the TUI: the SDK's v2-backed harness by
-    // default, the legacy agent-core harness when KIMI_CODE_LEGACY_FLAG is set.
-    harness ??= (isKimiV2Enabled() ? createKimiHarnessV2 : createKimiHarness)({
+    // Same engine as `kimi -p` / the TUI: the SDK's v2-backed harness.
+    harness ??= createKimiHarnessV2({
       homeDir: currentTelemetryBootstrap.homeDir,
       identity,
       telemetry: telemetryClient,

@@ -1,13 +1,11 @@
 /**
  * Minimal harness/session surface consumed by `kimi -p` (print mode).
  *
- * `run-prompt.ts` only needs a small subset of the SDK `KimiHarness` / `Session`
- * API. Coding the print-mode driver against these narrow interfaces — instead of
- * the concrete SDK classes — lets the same driver run on either the legacy
- * engine (`createKimiHarness`) or the default agent-core-v2 engine
- * (`createPromptHarnessV2`, selected unless `KIMI_CODE_LEGACY_FLAG` is truthy).
- * Both the legacy `KimiHarness` / `Session` and the v2 harness structurally
- * satisfy these interfaces, so no adapter wrappers are needed on the legacy path.
+ * The print-mode driver only needs a small subset of the SDK `KimiHarness` /
+ * `Session` API. Coding it against these narrow interfaces — instead of the
+ * concrete SDK classes — keeps it decoupled from how the agent-core-v2 harness
+ * (`createPromptHarnessV2`) is assembled; the harness structurally satisfies
+ * these interfaces, so no adapter wrappers are needed.
  */
 
 import type {

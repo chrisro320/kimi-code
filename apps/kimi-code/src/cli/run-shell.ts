@@ -3,7 +3,6 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  createKimiHarness,
   createKimiHarnessV2,
   flushDiagnosticLogsSync,
   log,
@@ -33,7 +32,6 @@ import { restoreTerminalModes } from '#/utils/terminal-restore';
 import { createAgoraLifecycleAdapter } from './agora-lifecycle-adapter';
 import type { CLIOptions } from './options';
 import { resolveAgentProfileSelection } from './agent-selection';
-import { isKimiV2Enabled } from './experimental-v2';
 import { createCliTelemetryBootstrap, initializeCliTelemetry } from './telemetry';
 import { createKimiCodeHostIdentity } from './version';
 
@@ -83,13 +81,9 @@ export async function runShell(
     sessionStartedProperties: { yolo: opts.yolo, auto: opts.auto, plan: opts.plan, afk: false },
     agoraLifecycleAdapter: createAgoraLifecycleAdapter({ workDir }),
   };
-  // The agent-core-v2 route is the default (same engine gate as `kimi -p`):
-  // the harness is the SDK's v2-backed client, so the whole TUI runs on the
-  // agent-core-v2 engine unless the legacy flag is set.
-  const engineV2 = isKimiV2Enabled();
-  const harness = engineV2
-    ? createKimiHarnessV2(harnessOptions)
-    : createKimiHarness(harnessOptions);
+  // The harness is the SDK's v2-backed client, so the whole TUI runs on the
+  // agent-core-v2 engine.
+  const harness = createKimiHarnessV2(harnessOptions);
   startupTrace('harness:created');
   log.info('kimi-code starting', {
     version,
@@ -129,7 +123,10 @@ export async function runShell(
     startupNotice: configWarning,
     migrationPlan,
     migrateOnly: runOptions.migrateOnly,
-    engineV2,
+    // Always true now that agent-core-v2 is the only engine. The flag still
+    // threads through the TUI (sessionless start, plugin/capability APIs);
+    // unwinding it there is part of retiring v1, not of dropping the gate.
+    engineV2: true,
   });
 
   initializeCliTelemetry({

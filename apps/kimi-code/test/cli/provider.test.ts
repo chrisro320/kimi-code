@@ -1142,25 +1142,12 @@ describe('kimi provider engine routing', () => {
     });
   }
 
-  it('builds the v2 harness by default', async () => {
-    vi.stubEnv('KIMI_CODE_LEGACY_FLAG', '');
+  it('builds the v2 harness', async () => {
     const program = new Command('kimi');
     registerWithDefaultHarness(program);
 
     await program.parseAsync(['node', 'kimi', 'provider', 'list'], { from: 'node' });
 
     expect(harnessRouting.kimiHarnessV2Constructor).toHaveBeenCalledTimes(1);
-    expect(harnessRouting.kimiHarnessConstructor).not.toHaveBeenCalled();
-  });
-
-  it('builds the legacy harness when the legacy flag is truthy', async () => {
-    vi.stubEnv('KIMI_CODE_LEGACY_FLAG', '1');
-    const program = new Command('kimi');
-    registerWithDefaultHarness(program);
-
-    await program.parseAsync(['node', 'kimi', 'provider', 'list'], { from: 'node' });
-
-    expect(harnessRouting.kimiHarnessConstructor).toHaveBeenCalledTimes(1);
-    expect(harnessRouting.kimiHarnessV2Constructor).not.toHaveBeenCalled();
   });
 });

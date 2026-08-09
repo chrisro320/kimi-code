@@ -17,7 +17,7 @@ vi.mock('@moonshot-ai/acp-server', () => ({
 
 import { runAcpServer } from '@moonshot-ai/acp-server';
 
-import { registerAcpCommand } from '#/cli/sub/acp';
+import { createProgram } from '#/cli/commands';
 import { registerNativeAcpCommand } from '#/cli/sub/acp-native';
 import { getDataDir } from '#/utils/paths';
 
@@ -32,7 +32,6 @@ describe('kimi acp', () => {
   let stderrSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    vi.stubEnv('KIMI_CODE_LEGACY_FLAG', '');
     vi.mocked(runAcpServer).mockClear();
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
       throw new ExitCalled(code);
@@ -55,9 +54,12 @@ describe('kimi acp', () => {
     expect(acpV2?.description()).toMatch(/Agent Client Protocol/);
   });
 
-  it('uses the v2 server for the default `acp` command', async () => {
-    const program = new Command('kimi').exitOverride();
-    registerAcpCommand(program);
+  // The engine gate that used to pick between a legacy and a v2 `acp` is gone;
+  // `createProgram` wires the v2 server directly. Asserted through the real
+  // program so a regression in that wiring is caught, not just in the registrar.
+  it('wires the v2 server for `kimi acp` on the real program', async () => {
+    const program = createProgram('0.0.0-test', () => {}, () => {}).exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
 
     await expect(program.parseAsync(['node', 'kimi', 'acp'])).rejects.toThrow(ExitCalled);
 
