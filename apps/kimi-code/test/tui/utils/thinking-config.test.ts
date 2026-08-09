@@ -35,6 +35,31 @@ describe('thinkingEffortToConfig', () => {
   it('treats a single declared level as the top tier', () => {
     expect(thinkingEffortToConfig('max', ['max'])).toEqual({ enabled: true });
   });
+
+  // Without this, a model whose top tier is what the user wants (v4flash
+  // declares only [high, max]) can never have that tier stored: /effort reports
+  // "Thinking set to max" and config.toml keeps whatever it had, so the next
+  // launch silently drops back.
+  it('persists the top tier when the user chose the effort explicitly', () => {
+    expect(
+      thinkingEffortToConfig('max', ['high', 'max'], { explicitChoice: true }),
+    ).toEqual({ enabled: true, effort: 'max' });
+  });
+
+  it('still withholds the top tier when the effort was only carried along', () => {
+    expect(
+      thinkingEffortToConfig('max', ['high', 'max'], { explicitChoice: false }),
+    ).toEqual({ enabled: true });
+  });
+
+  it.each([
+    ['off', { enabled: false }],
+    ['on', { enabled: true }],
+  ] as const)('leaves %s alone under an explicit choice', (effort, expected) => {
+    expect(thinkingEffortToConfig(effort, ['high', 'max'], { explicitChoice: true })).toEqual(
+      expected,
+    );
+  });
 });
 
 describe('isThinkingOn', () => {

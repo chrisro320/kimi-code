@@ -312,7 +312,7 @@ export async function handleEffortCommand(host: SlashCommandHost, args: string):
       'warning',
     );
   }
-  await performModelSwitch(host, alias, arg, true);
+  await performModelSwitch(host, alias, arg, true, true);
 }
 
 function showEffortPicker(
@@ -330,11 +330,11 @@ function showEffortPicker(
       warning: hasConversationHistory(host) ? EFFORT_SWITCH_CACHE_WARNING : undefined,
       onSelect: (effort) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, effort, true);
+        void performModelSwitch(host, alias, effort, true, true);
       },
       onSessionOnlySelect: (effort) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, effort, false);
+        void performModelSwitch(host, alias, effort, false, true);
       },
       onCancel: () => {
         host.restoreEditor();
@@ -469,11 +469,17 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
   );
 }
 
+/**
+ * `effortExplicit` marks the effort as the thing the user chose (`/effort`),
+ * rather than a value a model picker carried along with the model. Only an
+ * explicit choice is written to `config.toml` as the stored preference.
+ */
 async function performModelSwitch(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
   persist: boolean,
+  effortExplicit = false,
 ): Promise<void> {
   let session = host.session;
   if (session === undefined && host.engineV2) {
@@ -548,6 +554,7 @@ async function performModelSwitch(
         effectiveAlias,
         effectiveEffort,
         effectiveEffortChanged,
+        effortExplicit,
       );
     } catch (error) {
       const msg = formatErrorMessage(error);
@@ -578,20 +585,35 @@ async function persistModelSelection(
   alias: string,
   effort: ThinkingEffort,
   effortChanged: boolean,
+  effortExplicit: boolean,
 ): Promise<boolean> {
   const config = await host.harness.getConfig({ reload: true });
   const model = host.state.appState.availableModels[alias];
   const full = thinkingEffortToConfig(
     effort,
     model === undefined ? undefined : effectiveModelForHost(host, model).supportEfforts,
+    { explicitChoice: effortExplicit },
   );
-  // Re-confirming the effort shown when the picker opened is not an explicit
+  // Re-confirming the effort a model picker happened to show is not an explicit
   // choice — persist the model but leave the stored effort preference alone.
-  const patch = effortChanged ? full : { enabled: full.enabled };
+  // The same holds for `/effort` when nothing is stored yet: the level on
+  // screen is the model's own default, and pinning it would silently convert
+  // "let the model decide" into a fixed preference.
+  //
+  // It does NOT hold once config.toml stores an effort that disagrees with the
+  // one being confirmed. Then the two have drifted — a session-only switch, or
+  // a stored level the model does not declare — and refusing to write leaves no
+  // way to reconcile them from the UI.
+  const reconcilesStoredEffort =
+    effortExplicit &&
+    config.thinking?.effort !== undefined &&
+    config.thinking.effort !== full.effort;
+  const storeEffort = effortChanged || reconcilesStoredEffort;
+  const patch = storeEffort ? full : { enabled: full.enabled };
   if (
     config.defaultModel === alias &&
     config.thinking?.enabled === patch.enabled &&
-    (!effortChanged || config.thinking?.effort === patch.effort)
+    (!storeEffort || config.thinking?.effort === patch.effort)
   ) {
     return false;
   }
