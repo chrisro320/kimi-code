@@ -4,7 +4,6 @@ import { homedir } from 'node:os';
 import { ErrorCodes, KimiError } from '#/errors';
 import { getRootLogger, log } from '#/logging/logger';
 import { PluginManager } from '#/plugin';
-import type { AgoraLifecycleAdapter, AgoraLifecycleCapabilityToken } from '../agora/lifecycle';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
@@ -83,14 +82,12 @@ import type {
   ArchiveSessionPayload,
   BeginGlobalMcpServerAuthResult,
   BeginCompactionPayload,
-  CancelAgoraReviewPayload,
   CancelGlobalMcpServerAuthPayload,
   CancelPayload,
   CancelPlanPayload,
   CancelShellCommandPayload,
   CloseSessionPayload,
   CompleteGlobalMcpServerAuthPayload,
-  ConfirmAgoraMaterializationPayload,
   ConfigDiagnostics,
   CoreAPI,
   CoreInfo,
@@ -110,19 +107,15 @@ import type {
   ExportSessionPayload,
   ExportSessionResult,
   ForkSessionPayload,
-  GetAgoraReviewPayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
   GetCronTasksResult,
   GetKimiConfigPayload,
   GetPluginInfoPayload,
-  InsertAgoraReviewPayload,
   InstallPluginPayload,
   ImportContextPayload,
   ListSessionsPayload,
   ListWorkspaceSkillsPayload,
-  MaterializeAgoraReviewPayload,
-  ResolveAgoraHandoffPayload,
   McpServerInfo,
   McpStartupMetrics,
   PluginInfo,
@@ -134,7 +127,6 @@ import type {
   RegisterToolPayload,
   ReloadSessionPayload,
   ReloadPluginsResult,
-  RemoveAgoraPeerPayload,
   RemoveKimiProviderPayload,
   RemovePluginPayload,
   RenameSessionPayload,
@@ -206,8 +198,6 @@ export interface KimiCoreOptions {
    * `applyPrintModeConfigDefaults` (user-set values still win).
    */
   readonly uiMode?: string | undefined;
-  /** Optional adapter for materializing an Agora lifecycle into a typed handoff. */
-  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export class KimiCore implements PromisableMethods<CoreAPI> {
@@ -239,12 +229,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private readonly printMode: boolean;
   /** Owner-scoped [image] limits; reload pushes the new config via setConfig. */
   readonly imageLimits: ImageLimits;
-  private readonly agoraLifecycleAdapter: AgoraLifecycleAdapter | undefined;
-  /**
-   * Agora bearer vault shared by every SessionAPIImpl this core builds, so the
-   * secret survives session reloads (see SessionAPIImpl). Process-scoped only.
-   */
-  readonly agoraCapabilityVault = new Map<string, AgoraLifecycleCapabilityToken>();
 
   constructor(
     protected readonly rpcClient: CoreRPCClient,
@@ -264,7 +248,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     this.telemetry = options.telemetry ?? noopTelemetryClient;
     this.appVersion = options.appVersion;
     this.printMode = options.uiMode === 'print';
-    this.agoraLifecycleAdapter = options.agoraLifecycleAdapter;
     ensureKimiHome(this.homeDir);
     // One-shot config migrations, before the first load (best-effort, never
     // throws): rewrites a persisted thinking.effort "max" to "high" once.
@@ -440,7 +423,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       appVersion: this.appVersion,
       additionalDirs,
       drainAgentTasksOnStop: options.drainAgentTasksOnStop,
-      agoraLifecycleAdapter: this.agoraLifecycleAdapter,
     });
     try {
       reportAgentCatalogWarnings(session.log);
@@ -603,7 +585,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       pluginSystemPrompts: this.plugins.enabledSystemPrompts(),
       appVersion: this.appVersion,
       additionalDirs,
-      agoraLifecycleAdapter: this.agoraLifecycleAdapter,
     });
     let warning: string | undefined;
     try {
@@ -697,7 +678,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   async renameSession({ sessionId, ...payload }: RenameSessionRequest): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session !== undefined) {
-      await new SessionAPIImpl(session, this.agoraCapabilityVault).renameSession(payload);
+      await new SessionAPIImpl(session).renameSession(payload);
       return;
     }
     await this.sessionStore.rename(sessionId, payload.title);
@@ -778,20 +759,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       config.defaultProvider = undefined;
     }
 
-    await writeConfigFile(this.configPath, config);
-    return this.reloadRuntimeConfig();
-  }
-
-  async removeAgoraPeer(input: RemoveAgoraPeerPayload): Promise<KimiConfig> {
-    const config = this.readConfigForWrite();
-    if (config.agora?.peers !== undefined) {
-      delete config.agora.peers[input.peerId];
-      // Drop the whole [agora] section once the roster is empty so the file
-      // falls back to the built-in default without a stale empty table.
-      if (Object.keys(config.agora.peers).length === 0) {
-        config.agora = undefined;
-      }
-    }
     await writeConfigFile(this.configPath, config);
     return this.reloadRuntimeConfig();
   }
@@ -1155,30 +1122,6 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.requireSession(sessionId).addAdditionalDir(payload.path, payload.persist);
   }
 
-  insertAgoraReview({ sessionId, ...payload }: SessionScopedPayload<InsertAgoraReviewPayload>) {
-    return this.sessionApi(sessionId).insertAgoraReview(payload);
-  }
-
-  getAgoraReview({ sessionId, ...payload }: SessionScopedPayload<GetAgoraReviewPayload>) {
-    return this.sessionApi(sessionId).getAgoraReview(payload);
-  }
-
-  cancelAgoraReview({ sessionId, ...payload }: SessionScopedPayload<CancelAgoraReviewPayload>) {
-    return this.sessionApi(sessionId).cancelAgoraReview(payload);
-  }
-
-  confirmAgoraMaterialization({ sessionId, ...payload }: SessionScopedPayload<ConfirmAgoraMaterializationPayload>) {
-    return this.sessionApi(sessionId).confirmAgoraMaterialization(payload);
-  }
-
-  materializeAgoraReview({ sessionId, ...payload }: SessionScopedPayload<MaterializeAgoraReviewPayload>) {
-    return this.sessionApi(sessionId).materializeAgoraReview(payload);
-  }
-
-  resolveAgoraHandoff({ sessionId, ...payload }: SessionScopedPayload<ResolveAgoraHandoffPayload>) {
-    return this.sessionApi(sessionId).resolveAgoraHandoff(payload);
-  }
-
   startBtw({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>): Promise<string> {
     return this.sessionApi(sessionId).startBtw(payload);
   }
@@ -1398,7 +1341,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   }
 
   private sessionApi(sessionId: string): SessionAPIImpl {
-    return new SessionAPIImpl(this.requireSession(sessionId), this.agoraCapabilityVault);
+    return new SessionAPIImpl(this.requireSession(sessionId));
   }
 
   private reloadProviderManager(): KimiConfig {
@@ -1454,7 +1397,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     session: Session,
     config: KimiConfig,
   ): Promise<void> {
-    const api = new SessionAPIImpl(session, this.agoraCapabilityVault);
+    const api = new SessionAPIImpl(session);
     // A session migrated from an external tool carries no model, and any
     // session may reference a model alias that no longer exists in config.toml.
     // Try the session's own model first, then fall back to the configured

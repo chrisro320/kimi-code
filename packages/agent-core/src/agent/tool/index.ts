@@ -865,7 +865,6 @@ export class ToolManager {
               allowBackground,
               log: this.agent.log,
               subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
-              records: this.agent.records,
               showModelPreferences: this.agent.experimentalFlags.enabled('secondary-model'),
               modelChoiceEnabled: this.agent.experimentalFlags.enabled('secondary-model'),
               subagentModelDescription: buildSubagentModelDescriptions(
@@ -881,18 +880,7 @@ export class ToolManager {
             this.agent.swarmMode,
             resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
             DEFAULT_AGENT_PROFILES['agent']?.subagents,
-            this.agent.records,
           ),
-        // Agora is explicitly invoked and remains unavailable without a host;
-        // its execution is read-only peer analysis, never task materialization.
-        goalToolsEnabled && this.agent.subagentHost && new b.AgoraTool(this.agent.subagentHost, this.agent.records, this.agent.kimiConfig),
-        goalToolsEnabled && this.agent.subagentHost && new b.ReferenceAuditTool(this.agent.subagentHost, this.agent.records),
-        goalToolsEnabled && new b.ReferenceAuditOverrideTool(this.agent.records),
-        goalToolsEnabled && this.agent.subagentHost && new b.AssetPipelineTool(
-          this.agent.subagentHost,
-          this.agent.records,
-          { kaos, cwd },
-        ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),
       ]

@@ -20,7 +20,6 @@ import type {
   TranscriptEntry,
 } from '../types';
 import { formatErrorMessage } from '../utils/event-payload';
-import { handleAgoraCommand } from './agora';
 import { handleLoginCommand, handleLogoutCommand } from './auth';
 import { handleBtwCommand } from './btw';
 import { handleCopyCommand } from './copy';
@@ -45,7 +44,6 @@ import { handleAddDirCommand } from './add-dir';
 import { parseSlashInput } from './parse';
 import { handlePluginsCommand } from './plugins';
 import { handleProviderCommand } from './provider';
-import { handleResearchCommand } from './research';
 import { handleSubagentCommand } from './subagent';
 import {
   findBuiltInSlashCommand,
@@ -75,8 +73,6 @@ import { handleWebCommand } from './web';
 // Re-exports — keep existing consumers working
 // ---------------------------------------------------------------------------
 
-export { handleAgoraCommand } from './agora';
-export { handleResearchCommand } from './research';
 export { handleLoginCommand, handleLogoutCommand } from './auth';
 export { handleBtwCommand } from './btw';
 export { handleCopyCommand } from './copy';
@@ -196,10 +192,6 @@ export interface SlashCommandHost {
   setExitForegroundTask(task: (exitCode: number) => Promise<void>): void;
   showHelpPanel(): void;
   createNewSession(): Promise<void>;
-  retryAgoraHandoff(): Promise<void>;
-  isAgoraSessionTransitionPending?(): boolean;
-  getSessionTransitionGeneration?(): number;
-  blockSessionTransitionForPendingAgoraResolution?(): boolean;
   showSessionPicker(): Promise<void>;
   sendNormalUserInput(text: string): void;
   sendSkillActivation(session: Session, skillName: string, skillArgs: string): void;
@@ -239,9 +231,6 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
     pluginCommandMap: host.pluginCommandMap,
     isStreaming: host.state.appState.streamingPhase !== 'idle',
     isCompacting: host.state.appState.isCompacting,
-    isAgoraResolutionPending:
-      host.isAgoraSessionTransitionPending?.() ??
-      host.state.appState.agora?.phase === 'resolution_pending',
   });
 
   switch (intent.kind) {
@@ -423,12 +412,6 @@ async function handleBuiltInSlashCommand(
       host.state.ui.requestRender();
       return;
     }
-    case 'agora':
-      await handleAgoraCommand(host, args);
-      return;
-    case 'research':
-      await handleResearchCommand(host, args);
-      return;
     case 'sessions':
       void host.showSessionPicker();
       return;

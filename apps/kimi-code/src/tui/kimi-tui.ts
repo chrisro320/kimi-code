@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
 import { effectiveModelAlias, log } from '@moonshot-ai/kimi-code-sdk';
@@ -40,12 +39,6 @@ import { detectFdPath, ensureFdPath } from '#/utils/process/fd-detect';
 import { quoteShellArg } from '#/utils/shell-quote';
 import { restoreTerminalModes } from '#/utils/terminal-restore';
 
-import {
-  bindAgoraHandoff,
-  markAgoraHandoffFailed,
-  prepareAgoraHandoff,
-  type PreparedAgoraHandoff,
-} from './agora-handoff';
 import { BannerProvider } from './banner/banner-provider';
 import { readBannerDisplayState, writeBannerDisplayState } from './banner/state';
 import {
@@ -58,12 +51,7 @@ import {
   type KimiSlashCommand,
   type SkillListSession,
 } from './commands';
-import {
-  getAgoraLifecycleCapability,
-  releaseAgoraLifecycleCapability,
-} from './commands/agora';
 import * as slashCommands from './commands/dispatch';
-import { formatAgoraRecoveryInstructions } from './utils/agora-recovery';
 import { CacheHintController } from './controllers/cache-hint-controller';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
@@ -278,8 +266,6 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     goal: null,
     mcpServersSummary: null,
     banner: undefined,
-    agora: null,
-    research: null,
   };
 }
 
@@ -366,30 +352,6 @@ function appendSteerText(parts: PromptPart[], text: string): void {
 
 /** How long the one-shot "moved to background" footer hint stays visible. */
 const DETACH_HINT_DISPLAY_MS = 4_000;
-const AGORA_SESSION_TRANSITION_BLOCKED_MESSAGE =
-  'Cannot change sessions while Agora handoff terminal resolution is pending. Run /agora retry before starting, resuming, or switching sessions.';
-
-interface PendingAgoraHandoffResolution {
-  readonly sourceSession: Session;
-  readonly targetSession: Session;
-  readonly prepared: PreparedAgoraHandoff;
-  readonly payload: Parameters<Session['resolveAgoraHandoff']>[0];
-}
-
-interface AgoraHandoffTargetActivation {
-  readonly runId: string;
-  readonly pending: PendingAgoraHandoffResolution;
-}
-
-class AgoraHandoffResolutionPendingError extends Error {
-  readonly resolutionError: unknown;
-
-  constructor(resolutionError: unknown) {
-    super('Agora handoff terminal resolution is pending retry.');
-    this.name = 'AgoraHandoffResolutionPendingError';
-    this.resolutionError = resolutionError;
-  }
-}
 
 export class KimiTUI {
   readonly harness: KimiHarness;
@@ -437,9 +399,6 @@ export class KimiTUI {
     string,
     { entry: TranscriptEntry; component: ShellRunComponent; taskId?: string }
   >();
-  private readonly pendingAgoraHandoffResolutions = new Map<string, PendingAgoraHandoffResolution>();
-  private readonly agoraHandoffRetryInFlight = new Map<string, Promise<void>>();
-  private agoraSessionTransitionGeneration = 0;
   readonly streamingUI: StreamingUIController;
   readonly authFlow: AuthFlowController;
   readonly btwPanelController: BtwPanelController;
@@ -1010,7 +969,6 @@ export class KimiTUI {
 
   async stop(exitCode?: number): Promise<void> {
     if (this.isShuttingDown) return;
-    if (exitCode === undefined && this.blockSessionTransitionForPendingAgoraResolution()) return;
     this.isShuttingDown = true;
     this.unregisterSignalHandlers();
     this.aborted = true;
@@ -1972,60 +1930,6 @@ export class KimiTUI {
     return this.harness.createSession(options);
   }
 
-  private pendingAgoraResolutionRunId(): string | undefined {
-    const agora = this.state.appState.agora;
-    if (agora?.phase === 'resolution_pending' && agora.runId !== undefined) return agora.runId;
-    for (const runId of this.pendingAgoraHandoffResolutions.keys()) return runId;
-    return undefined;
-  }
-
-  isAgoraSessionTransitionPending(): boolean {
-    return this.pendingAgoraResolutionRunId() !== undefined;
-  }
-
-  getSessionTransitionGeneration(): number {
-    return this.agoraSessionTransitionGeneration;
-  }
-
-  private sessionOperationWasInvalidated(generation: number, sourceSession: Session | undefined): boolean {
-    if (generation === this.agoraSessionTransitionGeneration && sourceSession === this.session) {
-      return false;
-    }
-    this.showError('Session operation cancelled because an Agora handoff changed the active session.');
-    return true;
-  }
-
-  private assertSessionTransitionAllowed(
-    session?: Session,
-    activation?: AgoraHandoffTargetActivation,
-  ): void {
-    const runId = this.pendingAgoraResolutionRunId();
-    if (runId === undefined) return;
-    const pending = this.pendingAgoraHandoffResolutions.get(runId);
-    if (
-      session !== undefined &&
-      activation?.runId === runId &&
-      activation.pending === pending &&
-      pending?.targetSession === session
-    ) {
-      return;
-    }
-    throw new Error(AGORA_SESSION_TRANSITION_BLOCKED_MESSAGE);
-  }
-
-  blockSessionTransitionForPendingAgoraResolution(): boolean {
-    if (this.pendingAgoraResolutionRunId() === undefined) return false;
-    this.showError(AGORA_SESSION_TRANSITION_BLOCKED_MESSAGE);
-    return true;
-  }
-
-  private async closeRejectedSession(session: Session): Promise<void> {
-    for (const pending of this.pendingAgoraHandoffResolutions.values()) {
-      if (pending.targetSession === session) return;
-    }
-    await session.close().catch(() => undefined);
-  }
-
   /**
    * Lazy-create the session on first use (v2 engine, session-less startup).
    * Returns the existing session, or creates one from the current state and
@@ -2098,11 +2002,7 @@ export class KimiTUI {
     await this.installSession(session);
   }
 
-  private async installSession(
-    session: Session,
-    activation?: AgoraHandoffTargetActivation,
-  ): Promise<void> {
-    this.assertSessionTransitionAllowed(session, activation);
+  private async installSession(session: Session): Promise<void> {
     const previous = this.unloadCurrentSession('switching session');
     await previous?.close();
     this.session = session;
@@ -2172,7 +2072,6 @@ export class KimiTUI {
   }
 
   async closeSession(reason: string): Promise<void> {
-    if (!this.isShuttingDown) this.assertSessionTransitionAllowed();
     const previous = this.unloadCurrentSession(reason);
     await previous?.close();
   }
@@ -2279,7 +2178,6 @@ export class KimiTUI {
       this.showStatus('Already on this session.');
       return true;
     }
-    if (this.blockSessionTransitionForPendingAgoraResolution()) return false;
     if (this.state.appState.streamingPhase !== 'idle') {
       this.showError('Cannot switch sessions while streaming — press Esc or Ctrl-C first.');
       return false;
@@ -2289,8 +2187,6 @@ export class KimiTUI {
       return false;
     }
 
-    const sourceSession = this.session;
-    const transitionGeneration = this.agoraSessionTransitionGeneration;
     let session: Session;
     try {
       session = await this.harness.resumeSession({
@@ -2303,18 +2199,10 @@ export class KimiTUI {
       return false;
     }
 
-    if (
-      this.blockSessionTransitionForPendingAgoraResolution() ||
-      this.sessionOperationWasInvalidated(transitionGeneration, sourceSession)
-    ) {
-      await this.closeRejectedSession(session);
-      return false;
-    }
     return this.switchToSession(session, `Resumed session (${session.id}).`);
   }
 
   async switchToSession(session: Session, statusMessage: string): Promise<boolean> {
-    if (this.blockSessionTransitionForPendingAgoraResolution()) return false;
     this.resetSessionRuntime();
     await this.setSession(session);
     await this.syncRuntimeState(session);
@@ -2378,233 +2266,15 @@ export class KimiTUI {
     await this.createFreshSession();
   }
 
-  async createAgoraHandoffSession(
-    handoffPath: string,
-    expected: {
-      readonly runId: string;
-      readonly sourceSessionId: string;
-      readonly targetTask: string;
-      readonly digest: string;
-      readonly insertedTask?: string;
-    },
-  ): Promise<void> {
-    const recovery = formatAgoraRecoveryInstructions({
-      runId: expected.runId,
-      insertedTask: expected.insertedTask,
-    });
-    const capability = getAgoraLifecycleCapability(expected.runId);
-    if (capability === undefined) {
-      this.setAppState({ agora: null });
-      this.showError(`Agora handoff cannot resolve in this process because its lifecycle capability is unavailable; durable completion was not confirmed.${recovery}`);
-      return;
-    }
-
-    let prepared: PreparedAgoraHandoff;
-    try {
-      prepared = await prepareAgoraHandoff(handoffPath, this.state.appState.workDir, expected);
-    } catch (error) {
-      // Keep appState.agora: the capability is still alive in this process, so
-      // /agora cancel (or a model re-materialize) must stay reachable. The
-      // durable lifecycle is still fresh_session_pending; clearing the UI
-      // here would orphan it with no local cancel path.
-      this.showError(`Agora handoff validation failed; durable completion was not confirmed: ${formatErrorMessage(error)}.${recovery}`);
-      return;
-    }
-
-    const sourceSession = this.requireSession();
-    const transitionId = randomUUID();
-    let terminalResolved = false;
-    let shouldMarkHandoffFailed = false;
-    let session: Session | undefined;
-    try {
-      session = await this.createFreshSession({
-        agoraHandoff: {
-          path: relative(this.state.appState.workDir, prepared.path),
-          runId: prepared.handoff.runId,
-          sourceSessionId: prepared.handoff.sourceSessionId,
-          targetTask: prepared.handoff.targetTask,
-          resumeAnchor: prepared.handoff.implementationResumeAnchor,
-        },
-      }, false, async (targetSession) => {
-        shouldMarkHandoffFailed = true;
-        const bound = await bindAgoraHandoff(prepared, targetSession.id, this.state.appState.workDir);
-        await targetSession.updateMetadata({
-          agoraHandoff: {
-            path: relative(this.state.appState.workDir, prepared.path),
-            runId: bound.runId,
-            sourceSessionId: bound.sourceSessionId,
-            targetTask: bound.targetTask,
-            resumeAnchor: bound.implementationResumeAnchor,
-            transition: bound.transition ?? 'fresh_session_ready',
-          },
-        });
-        if (bound.phase !== 'resolved_to_origin' && bound.phase !== 'resolved_to_successor') {
-          throw new Error(`Agora handoff did not resolve to a terminal phase: ${bound.phase}`);
-        }
-        const payload: Parameters<Session['resolveAgoraHandoff']>[0] = {
-          runId: expected.runId,
-          transitionId,
-          capability,
-          handoff: {
-            runId: expected.runId,
-            sourceSessionId: expected.sourceSessionId,
-            targetTask: expected.targetTask,
-            handoffPath,
-            phase: 'fresh_session_pending',
-            digest: expected.digest,
-          },
-          resolution: bound.phase,
-        };
-        try {
-          await sourceSession.resolveAgoraHandoff(payload);
-        } catch (error) {
-          this.agoraSessionTransitionGeneration += 1;
-          this.pendingAgoraHandoffResolutions.set(expected.runId, {
-            sourceSession,
-            targetSession,
-            prepared,
-            payload,
-          });
-          shouldMarkHandoffFailed = false;
-          throw new AgoraHandoffResolutionPendingError(error);
-        }
-        terminalResolved = true;
-        releaseAgoraLifecycleCapability(expected.runId);
-      });
-      if (session === undefined) {
-        // Keep appState.agora — see the validation-failure note above.
-        this.showError(`Agora handoff did not create a fresh session; durable completion was not confirmed.${recovery}`);
-        return;
-      }
-      this.streamingUI.setTodoList(prepared.todos);
-      this.showStatus(`Agora handoff ready in fresh session (${session.id}).`);
-    } catch (error) {
-      if (error instanceof AgoraHandoffResolutionPendingError) {
-        const active = this.state.appState.agora;
-        this.setAppState({
-          agora: {
-            runId: expected.runId,
-            focus: active?.focus,
-            phase: 'resolution_pending',
-            hostRoute: active?.hostRoute ?? 'coder',
-            hostModel: active?.hostModel,
-            originTask: active?.originTask,
-            insertedTask: expected.insertedTask ?? active?.insertedTask,
-            startedAtMs: active?.startedAtMs,
-            peers: active?.peers ?? [],
-            terminalState: 'terminal_flush_pending',
-          },
-        });
-        this.showError(`Agora handoff terminal resolution is pending: ${formatErrorMessage(error.resolutionError)}. Run /agora retry to reuse this process's trusted lifecycle handle.${recovery}`);
-        return;
-      }
-      if (!terminalResolved && shouldMarkHandoffFailed) {
-        try {
-          await markAgoraHandoffFailed(prepared, error);
-        } catch {
-          /* Keep the original error visible when the retry marker cannot be written. */
-        }
-      }
-      if (!terminalResolved) {
-        // Keep appState.agora — see the validation-failure note above.
-        this.showError(`Agora handoff failed; durable completion was not confirmed: ${formatErrorMessage(error)}.${recovery}`);
-        return;
-      }
-      this.showError(`Agora handoff completed, but fresh-session setup failed: ${formatErrorMessage(error)}`);
-    }
-  }
-
-  async retryAgoraHandoff(): Promise<void> {
-    const agora = this.state.appState.agora;
-    let runId = agora?.runId;
-    if (runId === undefined) {
-      for (const pendingRunId of this.pendingAgoraHandoffResolutions.keys()) {
-        runId = pendingRunId;
-        break;
-      }
-    }
-    if (runId === undefined) {
-      for (const inFlightRunId of this.agoraHandoffRetryInFlight.keys()) {
-        runId = inFlightRunId;
-        break;
-      }
-    }
-    if (runId === undefined) {
-      this.showError('No retryable Agora handoff terminal resolution is pending.');
-      return;
-    }
-
-    const existing = this.agoraHandoffRetryInFlight.get(runId);
-    if (existing !== undefined) {
-      this.showStatus('Agora handoff terminal resolution retry is already in progress.');
-      await existing;
-      return;
-    }
-
-    const pending = this.pendingAgoraHandoffResolutions.get(runId);
-    if (pending === undefined) {
-      this.showError('No retryable Agora handoff terminal resolution is pending.');
-      return;
-    }
-
-    const retry = Promise.resolve().then(() =>
-      this.performAgoraHandoffRetry(runId, pending, agora?.insertedTask),
-    );
-    this.agoraHandoffRetryInFlight.set(runId, retry);
-    try {
-      await retry;
-    } finally {
-      if (this.agoraHandoffRetryInFlight.get(runId) === retry) {
-        this.agoraHandoffRetryInFlight.delete(runId);
-      }
-    }
-  }
-
-  private async performAgoraHandoffRetry(
-    runId: string,
-    pending: PendingAgoraHandoffResolution,
-    insertedTask?: string,
-  ): Promise<void> {
-    const recovery = formatAgoraRecoveryInstructions({ runId, insertedTask });
-    let terminalResolved = false;
-    try {
-      await pending.sourceSession.resolveAgoraHandoff(pending.payload);
-      terminalResolved = true;
-      releaseAgoraLifecycleCapability(runId);
-      const session = await this.activateFreshSession(pending.targetSession, false, {
-        runId,
-        pending,
-      });
-      if (session === undefined) {
-        this.showError('Agora handoff completed, but fresh-session setup failed.');
-        return;
-      }
-      this.streamingUI.setTodoList(pending.prepared.todos);
-      this.showStatus(`Agora handoff ready in fresh session (${session.id}).`);
-    } catch (error) {
-      if (terminalResolved) {
-        this.showError(`Agora handoff completed, but fresh-session setup failed: ${formatErrorMessage(error)}`);
-        return;
-      }
-      this.showError(`Agora handoff terminal resolution is still pending: ${formatErrorMessage(error)}. Run /agora retry to retry the same durable transition.${recovery}`);
-    } finally {
-      if (terminalResolved) this.pendingAgoraHandoffResolutions.delete(runId);
-    }
-  }
-
   private async createFreshSession(
     metadata?: CreateSessionOptions['metadata'],
     announce = true,
-    beforeActivate?: (session: Session) => Promise<void>,
   ): Promise<Session | undefined> {
-    if (this.blockSessionTransitionForPendingAgoraResolution()) return undefined;
     if (this.state.appState.isReplaying) {
       this.showError('Cannot start a new session while history is replaying.');
       return undefined;
     }
 
-    const sourceSession = this.session;
-    const transitionGeneration = this.agoraSessionTransitionGeneration;
     let session: Session;
     try {
       session = await this.createSessionFromCurrentState(false, metadata);
@@ -2613,36 +2283,15 @@ export class KimiTUI {
       this.showError(`Failed to start a new session: ${msg}`);
       return undefined;
     }
-    if (
-      this.blockSessionTransitionForPendingAgoraResolution() ||
-      this.sessionOperationWasInvalidated(transitionGeneration, sourceSession)
-    ) {
-      await this.closeRejectedSession(session);
-      return undefined;
-    }
-
-    if (beforeActivate !== undefined) {
-      try {
-        await beforeActivate(session);
-      } catch (error) {
-        if (!(error instanceof AgoraHandoffResolutionPendingError)) {
-          await session.close().catch(() => undefined);
-        }
-        throw error;
-      }
-    }
-
     return this.activateFreshSession(session, announce);
   }
 
   private async activateFreshSession(
     session: Session,
     announce: boolean,
-    activation?: AgoraHandoffTargetActivation,
   ): Promise<Session | undefined> {
-    this.assertSessionTransitionAllowed(session, activation);
     this.resetSessionRuntime();
-    await this.installSession(session, activation);
+    await this.installSession(session);
     this.setAppState({ sessionId: session.id });
     try {
       await this.activateRuntime();
@@ -3767,7 +3416,6 @@ export class KimiTUI {
   private sessionPickerScopeRequestToken = 0;
 
   async showSessionPicker(): Promise<void> {
-    if (this.blockSessionTransitionForPendingAgoraResolution()) return;
     await this.openSessionPicker({
       applyStartupModes: false,
       closeOnCancel: false,

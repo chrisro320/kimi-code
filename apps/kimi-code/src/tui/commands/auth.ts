@@ -182,50 +182,35 @@ async function handleOpenPlatformLogin(
 function logoutOperationWasInvalidated(
   host: SlashCommandHost,
   sourceSession: SlashCommandHost['session'],
-  transitionGeneration: number | undefined,
 ): boolean {
-  if (
-    host.session === sourceSession &&
-    (transitionGeneration === undefined ||
-      host.getSessionTransitionGeneration?.() === transitionGeneration)
-  ) {
+  if (host.session === sourceSession) {
     return false;
   }
-  host.showError('Logout cancelled because an Agora handoff changed the active session.');
+  host.showError('Logout cancelled because the active session changed.');
   return true;
 }
 
 function blockLogoutOperation(
   host: SlashCommandHost,
   sourceSession: SlashCommandHost['session'],
-  transitionGeneration: number | undefined,
 ): boolean {
-  return (
-    host.blockSessionTransitionForPendingAgoraResolution?.() === true ||
-    logoutOperationWasInvalidated(host, sourceSession, transitionGeneration)
-  );
+  return logoutOperationWasInvalidated(host, sourceSession);
 }
 
-async function reloadConfigForLogout(
-  host: SlashCommandHost,
-  sourceSession: SlashCommandHost['session'],
-  transitionGeneration: number | undefined,
-) {
+async function reloadConfigForLogout(host: SlashCommandHost, sourceSession: SlashCommandHost['session']) {
   const config = await host.harness.getConfig({ reload: true });
-  if (blockLogoutOperation(host, sourceSession, transitionGeneration)) return undefined;
+  if (blockLogoutOperation(host, sourceSession)) return undefined;
   return config;
 }
 
 export async function handleLogoutCommand(host: SlashCommandHost): Promise<void> {
-  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) return;
   const sourceSession = host.session;
-  const transitionGeneration = host.getSessionTransitionGeneration?.();
   const oauthStatus = await host.harness.auth.status(DEFAULT_OAUTH_PROVIDER_NAME);
   const hasOAuthToken = oauthStatus.providers.some(
     (p) => p.providerName === DEFAULT_OAUTH_PROVIDER_NAME && p.hasToken,
   );
   const config = await host.harness.getConfig();
-  if (blockLogoutOperation(host, sourceSession, transitionGeneration)) return;
+  if (blockLogoutOperation(host, sourceSession)) return;
   const hasManagedRemnant =
     hasOAuthToken || config.providers[DEFAULT_OAUTH_PROVIDER_NAME] !== undefined;
   const apiKeyProviderIds = Object.keys(config.providers ?? {})
@@ -259,16 +244,16 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
 
   const target = await promptLogoutProviderSelection(host, options, currentProvider);
   if (target === undefined) return;
-  if (blockLogoutOperation(host, sourceSession, transitionGeneration)) return;
+  if (blockLogoutOperation(host, sourceSession)) return;
 
   if (target === DEFAULT_OAUTH_PROVIDER_NAME) {
     await host.harness.auth.logout(DEFAULT_OAUTH_PROVIDER_NAME);
   } else {
     await host.harness.removeProvider(target);
   }
-  if (blockLogoutOperation(host, sourceSession, transitionGeneration)) return;
+  if (blockLogoutOperation(host, sourceSession)) return;
 
-  const updated = await reloadConfigForLogout(host, sourceSession, transitionGeneration);
+  const updated = await reloadConfigForLogout(host, sourceSession);
   if (updated === undefined) return;
   if (target === currentProvider) {
     host.setAppState({
@@ -280,7 +265,7 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
       contextUsage: 0,
       contextTokens: 0,
     });
-    if (blockLogoutOperation(host, sourceSession, transitionGeneration)) return;
+    if (blockLogoutOperation(host, sourceSession)) return;
     await host.authFlow.clearActiveSessionAfterLogout();
   } else {
     host.setAppState({

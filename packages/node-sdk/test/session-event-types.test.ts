@@ -118,7 +118,6 @@ describe('Event public types', () => {
         case 'prompt.completed':
         case 'prompt.aborted':
         case 'prompt.steered':
-        case 'agora.lifecycle.updated':
           return;
         default:
           assertNever(event);

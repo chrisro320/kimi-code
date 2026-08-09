@@ -17,28 +17,6 @@ Policies are evaluated in the order `PermissionManager` registers them (see `pol
 - **Minimal blocked effect**: denies the whole batch of tool calls in that response (the model must resubmit correctly); does not touch any other turn or agent state.
 - **Recovery / override**: none needed — this is a format contract, not a risk judgment; the model simply reissues one `AgentSwarm` call by itself.
 
-## agora-confirmation-ask.ts — `AgoraConfirmationAskPermissionPolicy`
-
-- **Protected asset**: launching the Agora multi-peer packet (spends quota across multiple external/internal backends) and, separately, the two independent one-time overrides (`necessity.force_after_decline`, `reference_audit_gate.risk_override_confirmed`).
-- **Authoritative evidence**: a user approval response from `agent.rpc.requestApproval`, bound to a hash of the exact packet args (`hashAgoraExecutionEnvelope`) so the executed packet cannot silently drift from what was shown.
-- **Weak signal**: none used for the ask decision itself — every `Agora` call always asks. The "weak signal" surface lives inside the packet's own necessity fields (`impact_if_wrong`/`uncertainty_or_disagreement`/...), which are advisory inputs to the *user's* decision, not something this policy judges automatically.
-- **Trigger example**: any `Agora` tool call, including ordinary first-round packets.
-- **Non-trigger example**: none — there is no "safe enough to skip" packet; this is Agora's only gate.
-- **Indeterminate state**: no session approval surface available (`agent.rpc.requestApproval === undefined`) → **deny**, not ask (an ask nobody can answer must fail closed, not hang).
-- **Minimal blocked effect**: only this `Agora` call; other tools in the same turn are unaffected.
-- **Recovery / override**: the two overrides are separate, hash-bound, one-time approvals the model must request and the user must grant explicitly — a generic packet approval never silently covers them.
-
-## asset-pipeline-confirmation-ask.ts — `AssetPipelineConfirmationAskPermissionPolicy`
-
-- **Protected asset**: executing a prepared asset batch (`action: 'prepare_execution'`) — writes/promotes files based on a candidate list the model assembled.
-- **Authoritative evidence**: a hash of the exact `{run_id, candidates, confirmation, policies}` tuple (`hashAssetBatchConfirmation`), bound at approval time.
-- **Weak signal**: none — every `prepare_execution` action asks; other `AssetPipeline` actions (discovery, listing) are untouched by this policy.
-- **Trigger example**: `AssetPipeline({action: 'prepare_execution', ...})` with a well-formed batch.
-- **Non-trigger example**: `AssetPipeline({action: 'discover', ...})` or any non-`prepare_execution` action — not evaluated by this policy at all.
-- **Indeterminate state**: malformed batch (missing `run_id`/`candidates`/`candidate_policies`/`confirmation`, or hash construction throws) → **deny** with a specific message, not ask; no approval surface (`requestApproval` undefined) → **deny**. Both fail closed because there's nothing coherent to ask the user to approve.
-- **Minimal blocked effect**: only this `AssetPipeline` call.
-- **Recovery / override**: model resubmits a complete, well-formed batch; no override path — this is a data-completeness gate, not a risk judgment to override.
-
 ## auto-mode-approve.ts — `AutoModeApprovePermissionPolicy`
 
 - **Protected asset**: N/A — unconditional by design (a mode-scoped default-approve fallback).
@@ -196,17 +174,6 @@ Policies are evaluated in the order `PermissionManager` registers them (see `pol
 - **Minimal blocked effect**: only the flagged call; message is exactly the hook's own reason text.
 - **Recovery / override**: whatever the user's hook configuration allows (this policy has no independent override).
 
-## reference-audit-override-ask.ts — `ReferenceAuditOverrideAskPermissionPolicy`
-
-- **Protected asset**: overriding a reference-audit risk finding (bypassing a flagged external reference/asset) for Agora or an editing dispatch.
-- **Authoritative evidence**: a hash of the exact `{reference_hash, audit_run_id, purpose, operation_id, reason}` tuple (`hashReferenceAuditOverride`), bound at approval time.
-- **Weak signal**: none — every well-formed `ReferenceAuditOverride` call asks.
-- **Trigger example**: `ReferenceAuditOverride` with a complete, valid challenge.
-- **Non-trigger example**: any other tool call — this policy only ever matches `ReferenceAuditOverride`.
-- **Indeterminate state**: missing/malformed fields, or no approval surface available → **deny** (fails closed; an override challenge with a missing operation id or reason has nothing coherent for the user to evaluate).
-- **Minimal blocked effect**: only this override call.
-- **Recovery / override**: model resubmits a complete challenge; approval is one-time and hash-bound to that exact challenge, not reusable for a different reference/operation.
-
 ## session-approval-history.ts — `SessionApprovalHistoryPermissionPolicy`
 
 - **Protected asset**: N/A — an auto-*approve* shortcut for a tool call the user already approved once this session ("always allow for this session" style rules), not a new guard.
@@ -279,5 +246,5 @@ All three share evidence and weak-signal characteristics; they differ only in wh
 
 ## Findings surfaced while writing this (not acted on here — see prd.md Notes)
 
-- None of the 26 policies reviewed here appeared to violate "indeterminate signal → warn/quarantine, not deny" as a blocking default. The closest calls (`asset-pipeline-confirmation-ask.ts`, `reference-audit-override-ask.ts` denying on a malformed/incomplete request) are denying *malformed input*, not an ambiguous-but-well-formed request — judged in scope for a hard fail, not a Case 10 violation.
+- None of the 23 policies reviewed here appeared to violate "indeterminate signal → warn/quarantine, not deny" as a blocking default. The closest calls are the policies denying on a malformed/incomplete request — denying *malformed input*, not an ambiguous-but-well-formed request — judged in scope for a hard fail, not a Case 10 violation.
 - `sensitive-file-access-ask.ts`'s path-pattern matching is a known false-negative surface (a secret in a file whose name doesn't match the pattern) — noted above under its own section rather than flagged as a defect, since content-based scanning is a materially larger feature, not a decision-table gap.

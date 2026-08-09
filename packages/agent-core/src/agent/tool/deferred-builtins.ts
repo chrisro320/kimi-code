@@ -8,10 +8,6 @@
  */
 
 export const DEFERRED_BUILTIN_TOOL_NAMES = [
-  'Agora',
-  'AssetPipeline',
-  'ReferenceAudit',
-  'ReferenceAuditOverride',
   'CronCreate',
   'CronDelete',
   'CronList',

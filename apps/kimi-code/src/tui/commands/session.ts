@@ -54,7 +54,6 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
 
 export async function handleForkCommand(host: SlashCommandHost, args: string): Promise<void> {
   void args;
-  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) return;
   const session = host.session;
   if (session === undefined) {
     host.showError(NO_ACTIVE_SESSION_MESSAGE);

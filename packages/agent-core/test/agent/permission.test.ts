@@ -753,9 +753,6 @@ describe('Permission policy chain', () => {
     expect(createPermissionDecisionPolicies({} as Agent).map((policy) => policy.name)).toEqual([
       'pre-tool-call-hook',
       'agent-swarm-exclusive-deny',
-      'agora-confirmation-ask',
-      'reference-audit-override-ask',
-      'asset-pipeline-confirmation-ask',
       'auto-mode-ask-user-question-deny',
       'dispatch-mode-guard',
       'plan-mode-guard-deny',

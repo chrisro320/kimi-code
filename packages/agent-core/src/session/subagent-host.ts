@@ -254,7 +254,7 @@ export interface DispatchSpawnMetadata {
   readonly qualityDeficiencies?: readonly string[];
   readonly reviewReason?: string;
   readonly workCard?: DispatchWorkCard;
-  /** Runtime-enforced capability boundary for Agora read-only peers. */
+  /** Runtime-enforced capability boundary for read-only peers. */
   readonly readOnly?: boolean;
   /** Run in an isolated worktree and discard every resulting delta. */
   readonly discardChanges?: boolean;
@@ -1274,10 +1274,10 @@ export class SessionSubagentHost {
       // away. Without one there is nothing left enforcing the guarantee.
       if (isSubagentWorktreeUnsupported(worktree)) {
         throw new Error(
-          `Read-only Agora peer isolation is unavailable here: ${worktree.unsupported}.`,
+          `Read-only peer isolation is unavailable here: ${worktree.unsupported}.`,
         );
       }
-      if (worktree === null) throw new Error('Read-only Agora peer isolation could not be created.');
+      if (worktree === null) throw new Error('Read-only peer isolation could not be created.');
       return worktree;
     }
     return this.acquireWorktreeIfNeeded(parent, profile, options.dispatch?.scope, enforceIsolation);

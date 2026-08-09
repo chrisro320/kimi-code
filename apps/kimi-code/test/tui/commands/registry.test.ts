@@ -4,7 +4,6 @@ import {
   parseSlashInput,
   resolveSlashCommandAvailability,
   addDirArgumentCompletions,
-  agoraArgumentCompletions,
   sortSlashCommands,
   swarmArgumentCompletions,
   type KimiSlashCommand,
@@ -37,8 +36,6 @@ describe('built-in slash command registry', () => {
     expect(findBuiltInSlashCommand('clear')?.name).toBe('new');
     expect(findBuiltInSlashCommand('bug')?.name).toBe('feedback');
     expect(findBuiltInSlashCommand('btw')?.name).toBe('btw');
-    expect(findBuiltInSlashCommand('agora')?.name).toBe('agora');
-    expect(findBuiltInSlashCommand('research')?.name).toBe('research');
     expect(findBuiltInSlashCommand('mcp')?.name).toBe('mcp');
     expect(findBuiltInSlashCommand('status')?.name).toBe('status');
     expect(findBuiltInSlashCommand('usage')?.aliases).not.toContain('status');
@@ -76,25 +73,6 @@ describe('built-in slash command registry', () => {
     expect(values('on')).toBeNull();
     expect(values('off')).toBeNull();
     expect(values('Ship feature X')).toBeNull();
-  });
-
-  it('offers Agora recovery subcommands and keeps them available while a turn is active', () => {
-    const agora = findBuiltInSlashCommand('agora');
-    expect(agora).toBeDefined();
-    expect(resolveSlashCommandAvailability(agora!, 'status')).toBe('always');
-    expect(resolveSlashCommandAvailability(agora!, 'retry')).toBe('always');
-    expect(resolveSlashCommandAvailability(agora!, 'cancel')).toBe('always');
-    expect(resolveSlashCommandAvailability(agora!, 'roster')).toBe('always');
-    expect(resolveSlashCommandAvailability(agora!, 'review this diff')).toBe('idle-only');
-
-    const values = (prefix: string): string[] | null => {
-      const items = agoraArgumentCompletions(prefix);
-      return items === null ? null : items.map((item) => item.value);
-    };
-
-    expect(values('')).toEqual(['status', 'retry', 'cancel', 'roster']);
-    expect(values('re')).toEqual(['retry']);
-    expect(values('retry')).toBeNull();
   });
 
   it('offers add-dir list and directory argument completions', () => {
@@ -172,8 +150,6 @@ describe('built-in slash command registry', () => {
     expect(names).toEqual(
       expect.arrayContaining([
         'add-dir',
-        'agora',
-        'research',
         'compact',
         'btw',
         'editor',

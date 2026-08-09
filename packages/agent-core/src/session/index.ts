@@ -70,7 +70,6 @@ import type { ToolServices } from '../tools/support/services';
 import { FlagResolver, type ExperimentalFlagResolver } from '../flags';
 import { ImageLimits } from '../tools/support/image-limits';
 import { abortError } from '../utils/abort';
-import type { AgoraLifecycleAdapter } from '../agora/lifecycle';
 import { resolveMainAgentProfile } from './main-agent-profile';
 
 export interface SessionOptions {
@@ -105,8 +104,6 @@ export interface SessionOptions {
    * finish before the run exits. Set via the SDK `createSession` option.
    */
   readonly drainAgentTasksOnStop?: boolean;
-  /** Optional adapter for materializing an Agora lifecycle into a typed handoff. */
-  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export interface SessionSkillConfig {
@@ -253,7 +250,6 @@ export class Session {
   private agentsMdWarning: string | undefined;
   private printSteerDeadline: number | undefined;
   private printSteerTurns = 0;
-  readonly agoraLifecycleAdapter: AgoraLifecycleAdapter | undefined;
   /**
    * The session's live config snapshot. Initialized from `options.config`;
    * updated in place by {@link setSecondaryModelConfig} so mid-session secondary-model
@@ -336,7 +332,6 @@ export class Session {
     void this.loadMcpServers().catch((error: unknown) => {
       this.emitInitialMcpLoadError(error);
     });
-    this.agoraLifecycleAdapter = options.agoraLifecycleAdapter;
   }
 
 

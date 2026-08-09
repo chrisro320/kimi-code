@@ -1,9 +1,4 @@
 import type {
-  AgoraLifecycleAdapter,
-  AgoraLifecycleCapability,
-  AgoraLifecycleMaterializedHandoff,
-  AgoraMaterializationConfirmationProof,
-  AgoraMaterializationProposal,
   DispatchMode,
   ExportSessionManifest,
   ResumeSessionResult,
@@ -74,15 +69,6 @@ export type {
   ToolInfo,
   GlobalMcpServerConfig as McpServerConfig,
   GlobalMcpServerTestResult as McpTestResult,
-  AgoraLifecycleCapability,
-  AgoraLifecycleMaterializedHandoff,
-  AgoraLifecyclePhase,
-  AgoraLifecycleSnapshot,
-  AgoraLifecycleTransitionResult,
-  AgoraMaterializationConfirmation,
-  AgoraMaterializationConfirmationProof,
-  AgoraMaterializationDisposition,
-  AgoraMaterializationProposal,
 } from '@moonshot-ai/agent-core';
 
 export type { KimiHostIdentity, OAuthRefreshOutcome };
@@ -126,8 +112,6 @@ export interface KimiHarnessOptions {
   readonly telemetry?: TelemetryClient | undefined;
   readonly onOAuthRefresh?: ((outcome: OAuthRefreshOutcome) => void) | undefined;
   readonly sessionStartedProperties?: TelemetryProperties;
-  /** Trusted host adapter; never exposed to model-controlled RPC payloads. */
-  readonly agoraLifecycleAdapter?: AgoraLifecycleAdapter;
 }
 
 export interface CreateSessionOptions {
@@ -187,43 +171,6 @@ export interface ResumeSessionInput {
 
 export interface ReloadSessionInput extends ResumeSessionInput {
   readonly forcePluginSessionStartReminder?: boolean;
-}
-
-export interface InsertAgoraReviewInput {
-  readonly runId: string;
-  readonly transitionId: string;
-  readonly title?: string;
-  readonly slug?: string;
-  /** Host-minted handle from a prior failed-flush attempt of this transition. */
-  readonly capability?: AgoraLifecycleCapability;
-}
-
-export interface CancelAgoraReviewInput {
-  readonly runId: string;
-  readonly transitionId: string;
-  readonly capability: AgoraLifecycleCapability;
-}
-
-export interface ConfirmAgoraMaterializationInput {
-  readonly runId: string;
-  readonly capability: AgoraLifecycleCapability;
-  readonly proposal: AgoraMaterializationProposal;
-}
-
-export interface MaterializeAgoraReviewInput {
-  readonly runId: string;
-  readonly transitionId: string;
-  readonly capability: AgoraLifecycleCapability;
-  readonly proposal: AgoraMaterializationProposal;
-  readonly confirmation: AgoraMaterializationConfirmationProof;
-}
-
-export interface ResolveAgoraHandoffInput {
-  readonly runId: string;
-  readonly transitionId: string;
-  readonly capability: AgoraLifecycleCapability;
-  readonly handoff: AgoraLifecycleMaterializedHandoff;
-  readonly resolution: 'resolved_to_origin' | 'resolved_to_successor';
 }
 
 export interface AddAdditionalDirInput {

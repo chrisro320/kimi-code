@@ -24,10 +24,6 @@ tools:
   - WebSearch
   - Agent
   - AgentSwarm
-  - Agora
-  - ReferenceAudit
-  - ReferenceAuditOverride
-  - AssetPipeline
   - FetchURL
   - AskUserQuestion
   - EnterPlanMode
@@ -58,7 +54,5 @@ subagents:
       evidence-backed fix boundary. Not a planner or implementer.
   reviewer:
     description: Read-only code review focused on correctness, security, regressions, and test gaps.
-  agora-peer:
-    description: Enforced read-only external peer review for confirmed Agora packets.
   frontend-artist:
     description: Frontend implementation plus visual, game-art, and media asset production.

@@ -43,13 +43,11 @@ import type { SlashCommandHost } from './dispatch';
 
 interface ProviderManagerContext {
   readonly sourceSession: SlashCommandHost['session'];
-  readonly transitionGeneration?: number;
 }
 
 function captureProviderManagerContext(host: SlashCommandHost): ProviderManagerContext {
   return {
     sourceSession: host.session,
-    transitionGeneration: host.getSessionTransitionGeneration?.(),
   };
 }
 
@@ -57,22 +55,15 @@ function providerOperationWasInvalidated(
   host: SlashCommandHost,
   context: ProviderManagerContext,
 ): boolean {
-  if (
-    host.session === context.sourceSession &&
-    (context.transitionGeneration === undefined ||
-      host.getSessionTransitionGeneration?.() === context.transitionGeneration)
-  ) {
+  if (host.session === context.sourceSession) {
     return false;
   }
-  host.showError('Provider change cancelled because an Agora handoff changed the active session.');
+  host.showError('Provider change cancelled because the active session changed.');
   return true;
 }
 
 function blockProviderOperation(host: SlashCommandHost, context: ProviderManagerContext): boolean {
-  return (
-    host.blockSessionTransitionForPendingAgoraResolution?.() === true ||
-    providerOperationWasInvalidated(host, context)
-  );
+  return providerOperationWasInvalidated(host, context);
 }
 
 async function refreshProviderStateAfterLogout(
@@ -96,7 +87,6 @@ async function refreshProviderStateAfterLogout(
 type ProviderDeleteResult = 'updated' | 'cleared-active-session' | 'cancelled';
 
 export async function handleProviderCommand(host: SlashCommandHost): Promise<void> {
-  if (host.blockSessionTransitionForPendingAgoraResolution?.() === true) return;
   const options = buildProviderManagerOptions(host, captureProviderManagerContext(host));
   const component = new ProviderManagerComponent(options);
   host.mountEditorReplacement(component);

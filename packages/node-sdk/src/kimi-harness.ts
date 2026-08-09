@@ -370,10 +370,6 @@ export class KimiHarness {
     return this.rpc.removeProvider(providerId);
   }
 
-  async removeAgoraPeer(peerId: string): Promise<KimiConfig> {
-    return this.rpc.removeAgoraPeer(peerId);
-  }
-
   /**
    * Whether several config sections can be persisted as ONE atomic write
    * (see {@link replaceConfigSections}). False on the v1 harness.

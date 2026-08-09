@@ -32,5 +32,5 @@ export const KIMI_BUILD_INFO: KimiBuildInfo = {
     typeof __KIMI_CODE_BUILD_TARGET__ === 'string'
       ? optionalBuildString(__KIMI_CODE_BUILD_TARGET__)
       : undefined,
-  features: ['agora', 'reference-audit', 'asset-pipeline'],
+  features: [],
 };

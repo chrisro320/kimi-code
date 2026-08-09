@@ -1582,17 +1582,18 @@ describe('SessionSubagentHost worktree isolation', () => {
     const host = new SessionSubagentHost(session, 'main');
 
     await expect(host.spawn({
-      profileName: 'agora-peer',
-      parentToolCallId: 'call_agora',
+      profileName: 'explore',
+      parentToolCallId: 'call_external',
       prompt: 'Review only',
-      description: 'Agora peer review',
+      description: 'External review',
       runInBackground: false,
       signal,
       dispatch: {
         readOnly: true,
         discardChanges: true,
+        allowedTools: ['Read', 'Glob', 'Grep', 'FetchURL', 'WebSearch'],
         workCard: {
-          id: 'agora-external',
+          id: 'external-peer',
           title: 'External peer',
           goal: 'Review without side effects',
           acceptance: 'Return review',
@@ -1768,18 +1769,19 @@ describe('SessionSubagentHost worktree isolation', () => {
     const host = new SessionSubagentHost(session, 'main');
 
     const handle = await host.spawn({
-      profileName: 'agora-peer',
-      parentToolCallId: 'call_agora',
+      profileName: 'explore',
+      parentToolCallId: 'call_external',
       prompt: 'Review only',
-      description: 'Agora peer review',
+      description: 'External review',
       runInBackground: false,
       signal,
       dispatch: {
         readOnly: true,
         discardChanges: true,
+        allowedTools: ['Read', 'Glob', 'Grep', 'FetchURL', 'WebSearch'],
         scope: ['**/*'],
         workCard: {
-          id: 'agora-external',
+          id: 'external-peer',
           title: 'External peer',
           goal: 'Review without side effects',
           acceptance: 'Return review',
@@ -1797,9 +1799,9 @@ describe('SessionSubagentHost worktree isolation', () => {
     });
 
     const resumed = await host.resume(handle.agentId, {
-      parentToolCallId: 'call_agora_resume',
+      parentToolCallId: 'call_external_resume',
       prompt: 'Repair the response contract',
-      description: 'Agora peer repair',
+      description: 'External peer repair',
       runInBackground: false,
       signal,
     });
@@ -1808,9 +1810,9 @@ describe('SessionSubagentHost worktree isolation', () => {
     });
 
     const restarted = await host.retry(handle.agentId, {
-      parentToolCallId: 'call_agora_restart',
+      parentToolCallId: 'call_external_restart',
       prompt: 'Restart after a transient failure',
-      description: 'Agora peer restart',
+      description: 'External peer restart',
       runInBackground: false,
       signal,
     });
@@ -1861,17 +1863,18 @@ describe('SessionSubagentHost worktree isolation', () => {
     } });
     const host = new SessionSubagentHost(session, 'main');
     const handle = await host.spawn({
-      profileName: 'agora-peer',
-      parentToolCallId: 'call_agora',
+      profileName: 'explore',
+      parentToolCallId: 'call_external',
       prompt: 'Review only',
-      description: 'Agora peer review',
+      description: 'External review',
       runInBackground: false,
       signal,
       dispatch: {
         readOnly: true,
         discardChanges: true,
+        allowedTools: ['Read', 'Glob', 'Grep', 'FetchURL', 'WebSearch'],
         workCard: {
-          id: 'agora-external',
+          id: 'external-peer',
           title: 'External peer',
           goal: 'Review without side effects',
           acceptance: 'Return review',
@@ -1884,9 +1887,9 @@ describe('SessionSubagentHost worktree isolation', () => {
     expect(handle.resumable).toBe(false);
 
     const resumeOptions = {
-      parentToolCallId: 'call_agora_resume',
+      parentToolCallId: 'call_external_resume',
       prompt: 'Continue the review',
-      description: 'Agora peer resume',
+      description: 'External peer resume',
       runInBackground: false,
       signal,
     };

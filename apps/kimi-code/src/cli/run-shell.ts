@@ -29,7 +29,6 @@ import { currentTheme, getColorPalette } from '#/tui/theme';
 import { toTerminalHyperlink } from '#/utils/terminal-hyperlink';
 import { restoreTerminalModes } from '#/utils/terminal-restore';
 
-import { createAgoraLifecycleAdapter } from './agora-lifecycle-adapter';
 import type { CLIOptions } from './options';
 import { resolveAgentProfileSelection } from './agent-selection';
 import { createCliTelemetryBootstrap, initializeCliTelemetry } from './telemetry';
@@ -79,7 +78,6 @@ export async function runShell(
       });
     },
     sessionStartedProperties: { yolo: opts.yolo, auto: opts.auto, plan: opts.plan, afk: false },
-    agoraLifecycleAdapter: createAgoraLifecycleAdapter({ workDir }),
   };
   // The harness is the SDK's v2-backed client, so the whole TUI runs on the
   // agent-core-v2 engine.

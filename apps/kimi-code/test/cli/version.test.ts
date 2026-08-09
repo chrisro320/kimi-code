@@ -22,11 +22,7 @@ describe('cli version helpers', () => {
   });
 
   it('advertises the fork feature provenance used to detect stale wrappers', () => {
-    expect(KIMI_BUILD_INFO.features).toEqual([
-      'agora',
-      'reference-audit',
-      'asset-pipeline',
-    ]);
+    expect(KIMI_BUILD_INFO.features).toEqual([]);
   });
 
   it('builds the product user-agent for ad-hoc fetches', () => {

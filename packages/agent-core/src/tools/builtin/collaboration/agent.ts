@@ -17,9 +17,7 @@
 
 import { z } from 'zod';
 
-import type { Agent } from '../../../agent';
 import type { BuiltinTool } from '../../../agent/tool';
-import { requireReferenceAuditForEditing } from '../../../reference-audit';
 import type { Logger } from '../../../logging';
 import { ToolAccesses } from '../../../loop/tool-access';
 import { isAbortError } from '../../../loop/errors';
@@ -90,8 +88,6 @@ export const AgentToolInputSchema = z.preprocess(
       ),
     dispatch: z
       .object({
-        reference_dependent: z.boolean().optional(),
-        reference_override_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
         rationale: z
           .string()
           .trim()
@@ -179,7 +175,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       log?: Logger;
       allowBackground?: boolean | undefined;
       subagentTimeoutMs?: number | undefined;
-      records?: Agent['records'] | undefined;
       subagentModelDescription?: string;
       showModelPreferences?: boolean;
       // Mirrors the `secondary-model` experiment: off (the default), the
@@ -193,7 +188,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     // `0` is preserved (not normalized): `0 ?? DEFAULT_SUBAGENT_TIMEOUT_MS`
     // stays `0`, and the BackgroundManager arms no timer for it.
     this.subagentTimeoutMs = options?.subagentTimeoutMs;
-    this.records = options?.records;
     this.parameters =
       options?.modelChoiceEnabled === true
         ? AGENT_TOOL_PARAMETERS
@@ -219,7 +213,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
   private readonly log?: Logger;
   private readonly allowBackground: boolean;
   private readonly subagentTimeoutMs?: number;
-  private readonly records?: Agent['records'];
 
   async resolveExecution(args: AgentToolInput): Promise<ToolExecution> {
     let profileName = args.subagent_type?.length ? args.subagent_type : 'coder';
@@ -252,10 +245,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
   ): Promise<ExecutableToolResult> {
     try {
       signal.throwIfAborted();
-      if (args.dispatch?.reference_dependent === true) {
-        if (this.records === undefined) throw new Error('Reference-dependent editing dispatch requires durable agent records.');
-        requireReferenceAuditForEditing(this.records, args.dispatch.reference_override_hash, toolCallId);
-      }
       const runInBackground = args.run_in_background === true;
       const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
       const resumeAgentId = args.resume?.trim();

@@ -13,22 +13,14 @@ import type {
   AddAdditionalDirOptions,
   AddAdditionalDirResult,
   AgentCommandInfo,
-  AgoraLifecycleCapability,
-  AgoraLifecycleMaterializedHandoff,
-  AgoraLifecycleSnapshot,
-  AgoraLifecycleTransitionResult,
   CapabilityStatus,
   BackgroundTaskInfo,
-  CancelAgoraReviewInput,
-  ConfirmAgoraMaterializationInput,
   CompactOptions,
   CreateGoalInput,
   GetCronTasksResult,
   GoalSnapshot,
   GoalToolResult,
-  InsertAgoraReviewInput,
   JsonObject,
-  MaterializeAgoraReviewInput,
   McpServerInfo,
   McpStartupMetrics,
   PermissionMode,
@@ -36,7 +28,6 @@ import type {
   PluginSummary,
   PromptInput,
   ReloadSessionOptions,
-  ResolveAgoraHandoffInput,
   ReloadSummary,
   ResumedSessionState,
   ResumedSessionSummary,
@@ -665,142 +656,6 @@ export class Session {
       pluginId: normalizedPluginId,
       commandName: normalizedCommandName,
       ...(commandArgs !== undefined ? { args: commandArgs } : {}),
-    });
-  }
-
-  async insertAgoraReview(
-    input: InsertAgoraReviewInput,
-  ): Promise<{ readonly handle: AgoraLifecycleCapability; readonly snapshot: AgoraLifecycleSnapshot }> {
-    this.ensureOpen();
-    const runId = normalizeRequiredString(
-      input.runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    const transitionId = normalizeRequiredString(
-      input.transitionId,
-      'Agora transition id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    return this.rpc.insertAgoraReview({
-      sessionId: this.id,
-      runId,
-      transitionId,
-      title: input.title,
-      slug: input.slug,
-      capability: input.capability,
-    });
-  }
-
-  async getAgoraReview(runId: string): Promise<AgoraLifecycleSnapshot | undefined> {
-    this.ensureOpen();
-    const normalized = normalizeRequiredString(
-      runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    return this.rpc.getAgoraReview({ sessionId: this.id, runId: normalized });
-  }
-
-  async cancelAgoraReview(input: CancelAgoraReviewInput): Promise<AgoraLifecycleTransitionResult> {
-    this.ensureOpen();
-    if (input.capability === undefined) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is required');
-    }
-    const runId = normalizeRequiredString(
-      input.runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    if (input.capability.runId !== runId) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id does not match the lifecycle capability');
-    }
-    const transitionId = normalizeRequiredString(
-      input.transitionId,
-      'Agora transition id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    return this.rpc.cancelAgoraReview({
-      sessionId: this.id,
-      runId,
-      transitionId,
-      capability: input.capability,
-    });
-  }
-
-  async confirmAgoraMaterialization(input: ConfirmAgoraMaterializationInput) {
-    this.ensureOpen();
-    const runId = normalizeRequiredString(
-      input.runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    if (input.capability.runId !== runId) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id does not match the lifecycle capability');
-    }
-    return this.rpc.confirmAgoraMaterialization({
-      sessionId: this.id,
-      runId,
-      capability: input.capability,
-      proposal: input.proposal,
-    });
-  }
-
-  async materializeAgoraReview(
-    input: MaterializeAgoraReviewInput,
-  ): Promise<{ readonly runId: string; readonly success: boolean; readonly error?: string; readonly handoff?: AgoraLifecycleMaterializedHandoff }> {
-    this.ensureOpen();
-    if (input.capability === undefined) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora lifecycle capability is required');
-    }
-    const runId = normalizeRequiredString(
-      input.runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    if (input.capability.runId !== runId) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora run id does not match the lifecycle capability');
-    }
-    const transitionId = normalizeRequiredString(
-      input.transitionId,
-      'Agora transition id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    return this.rpc.materializeAgoraReview({
-      sessionId: this.id,
-      runId,
-      transitionId,
-      capability: input.capability,
-      proposal: input.proposal,
-      confirmation: input.confirmation,
-    });
-  }
-
-  async resolveAgoraHandoff(input: ResolveAgoraHandoffInput): Promise<AgoraLifecycleTransitionResult> {
-    this.ensureOpen();
-    const runId = normalizeRequiredString(
-      input.runId,
-      'Agora run id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    if (input.capability.runId !== runId || input.handoff.runId !== runId) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora handoff run id does not match the lifecycle capability');
-    }
-    if (input.handoff.sourceSessionId !== this.id) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, 'Agora handoff is bound to a different source session');
-    }
-    const transitionId = normalizeRequiredString(
-      input.transitionId,
-      'Agora transition id cannot be empty',
-      ErrorCodes.REQUEST_INVALID,
-    );
-    return this.rpc.resolveAgoraHandoff({
-      sessionId: this.id,
-      runId,
-      transitionId,
-      capability: input.capability,
-      handoff: input.handoff,
-      resolution: input.resolution,
     });
   }
 

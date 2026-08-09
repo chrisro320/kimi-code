@@ -396,7 +396,7 @@ describe('Agent tools', () => {
     expect(names).not.toContain('Edit');
   });
 
-  it('exposes main-only collaboration gates when a subagent host is available', () => {
+  it('exposes the AgentSwarm gate when a subagent host is available', () => {
     const subagentHost = {
       delegatableSubagents: vi.fn(() => ({})),
     } as unknown as SessionSubagentHost;
@@ -405,14 +405,11 @@ describe('Agent tools', () => {
       subagentHost,
       experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS),
     });
-    ctx.configure({ tools: ['AgentSwarm', 'Agora', 'ReferenceAudit', 'AssetPipeline'] });
+    ctx.configure({ tools: ['AgentSwarm'] });
 
-    expect(ctx.agent.tools.loopTools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
-      'AgentSwarm',
-      'Agora',
-      'ReferenceAudit',
-      'AssetPipeline',
-    ]));
+    expect(ctx.agent.tools.loopTools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(['AgentSwarm']),
+    );
   });
 
   it('shows the model preference for a subagent type when the experiment is enabled', () => {

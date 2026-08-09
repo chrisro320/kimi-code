@@ -1,8 +1,6 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
-import { TERMINAL_PHASES, type AgoraLifecyclePhase } from '@moonshot-ai/kimi-code-sdk';
 import type {
   AgentStatusUpdatedEvent,
-  AgoraLifecycleUpdatedEvent,
   AssistantDeltaEvent,
   BackgroundTaskInfo,
   BackgroundTaskStartedEvent,
@@ -117,16 +115,6 @@ export interface SessionEventHost {
   handleShellOutput(event: { commandId: string; update: { kind: string; text?: string } }): void;
   handleShellStarted(event: { commandId: string; taskId: string }): void;
   sendNormalUserInput(text: string): void;
-  createAgoraHandoffSession(
-    handoffPath: string,
-    expected: {
-      readonly runId: string;
-      readonly sourceSessionId: string;
-      readonly targetTask: string;
-      readonly digest: string;
-      readonly insertedTask?: string;
-    },
-  ): Promise<void>;
   updateTerminalTitle(): void;
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
   shiftQueuedMessage(): QueuedMessage | undefined;
@@ -136,7 +124,6 @@ export interface SessionEventHost {
 
 export class SessionEventHandler {
   readonly subAgentEventHandler: SubAgentEventHandler;
-  private readonly agoraHandoffInFlight = new Set<string>();
   private readonly pluginUpdateNotifier: PluginUpdateNotifier;
 
   constructor(
@@ -292,7 +279,6 @@ export class SessionEventHandler {
       case 'tool.call.started': this.handleToolCall(event); break;
       case 'tool.call.delta': this.handleToolCallDelta(event); break;
       case 'tool.result': this.handleToolResult(event); break;
-      case 'agora.lifecycle.updated': this.handleAgoraLifecycleUpdated(event); break;
       case 'agent.status.updated': this.handleStatusUpdate(event); break;
       case 'session.meta.updated': this.handleSessionMetaChanged(event); break;
       case 'goal.updated': this.handleGoalUpdated(event); break;
@@ -374,9 +360,6 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
-    }
-    if (this.host.state.appState.research !== null && this.host.state.appState.research !== undefined) {
-      this.host.setAppState({ research: null });
     }
     if (event.reason === 'failed' && event.error?.code === 'provider.filtered') {
       this.host.showStatus('Turn stopped: provider safety policy blocked the response.', 'error');
@@ -589,35 +572,6 @@ export class SessionEventHandler {
     if (event.name === 'AgentSwarm') {
       this.subAgentEventHandler.handleAgentSwarmToolCallStarted(event.toolCallId, toolCall.args);
     }
-    if (event.name === 'ReferenceAudit') {
-      const active = this.host.state.appState.research;
-      if (active !== null && active !== undefined) {
-        this.host.setAppState({ research: { ...active, phase: 'auditing' } });
-      }
-    }
-    if (event.name === 'Agora') {
-      const configuredPeers = toolCall.args['peers'];
-      const currentAgora = this.host.state.appState.agora;
-      const peers = configuredPeers !== null && typeof configuredPeers === 'object'
-        ? Object.entries(configuredPeers as Record<string, { model_override?: unknown; display_name?: unknown; role?: unknown; backend?: unknown }>).map(([name, peer]) => ({
-            id: name,
-            name: typeof peer.display_name === 'string' && peer.display_name.trim().length > 0 ? peer.display_name : name,
-            backend: typeof peer.backend === 'string' ? peer.backend : undefined,
-            model: typeof peer.model_override === 'string' ? peer.model_override : undefined,
-            status: typeof peer.role === 'string' && peer.role.trim().length > 0 ? `reviewing:${peer.role}` : 'reviewing',
-          }))
-        : (currentAgora?.peers ?? []).map((peer) => ({ ...peer, status: 'reviewing' as const }));
-      this.host.setAppState({
-        agora: {
-          ...currentAgora,
-          runId: typeof toolCall.args['run_id'] === 'string' ? toolCall.args['run_id'] : currentAgora?.runId,
-          phase: 'peer_review',
-          hostRoute: toolCall.args['recovery'] ? 'coder-ex' : 'coder',
-          hostModel: toolCall.args['recovery'] ? 'GPT 5.6sol' : undefined,
-          peers,
-        },
-      });
-    }
     this.host.patchLivePane({
       mode: 'tool',
       pendingApproval: null,
@@ -695,79 +649,7 @@ export class SessionEventHandler {
         streamingUI.setTodoList(sanitized);
       }
     }
-    if (matchedCall !== undefined && matchedCall.name === 'Agora') {
-      // Peer dispatch is done; the statusline must not stay at the optimistic
-      // peer_review/reviewing set on tool.call.started. Tool output itself is
-      // untrusted (may be model-influenced), so refresh from the typed
-      // lifecycle RPC snapshot instead of parsing the result.
-      const runId = (matchedCall.args as { run_id?: unknown }).run_id;
-      const session = this.host.session;
-      if (typeof runId === 'string' && session !== undefined) {
-        void session
-          .getAgoraReview(runId)
-          .then((snapshot) => {
-            if (snapshot === undefined) return;
-            const active = this.host.state.appState.agora;
-            if (active === null || active === undefined || active.runId !== runId) return;
-            this.host.setAppState({
-              agora: {
-                ...active,
-                phase: snapshot.phase,
-                terminalState: snapshot.terminalState,
-                peers: active.peers.map((peer) => ({ ...peer, status: 'done' })),
-              },
-            });
-          })
-          .catch(() => undefined);
-      }
-    }
     this.host.patchLivePane({ mode: 'waiting' });
-  }
-
-  private handleAgoraLifecycleUpdated(event: AgoraLifecycleUpdatedEvent): void {
-    if (event.sourceSessionId !== this.host.state.appState.sessionId) return;
-    const active = this.host.state.appState.agora;
-    if (active?.runId !== undefined && active.runId !== event.runId) return;
-    if (TERMINAL_PHASES.has(event.phase as AgoraLifecyclePhase)) {
-      this.host.setAppState({ agora: null });
-      return;
-    }
-    if (
-      event.phase === 'fresh_session_pending'
-      && event.targetTask !== undefined
-      && event.materializationHandoffPath !== undefined
-      && event.materializationDigest !== undefined
-    ) {
-      // materialize re-emits this phase on idempotent retries; without an
-      // in-flight guard two concurrent handoffs would race the bind and the
-      // terminal resolution (double fresh session, wrong binding).
-      if (this.agoraHandoffInFlight.has(event.runId)) return;
-      this.agoraHandoffInFlight.add(event.runId);
-      void this.host.createAgoraHandoffSession(event.materializationHandoffPath, {
-        runId: event.runId,
-        sourceSessionId: event.sourceSessionId,
-        targetTask: event.targetTask,
-        digest: event.materializationDigest,
-        insertedTask: event.insertedTask,
-      }).finally(() => {
-        this.agoraHandoffInFlight.delete(event.runId);
-      });
-      return;
-    }
-    this.host.setAppState({
-      agora: {
-        runId: event.runId,
-        focus: active?.focus,
-        phase: event.phase,
-        hostRoute: active?.hostRoute ?? 'coder',
-        hostModel: active?.hostModel,
-        originTask: event.originTask,
-        insertedTask: event.insertedTask,
-        startedAtMs: active?.startedAtMs,
-        peers: active?.peers ?? [],
-        terminalState: event.terminalState,
-      },
-    });
   }
 
   private handleStatusUpdate(event: AgentStatusUpdatedEvent): void {

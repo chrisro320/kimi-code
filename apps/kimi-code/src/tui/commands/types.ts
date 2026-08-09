@@ -9,7 +9,6 @@ export interface KimiSlashCommand<Name extends string = string> extends SlashCom
   readonly description: string;
   readonly priority?: number;
   readonly availability?: SlashCommandAvailability | ((args: string) => SlashCommandAvailability);
-  /** Block the command while an Agora terminal handoff retains the active source session. */
   readonly changesSession?: boolean;
   /** When set, the command is hidden from the palette and blocked unless this flag is enabled. */
   readonly experimentalFlag?: FlagId;
@@ -27,6 +26,6 @@ export interface ParsedSlashInput {
   readonly args: string;
 }
 
-export type SlashCommandBusyReason = 'streaming' | 'compacting' | 'agora-resolution-pending';
+export type SlashCommandBusyReason = 'streaming' | 'compacting';
 
 export type SlashCommandInvalidReason = 'unknown';
