@@ -435,7 +435,7 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
     expect(fake.calls[1]!.params).not.toHaveProperty('prompt_cache_key');
   });
 
-  it('rejects a completed empty response with a retryable APIEmptyResponseError', async () => {
+  it('rejects a completed empty response with a NON-retryable APIEmptyResponseError', async () => {
     const { provider } = makeEndpointProvider({
       respond: () => ({ id: 'resp_e', status: 'completed', output: [] }),
     });
@@ -455,12 +455,7 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
       );
 
     expect(error).toBeInstanceOf(APIEmptyResponseError);
-    // `completed` no longer bars a retry: emptiness from a sampled response is
-    // not a property of the request body. For compaction specifically this
-    // predicate only decides the single-message case anyway — with more than
-    // one message left, `fullCompactionService` takes the shrink-and-retry
-    // branch without asking.
-    expect(isRetryableGenerateError(error)).toBe(true);
+    expect(isRetryableGenerateError(error)).toBe(false);
   });
 
   it('keeps a truncated empty response retryable', async () => {

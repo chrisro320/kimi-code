@@ -314,24 +314,14 @@ export function isRetryableGenerateError(error: unknown): boolean {
     return true;
   }
   if (error instanceof APIEmptyResponseError) {
-    // Retryable on every finish reason, `completed` included.
-    //
-    // `completed` used to be excluded, on the reasoning that the provider
-    // considered the response finished, so emptiness was a property of the
-    // request and a byte-identical retry would reproduce it. That holds for a
-    // deterministic model; it does not hold for a sampled reasoning trace,
-    // which is where this actually fires. Measured across local session logs:
-    // 17 occurrences spanning nine model aliases and five providers (including
-    // first-party ones), every one at `high`/`max`/`xhigh` effort and none
-    // below, at prompt sizes from 9 to 539 messages — and the same agents went
-    // on to issue thousands of further requests over the same conversations
-    // without getting stuck. A turn that thought and emitted nothing is a
-    // dice roll, not a fact about the body.
-    //
-    // Cost of being wrong here is bounded by the caller's retry budget: one
-    // extra upstream call before failing the same way. Cost of the previous
-    // behaviour was the whole turn, plus the reasoning tokens already paid for.
-    return true;
+    // A `completed` finish reason means the provider considered the response
+    // finished and successful — nothing was interrupted and no budget ran
+    // out. Emptiness is then a property of this request, and retries resend
+    // a byte-identical body, so every attempt reproduces it: the budget just
+    // burns wall-clock and upstream calls before failing anyway. Every other
+    // finish reason (an interrupted stream leaves it `null`, an exhausted
+    // output budget normalizes to `truncated`) stays retryable.
+    return error.finishReason !== 'completed';
   }
   if (error instanceof APIProviderOverloadedError) {
     return true;

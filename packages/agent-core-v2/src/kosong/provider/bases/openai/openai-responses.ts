@@ -1176,17 +1176,16 @@ export type CompactionResponseOutcome =
 
 /**
  * Bounded-retry verdict for a compact outcome. Only `empty` can be retried,
- * and only when the provider did NOT report the response as completed.
+ * and only when the provider did NOT report the response as completed —
+ * the same rule as the `APIEmptyResponseError` gate in
+ * `isRetryableGenerateError`.
  *
  * **Nothing calls this at runtime** — only tests do. Compaction retry is
  * decided in `fullCompactionService`: an `APIEmptyResponseError` with more than
- * one message left to compact takes the shrink-and-retry branch (drop the
- * oldest message, try again) without consulting any predicate, and only a
- * single-message compaction falls through to `isRetryableGenerateError`.
- *
- * Kept because it still states the intended policy for the outcome type, but
- * do not read it as the live gate, and do not assume changing it changes
- * behaviour.
+ * one message left takes the shrink-and-retry branch (drop the oldest message,
+ * try again) without consulting any predicate, and only a single-message
+ * compaction falls through to `isRetryableGenerateError`. Read this as the
+ * stated policy for the outcome type, not as the live gate.
  */
 export function isRetryableCompactionOutcome(outcome: CompactionResponseOutcome): boolean {
   return outcome.kind === 'empty' && outcome.finishReason !== 'completed';

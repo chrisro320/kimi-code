@@ -130,22 +130,21 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIStatusError(401, 'Unauthorized'))).toBe(false);
   });
 
-  it('retries an empty response on every finish reason', () => {
+  it('retries an empty response unless the provider reported it as completed', () => {
     expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
     expect(
       isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'truncated' })),
     ).toBe(true);
   });
 
-  it('retries an empty response the provider reported as completed', () => {
-    // A reasoning-only turn is a dice roll, not a fact about the request: the
-    // trace is sampled, so a byte-identical retry is not a byte-identical
-    // response. Local session logs show it hitting nine model aliases across
-    // five providers, always at high/max/xhigh effort, while the same
-    // conversations went on to complete thousands of later requests.
+  it('does not retry an empty response the provider reported as completed', () => {
+    // `completed` means the provider finished successfully and stands by the
+    // response: nothing was cut short, so emptiness is a property of this
+    // request. Retries resend a byte-identical body, so every attempt
+    // reproduces it and the whole budget burns before failing anyway.
     expect(
       isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'completed' })),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('retries a 401/403 context-overflow false alarm from a capacity crunch', () => {
