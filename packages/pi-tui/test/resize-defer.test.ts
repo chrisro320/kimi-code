@@ -135,6 +135,43 @@ describe("ledger resize viewport defer", () => {
 		});
 	});
 
+	it("exits the alt-screen while renders keep arriving (no settle starvation)", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal);
+			const c = new TestComponent();
+			tui.addChild(c);
+			c.lines = ["alpha", "beta", "gamma"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			terminal.resize(42, 10);
+			await terminal.waitForRender();
+
+			// Settle is 120ms. Keep rendering past it — like a streaming turn —
+			// so every render lands well inside the settle window. If doRender()
+			// re-armed the settle timer (the bug), each render would push the
+			// deadline out and ALT_EXIT would never appear.
+			const deadline = Date.now() + 180;
+			let renders = 0;
+			while (Date.now() < deadline) {
+				tui.requestRender();
+				await terminal.waitForRender();
+				renders++;
+			}
+
+			const writes = terminal.getWrites();
+			assert.ok(renders >= 6, `renders must keep arriving during the wait (got ${renders})`);
+			assert.ok(writes.includes(ALT_ENTER), `resize should enter the alt-screen; got: ${JSON.stringify(writes)}`);
+			assert.ok(
+				writes.includes(ALT_EXIT),
+				`settle must exit the alt-screen while rendering continues; got: ${JSON.stringify(writes)}`,
+			);
+			tui.stop();
+		});
+	});
+
 	it("skips the alt-screen path under a multiplexer session", async () => {
 		await withLedgerMux(async () => {
 			const terminal = new LoggingVirtualTerminal(40, 10);

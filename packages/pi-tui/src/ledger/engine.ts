@@ -560,9 +560,12 @@ export class LedgerTuiEngine {
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		if (this.#resizeViewportActive) {
-			// dragging: paint viewport only; no ledger/commit/diff
+			// dragging: paint viewport only; no ledger/commit/diff.
+			// Do NOT re-arm the settle timer here: only an actual resize
+			// (beginResizeViewport) may push the settle deadline. Re-arming on
+			// every render starves the alt-screen exit — streaming renders land
+			// faster than the 120ms settle, so ALT_SCREEN_EXIT would never fire.
 			this.#renderResizeViewport(width, height);
-			this.#armResizeSettle();
 			return;
 		}
 
