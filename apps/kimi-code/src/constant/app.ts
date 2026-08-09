@@ -2,7 +2,11 @@ import { ErrorCodes } from '@moonshot-ai/kimi-code-sdk';
 
 export const PRODUCT_NAME = 'Kimi Code';
 export const CLI_COMMAND_NAME = 'kimi';
-export const PROCESS_NAME = 'kimi-code';
+// Matches CLI_COMMAND_NAME, not the package name: host tooling identifies a
+// running agent by the foreground process name, and expects the command it
+// launched. Orca, for one, keys its agent table on `kimi` — under `kimi-code`
+// the pane is just a shell to it, and supervised dispatch is refused.
+export const PROCESS_NAME = CLI_COMMAND_NAME;
 
 // Used in telemetry app names and HTTP User-Agent headers.
 export const CLI_USER_AGENT_PRODUCT = 'kimi-code-cli';
