@@ -307,6 +307,9 @@ async function resolveNativeSession(
     model: string | undefined,
   ): Promise<void> => {
     if (model !== undefined) await profile.setModel(model);
+    // After the model, so the level is validated against the model actually
+    // bound rather than the one it replaced.
+    if (opts.effort !== undefined) profile.setThinking(opts.effort);
   };
 
   const resumeById = async (id: string): Promise<ISessionScopeHandle> => {
@@ -386,6 +389,7 @@ async function resolveNativeSession(
     mainAgentBinding: {
       profile: agentProfileName ?? 'agent',
       model,
+      thinking: opts.effort,
     },
   });
   const agent = await ensureMainAgent(session);

@@ -241,6 +241,25 @@ describe('CLI options parsing', () => {
     });
   });
 
+  describe('--effort', () => {
+    // `effort` is optional on CLIOptions, so a missing read in createProgram
+    // would type-check and silently drop the flag.
+    it('parses --effort as a thinking override', () => {
+      expect(parse(['--effort', 'xhigh']).effort).toBe('xhigh');
+      expect(parse(['--effort=max']).effort).toBe('max');
+    });
+
+    it('leaves effort unset when the flag is absent', () => {
+      expect(parse([]).effort).toBeUndefined();
+    });
+
+    it('rejects empty effort values', () => {
+      const opts = parse(['--effort', '   ']);
+      expect(() => validateOptions(opts)).toThrow(OptionConflictError);
+      expect(() => validateOptions(opts)).toThrow('--effort requires a thinking level.');
+    });
+  });
+
   describe('--prompt / -p', () => {
     it('parses -p as prompt mode', () => {
       const opts = parse(['-p', 'explain this repo']);

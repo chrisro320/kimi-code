@@ -56,6 +56,12 @@ export function createProgram(
     )
     .addOption(
       new Option(
+        '--effort <level>',
+        'Thinking effort for this invocation, e.g. high or max. Defaults to the resolution from [thinking] in config.toml.',
+      ),
+    )
+    .addOption(
+      new Option(
         '-p, --prompt <prompt>',
         'Run one prompt non-interactively and print the response.',
       ),
@@ -157,6 +163,7 @@ export function createProgram(
       auto: autoValue,
       plan: raw['plan'] as boolean,
       model: raw['model'] as string | undefined,
+      effort: raw['effort'] as string | undefined,
       outputFormat: raw['outputFormat'] as CLIOptions['outputFormat'],
       prompt: raw['prompt'] as string | undefined,
       skillsDirs: raw['skillsDir'] as string[],

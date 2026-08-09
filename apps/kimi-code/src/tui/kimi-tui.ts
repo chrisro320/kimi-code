@@ -16,6 +16,7 @@ import type {
   Session,
   SessionUsage,
   SkillSummary,
+  ThinkingEffort,
   TokenUsage,
   WorkspaceTrustInfo,
 } from '@moonshot-ai/kimi-code-sdk';
@@ -491,6 +492,7 @@ export class KimiTUI {
         auto: startupInput.cliOptions.auto,
         plan: startupInput.cliOptions.plan,
         model: startupInput.cliOptions.model,
+        thinking: startupInput.cliOptions.effort,
         agentProfile: startupInput.agentProfile,
         agentFiles: startupInput.cliOptions.agentFiles,
         startupNotice: startupInput.startupNotice,
@@ -905,6 +907,7 @@ export class KimiTUI {
     const createSessionOptions: MutableCreateSessionOptions = {
       workDir,
       model: startup.model,
+      thinking: startup.thinking,
       permission: startup.auto ? 'auto' : startup.yolo ? 'yolo' : undefined,
       planMode: startup.plan ? true : undefined,
       // --agent/--agent-file bind the startup session only; sessions created
@@ -1899,6 +1902,14 @@ export class KimiTUI {
           effectiveModelAlias(raw, providerType ?? raw.protocol),
         );
       }
+    }
+    // --effort outranks both the config value and the model default. Carried
+    // as the first session's thinking override, since that is what the lazy
+    // create path reads while no session exists — `thinkingEffort` alone would
+    // only move the footer.
+    if (startup.thinking !== undefined) {
+      patch.thinkingEffort = startup.thinking as ThinkingEffort;
+      patch.lazySessionThinking = startup.thinking as ThinkingEffort;
     }
     if (startup.agentProfile !== undefined || startup.agentFiles !== undefined) {
       patch.agentProfile = startup.agentProfile;

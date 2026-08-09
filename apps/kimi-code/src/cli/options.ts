@@ -41,6 +41,8 @@ export interface CLIOptions {
   auto: boolean;
   plan: boolean;
   model: string | undefined;
+  /** `--effort`. Optional: ~25 option literals in tests construct CLIOptions. */
+  effort?: string | undefined;
   outputFormat: PromptOutputFormat | undefined;
   prompt: string | undefined;
   skillsDirs: string[];
@@ -69,6 +71,9 @@ export function validateOptions(
   const promptMode = prompt !== undefined;
   if (promptMode && prompt.trim().length === 0) {
     throw new OptionConflictError('Prompt cannot be empty.');
+  }
+  if (opts.effort !== undefined && opts.effort.trim().length === 0) {
+    throw new OptionConflictError('--effort requires a thinking level.');
   }
   if (opts.model !== undefined && opts.model.trim().length === 0) {
     throw new OptionConflictError('Model cannot be empty.');
