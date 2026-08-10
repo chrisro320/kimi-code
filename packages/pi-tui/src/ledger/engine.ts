@@ -47,7 +47,7 @@ export class LedgerTuiEngine {
 	// ---- gesture flags (OMP: 1029-1070) ----
 	#fullRedrawCount = 0;
 	#clearScrollbackOnNextRender = false;
-	#forceViewportRepaintOnNextRender = false;
+	#fullPaintOnNextRender = false;
 	#hasEverRendered = false;
 	#resizeEventPending = false;
 	#stopped = false;
@@ -362,7 +362,7 @@ export class LedgerTuiEngine {
 	): void {
 		this.#previousFrameLength = lines.length;
 		this.#previousWindow = window;
-		this.#forceViewportRepaintOnNextRender = false;
+		this.#fullPaintOnNextRender = false;
 		this.#previousWidth = width;
 		this.#previousHeight = height;
 		this.#recordHardwareCursorUpdate(hardwareCursor);
@@ -617,7 +617,7 @@ export class LedgerTuiEngine {
 		const firstPaint = !this.#hasEverRendered;
 		const replaceRequested = this.#clearScrollbackOnNextRender;
 		const geometryRebuild = geometryChanged && !resizeRepaintsInPlace();
-		const fullPaint = firstPaint || replaceRequested || geometryRebuild;
+		const fullPaint = firstPaint || replaceRequested || this.#fullPaintOnNextRender || geometryRebuild;
 		let windowTop: number;
 		let chunkTo: number;
 		let committedPrefixResliced = false;
@@ -682,7 +682,7 @@ export class LedgerTuiEngine {
 			windowTop,
 			prevWindowTop,
 			prevHardwareCursorRow,
-			forceWindowRewrite: this.#forceViewportRepaintOnNextRender || (geometryChanged && resizeRepaintsInPlace()),
+			forceWindowRewrite: geometryChanged && resizeRepaintsInPlace(),
 		});
 		for (let i = this.#committedPrefix.length; i < chunkTo; i++) {
 			this.#committedPrefix.push(rawFrame[i] ?? "");
@@ -700,7 +700,7 @@ export class LedgerTuiEngine {
 
 	public requestFullPaint(clearScrollback: boolean): void {
 		if (clearScrollback) this.#clearScrollbackOnNextRender = true;
-		else this.#forceViewportRepaintOnNextRender = true;
+		else this.#fullPaintOnNextRender = true;
 	}
 
 	public notifyResize(): void {
@@ -784,7 +784,7 @@ export class LedgerTuiEngine {
 		this.#previousHeight = 0;
 		this.#hasEverRendered = false;
 		this.#clearScrollbackOnNextRender = false;
-		this.#forceViewportRepaintOnNextRender = false;
+		this.#fullPaintOnNextRender = false;
 		this.#composedFrame = [];
 		this.#frameSegments = [];
 		this.#composeWidth = -1;

@@ -748,6 +748,12 @@ export class TUI extends Container {
 		this.terminal.stop();
 	}
 
+	/** Resynchronize ledger rendering after a caller writes directly to the terminal. */
+	notifyExternalOutput(): void {
+		if (TUI.LEDGER_ENABLED) this.getLedgerEngine().requestFullPaint(false);
+		this.requestRender();
+	}
+
 	requestRender(force = false): void {
 		if (force) {
 			if (TUI.LEDGER_ENABLED) {

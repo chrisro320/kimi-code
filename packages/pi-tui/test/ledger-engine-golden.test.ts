@@ -70,6 +70,30 @@ describe("ledger engine golden", () => {
 		});
 	});
 
+	it("resynchronizes the ledger after notified external output", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 6);
+			const tui = new TUI(terminal);
+			const c = new TestComponent();
+			tui.addChild(c);
+			c.lines = ["content-0", "content-1", "content-2"];
+			tui.start();
+			await terminal.waitForRender();
+
+			const redrawsBeforeExternalOutput = tui.fullRedraws;
+			terminal.clearWrites();
+			terminal.write("[external] Error: boom\r\n    at first\r\n    at second");
+			await terminal.flush();
+			tui.notifyExternalOutput();
+			await terminal.waitForRender();
+
+			assert.deepStrictEqual(terminal.getViewport().slice(0, 3), c.lines);
+			assert.ok(tui.fullRedraws > redrawsBeforeExternalOutput, "external output must trigger a full repaint");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "external-output repaint must preserve scrollback");
+			tui.stop();
+		});
+	});
+
 	it("commits appended rows and repaints window on streaming append", async () => {
 		await withLedger(async () => {
 			const terminal = new LoggingVirtualTerminal(40, 5);
