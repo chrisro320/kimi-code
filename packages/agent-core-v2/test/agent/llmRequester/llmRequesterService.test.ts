@@ -147,6 +147,7 @@ function createService(
   options: {
     readonly thinkingLevel?: ThinkingEffort;
     readonly capabilitiesOverride?: ModelCapability;
+    readonly historyOverride?: readonly ContextMessage[];
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
@@ -180,7 +181,7 @@ function createService(
     },
   };
   const usage = { record: () => undefined, status: () => ({}) };
-  const context = { get: () => history };
+  const context = { get: () => options.historyOverride ?? history };
   const tools = { list: () => [] };
   const config: Partial<IConfigService> = {
     get: (() => undefined) as IConfigService['get'],
@@ -897,6 +898,47 @@ describe('AgentLLMRequesterService compact', () => {
     },
   };
 
+  it('replays an owned checkpoint through the ordinary request path in summary position', async () => {
+    const captured: ModelRequestInput[] = [];
+    const requester = createRequester({ value: 0 }, null, [], captured);
+    requester.compactionLineage = () => ({ ...LINEAGE });
+    const cp = checkpoint({ itemType: 'compaction_summary', itemId: 'cmp-1' });
+    const { service } = createService(requester, undefined, {
+      historyOverride: [
+        { role: 'user', content: [{ type: 'text', text: 'before' }], toolCalls: [] },
+        ...historyWithCheckpoint(cp).slice(1),
+        { role: 'user', content: [{ type: 'text', text: 'after' }], toolCalls: [] },
+      ],
+    });
+
+    await service.request();
+
+    const parts = captured[0]!.messages.flatMap((message) => message.content);
+    expect(parts).toEqual([
+      { type: 'text', text: 'before' },
+      { type: 'compaction', ...cp },
+      { type: 'text', text: 'after' },
+    ]);
+  });
+
+  it('keeps the readable summary on the ordinary request path for foreign lineage', async () => {
+    const captured: ModelRequestInput[] = [];
+    const requester = createRequester({ value: 0 }, null, [], captured);
+    requester.compactionLineage = () => ({ ...LINEAGE, model: 'other-model' });
+    const { service } = createService(requester, undefined, {
+      historyOverride: historyWithCheckpoint(checkpoint()),
+    });
+
+    await service.request();
+
+    const parts = captured[0]!.messages.flatMap((message) => message.content);
+    expect(parts).toEqual([
+      { type: 'text', text: 'kept' },
+      { type: 'text', text: 'readable summary' },
+    ]);
+    expect(parts.some((part) => (part as { type: string }).type === 'compaction')).toBe(false);
+  });
+
   it('projects history against capability+lineage and drives the requester boundary', async () => {
     const captured: { input?: ModelCompactionInput } = {};
     const requester = compactCapableRequester(captured, OK_OUTCOME);
@@ -913,6 +955,36 @@ describe('AgentLLMRequesterService compact', () => {
     expect(input.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
     const checkpointItem = input.history[1];
     expect(checkpointItem).toEqual({ kind: 'checkpoint', checkpoint: cp });
+  });
+
+  it('uses the normal request projection when no checkpoint is replayed', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
+    const history: ContextMessage[] = [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'first' }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'second' }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
+    ];
+
+    await service.compact({ history });
+
+    expect(captured.input!.history).toHaveLength(1);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { role: 'user', content: [{ type: 'text', text: 'first\n\nsecond' }] },
+    });
   });
 
   it('never calls the provider when the model does not declare remote_compaction', async () => {

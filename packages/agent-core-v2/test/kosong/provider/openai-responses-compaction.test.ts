@@ -40,7 +40,7 @@ async function* makeAsyncIterable(items: readonly unknown[]): AsyncIterable<obje
   }
 }
 
-async function drain(stream: OpenAIResponsesStreamedMessage): Promise<StreamedMessagePart[]> {
+async function drain(stream: AsyncIterable<StreamedMessagePart>): Promise<StreamedMessagePart[]> {
   const parts: StreamedMessagePart[] = [];
   for await (const part of stream) {
     parts.push(part);
@@ -310,6 +310,57 @@ function ownedCheckpoint(provider: OpenAIResponsesChatProvider): CompactionCheck
     replayInputTokens: { kind: 'unknown' },
   };
 }
+
+describe('OpenAIResponsesChatProvider ordinary checkpoint replay', () => {
+  it('serializes the transient compaction part as a native top-level input item', async () => {
+    let captured: Record<string, unknown> | undefined;
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-4.1',
+      clientFactory: () =>
+        ({
+          responses: {
+            create: (params: Record<string, unknown>) => {
+              captured = params;
+              return Promise.resolve(
+                makeAsyncIterable([
+                  {
+                    type: 'response.output_item.done',
+                    item: {
+                      id: 'msg_1',
+                      type: 'message',
+                      content: [{ type: 'output_text', text: 'done' }],
+                    },
+                  },
+                  {
+                    type: 'response.completed',
+                    response: { id: 'resp_generate', status: 'completed' },
+                  },
+                ]),
+              );
+            },
+          },
+        }) as unknown as OpenAI,
+    });
+    const checkpoint = ownedCheckpoint(provider);
+    const checkpointMessage: Message = {
+      role: 'user',
+      content: [{ type: 'compaction', ...checkpoint }] as unknown as Message['content'],
+      toolCalls: [],
+    };
+
+    await drain(await provider.generate('', [], [
+      userMessage('before'),
+      checkpointMessage,
+      userMessage('after'),
+    ]));
+
+    expect(captured?.['input']).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'before' }] },
+      { type: 'compaction_summary', encrypted_content: 'opaque-payload-±§', id: 'cmp_9' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'after' }] },
+    ]);
+  });
+});
 
 describe('OpenAIResponsesChatProvider compactionLineage', () => {
   it('resolves the provider default base URL when the config sets none', () => {

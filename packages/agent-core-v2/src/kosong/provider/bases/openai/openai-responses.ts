@@ -32,7 +32,7 @@ import type {
 } from '#/kosong/contract/message';
 import { extractText, isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
 import { canonicalizeLineage } from '#/kosong/contract/compaction';
-import type { CompactionLineage } from '#/kosong/contract/compaction';
+import type { CompactionCheckpoint, CompactionLineage } from '#/kosong/contract/compaction';
 import type {
   ChatProvider,
   ChatProviderCompactionInput,
@@ -98,6 +98,7 @@ function normalizeResponsesFinishReason(
 }
 
 type RawObject = Record<string, unknown>;
+type ReplayContentPart = ContentPart | (CompactionCheckpoint & { readonly type: 'compaction' });
 const OPENAI_RESPONSES_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_RESPONSES_TOOL_CALL_ID_POLICY: ToolCallIdPolicy = {
   normalize: (id) => sanitizeOpenAIResponsesCallId(id, 64),
@@ -634,7 +635,7 @@ function convertMessage(
     let i = 0;
     const n = message.content.length;
     while (i < n) {
-      const part = message.content[i];
+      const part = message.content[i] as ReplayContentPart | undefined;
       if (part === undefined) break;
       if (part.type === 'think') {
         flushPendingParts();
@@ -654,6 +655,15 @@ function convertMessage(
           type: 'reasoning',
           encrypted_content: encryptedValue,
         });
+      } else if (part.type === 'compaction') {
+        flushPendingParts();
+        const item: Record<string, unknown> = {
+          type: part.itemType,
+          encrypted_content: part.encrypted,
+        };
+        if (part.itemId !== undefined) item['id'] = part.itemId;
+        result.push(item as unknown as ResponseInputItem);
+        i += 1;
       } else {
         pendingParts.push(part);
         i += 1;

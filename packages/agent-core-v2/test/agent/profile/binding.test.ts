@@ -28,6 +28,10 @@ import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalo
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
 import {
+  ISessionMetadata,
+  type SessionMetadataChangedEvent,
+} from '#/session/sessionMetadata/sessionMetadata';
+import {
   ISessionToolPolicy,
   type SessionToolPolicyChangedEvent,
 } from '#/session/sessionToolPolicy/sessionToolPolicy';
@@ -58,6 +62,25 @@ function profileServices(ctx: TestAgentContext): {
   return {
     profile: ctx.get(IAgentProfileService),
     toolPolicy: ctx.get(IAgentToolPolicyService),
+  };
+}
+
+function sessionMetadataAt(iso: string): ISessionMetadata {
+  const createdAt = Date.parse(iso);
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChangeMetadata: Event.None as Event<SessionMetadataChangedEvent>,
+    read: async () => ({
+      id: 'test-session',
+      createdAt,
+      updatedAt: createdAt,
+      archived: false,
+    }),
+    update: async () => {},
+    setTitle: async () => {},
+    setArchived: async () => {},
+    registerAgent: async () => {},
   };
 }
 
@@ -147,13 +170,17 @@ describe('AgentProfileService.bind', () => {
     expect(svc.isRunnable()).toBe(true);
   });
 
-  it('renders the prompt and disclosure from the injected host clock', async () => {
+  it('renders the prompt from session creation time with the injected host timezone', async () => {
     const hostClock: IHostClock = {
       _serviceBrand: undefined,
-      now: () => new Date('2026-07-29T04:00:00.000Z'),
+      now: () => new Date('2026-07-29T08:00:00.000Z'),
       timeZone: () => 'Asia/Shanghai',
     };
-    ctx = createTestAgent(appService(IHostClock, hostClock), hostEnvironmentServices(homeDir));
+    ctx = createTestAgent(
+      appService(IHostClock, hostClock),
+      sessionService(ISessionMetadata, sessionMetadataAt('2026-07-29T04:00:00.000Z')),
+      hostEnvironmentServices(homeDir),
+    );
     const svc = ctx.get(IAgentProfileService);
 
     await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
@@ -803,7 +830,11 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
       now: () => current,
       timeZone: () => 'Asia/Shanghai',
     };
-    ctx = createTestAgent(appService(IHostClock, hostClock), hostEnvironmentServices(homeDir));
+    ctx = createTestAgent(
+      appService(IHostClock, hostClock),
+      sessionService(ISessionMetadata, sessionMetadataAt('2026-07-29T04:00:00.000Z')),
+      hostEnvironmentServices(homeDir),
+    );
     const svc = ctx.get(IAgentProfileService);
     await svc.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
 
@@ -817,23 +848,26 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
     expect(svc.getSystemPrompt()).toBe('ts:2026-07-29T04:00:00.000Z tz:Asia/Shanghai');
   });
 
-  it('pins the prompt timestamp to each agent scope construction time', async () => {
+  it('keeps the prompt timestamp across agent reconstruction for one session', async () => {
     registerAgentProfile({
       name: 'clock-pinned',
       tools: ['Read'],
       systemPrompt: (context) => `ts:${context.now}`,
     });
+    const metadata = sessionMetadataAt('2026-07-29T04:00:00.000Z');
     ctx = createTestAgent(
       appService(IHostClock, {
         _serviceBrand: undefined,
         now: () => new Date('2026-07-29T04:00:00.000Z'),
         timeZone: () => 'Asia/Shanghai',
       }),
+      sessionService(ISessionMetadata, metadata),
       hostEnvironmentServices(homeDir),
     );
     const first = ctx.get(IAgentProfileService);
     await first.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
-    expect(first.getSystemPrompt()).toBe('ts:2026-07-29T04:00:00.000Z');
+    const firstPrompt = first.getSystemPrompt();
+    expect(firstPrompt).toBe('ts:2026-07-29T04:00:00.000Z');
 
     const secondCtx = createTestAgent(
       appService(IHostClock, {
@@ -841,12 +875,14 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
         now: () => new Date('2026-07-29T08:00:00.000Z'),
         timeZone: () => 'Asia/Shanghai',
       }),
+      sessionService(ISessionMetadata, metadata),
       hostEnvironmentServices(homeDir),
     );
     try {
       const second = secondCtx.get(IAgentProfileService);
       await second.bind({ profile: 'clock-pinned', model: MOCK_MODEL });
-      expect(second.getSystemPrompt()).toBe('ts:2026-07-29T08:00:00.000Z');
+      await second.refreshSystemPrompt();
+      expect(second.getSystemPrompt()).toBe(firstPrompt);
     } finally {
       await secondCtx.dispose();
     }

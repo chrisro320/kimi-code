@@ -57,7 +57,10 @@ import {
   isUnsupportedContentPartError,
 } from '#/kosong/contract/errors';
 import { type Message } from '#/kosong/contract/message';
-import { type ModelHistoryItem } from '#/kosong/contract/compaction';
+import {
+  type CompactionCheckpoint,
+  type ModelHistoryItem,
+} from '#/kosong/contract/compaction';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
 import { emptyUsage, inputTotal, type TokenUsage } from '#/kosong/contract/usage';
@@ -280,8 +283,11 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       lineage !== undefined
         ? { supportsCheckpointReplay: true, lineage }
         : { supportsCheckpointReplay: false };
-    const history = input.history ?? this.context.get();
-    const projected = projectModelHistory(history, target);
+    const history = this.toolSelect.shapeHistory(input.history ?? this.context.get());
+    const checkpointAware = projectModelHistory(history, target);
+    const projected = checkpointAware.some((item) => item.kind === 'checkpoint')
+      ? checkpointAware
+      : this.projector.project(history).map((message) => ({ kind: 'message' as const, message }));
     this.log.info('llm compact request', {
       ...logFieldsForSource(input.source),
       model: resolved.modelAlias ?? 'unknown',
@@ -424,7 +430,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     signal: AbortSignal | undefined,
     onRequestTrace: (traceId: string | undefined) => void,
   ): Promise<AgentLLMRequestFinish> {
-    const shaped = this.toolSelect.shapeHistory(request.messages);
+    const lineage = request.requester.compactionLineage();
+    const target: CheckpointTarget =
+      lineage === undefined
+        ? { supportsCheckpointReplay: false }
+        : { supportsCheckpointReplay: true, lineage };
+    const ordinaryHistory = this.toolSelect.shapeHistory(request.messages);
+    const checkpointAware = projectModelHistory(ordinaryHistory, target);
+    const shaped = checkpointAware.some((item) => item.kind === 'checkpoint')
+      ? checkpointAware.map((item) =>
+          item.kind === 'message' ? item.message : checkpointReplayMessage(item.checkpoint),
+        )
+      : ordinaryHistory;
     let mediaStripSnapshot = this.mediaStripSnapshotForTurn(request.source);
     const requestInput = (projection: RequestProjection) => {
       return {
@@ -874,6 +891,14 @@ function requestKindForTelemetry(source: AgentLLMRequestSource | undefined): str
   if (source?.type === 'turn') return 'turn';
   if (source?.type === 'operation') return source.requestKind ?? 'operation';
   return undefined;
+}
+
+function checkpointReplayMessage(checkpoint: CompactionCheckpoint): Message {
+  return {
+    role: 'user',
+    content: [{ type: 'compaction', ...checkpoint }] as unknown as Message['content'],
+    toolCalls: [],
+  };
 }
 
 function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {

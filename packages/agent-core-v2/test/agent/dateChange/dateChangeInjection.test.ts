@@ -15,6 +15,7 @@ import { join } from 'pathe';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { Event } from '#/_base/event';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -25,12 +26,17 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { IHostClock } from '#/os/interface/hostClock';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionMetadata,
+  type SessionMetadataChangedEvent,
+} from '#/session/sessionMetadata/sessionMetadata';
 
 import {
   appService,
   createTestAgent,
   hostEnvironmentServices,
   InMemoryWireRecordPersistence,
+  sessionService,
   type TestAgentContext,
 } from '../../harness';
 import { runWillBeginStepHooks } from '../loop/stubs';
@@ -51,6 +57,20 @@ function testHostClock(initialIso: string): TestHostClock {
     set: (iso) => {
       current = new Date(iso);
     },
+  };
+}
+
+function sessionMetadataAt(iso: string): ISessionMetadata {
+  const createdAt = Date.parse(iso);
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChangeMetadata: Event.None as Event<SessionMetadataChangedEvent>,
+    read: async () => ({ id: 'test-session', createdAt, updatedAt: createdAt, archived: false }),
+    update: async () => {},
+    setTitle: async () => {},
+    setArchived: async () => {},
+    registerAgent: async () => {},
   };
 }
 
@@ -285,7 +305,11 @@ describe('AgentDateChangeService', () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'kimi-date-bind-home-'));
     try {
       await ctx.dispose();
-      ctx = createTestAgent(appService(IHostClock, clock), hostEnvironmentServices(homeDir));
+      ctx = createTestAgent(
+        appService(IHostClock, clock),
+        sessionService(ISessionMetadata, sessionMetadataAt(INITIAL_INSTANT)),
+        hostEnvironmentServices(homeDir),
+      );
       context = ctx.get(IAgentContextMemoryService);
       loop = ctx.get(IAgentLoopService);
       profile = ctx.get(IAgentProfileService);

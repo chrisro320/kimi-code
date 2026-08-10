@@ -83,11 +83,11 @@
  * own default applies when nothing is configured. `bind` gates on the freeze
  * before materializing the model, whose resolution reads the identity through
  * the host-headers port — a fast bootstrap must wait, not trip the pre-freeze
- * guard. The prompt's `${now}` slot is pinned to the Agent's construction time
- * (`sessionStartedAt`): the system prompt is large, and a changed line near
- * its front invalidates the provider's whole prompt-cache prefix from there
- * on, so re-rendering a fresh timestamp mid-session would silently defeat the
- * cache. `requestSystemPromptRefresh` / `flushPendingSystemPromptRefresh`
+ * guard. The prompt's `${now}` slot comes from sessionMetadata's durable
+ * `createdAt`, so it survives Agent reconstruction and resume: the system
+ * prompt is large, and a changed line near its front invalidates the provider's
+ * whole prompt-cache prefix from there on. `requestSystemPromptRefresh` /
+ * `flushPendingSystemPromptRefresh`
  * defer a refresh to the next turn boundary (the loop drains it at the start
  * of `runTurn`), so a refresh requested mid-turn — e.g. right after full
  * compaction — never changes the prefix the current turn's requests already
@@ -128,6 +128,7 @@ import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostClock } from '#/os/interface/hostClock';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import type { ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { subagentDisplayModel } from '#/session/subagent/configSection';
@@ -263,6 +264,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IHostClock private readonly clock: IHostClock,
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
@@ -279,7 +281,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IFlagService private readonly flags: IFlagService,
   ) {
     super();
-    this.sessionStartedAt = this.clock.now();
     this.states.register(profileActiveToolNamesOverlayKey);
     this.states.register(profileAgentsMdWarningKey);
     this.states.register(profileEmittedThinkingEffortWarningsKey);
@@ -317,7 +318,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     );
   }
 
-  private readonly sessionStartedAt: Date;
   private pendingSystemPromptRefresh = false;
 
   private get activeToolNamesOverlay(): readonly string[] | undefined {
@@ -985,6 +985,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     );
     const skills = await this.resolveSkillListing();
     const pluginSections = await this.resolvePluginSections();
+    const sessionMetadata = await this.sessionMetadata.read();
     const timeZone = this.clock.timeZone();
     return {
       ...base,
@@ -992,7 +993,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       osKind: this.env.osKind,
       shellName: this.env.shellName,
       shellPath: this.env.shellPath,
-      now: this.sessionStartedAt.toISOString(),
+      now: new Date(sessionMetadata.createdAt).toISOString(),
       timeZone,
       skills,
       pluginSections,
