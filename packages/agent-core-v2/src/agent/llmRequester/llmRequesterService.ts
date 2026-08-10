@@ -286,7 +286,15 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     const history = this.toolSelect.shapeHistory(input.history ?? this.context.get());
     const checkpointAware = projectModelHistory(history, target);
     const projected = checkpointAware.some((item) => item.kind === 'checkpoint')
-      ? checkpointAware
+      ? this.projector
+          .project(
+            checkpointAware.map((item) =>
+              item.kind === 'checkpoint'
+                ? checkpointReplayMessage(item.checkpoint)
+                : item.message,
+            ),
+          )
+          .map(modelHistoryItemFromProjectedMessage)
       : this.projector.project(history).map((message) => ({ kind: 'message' as const, message }));
     this.log.info('llm compact request', {
       ...logFieldsForSource(input.source),
@@ -893,12 +901,25 @@ function requestKindForTelemetry(source: AgentLLMRequestSource | undefined): str
   return undefined;
 }
 
+type CheckpointReplayPart = CompactionCheckpoint & { readonly type: 'compaction' };
+
 function checkpointReplayMessage(checkpoint: CompactionCheckpoint): Message {
   return {
     role: 'user',
     content: [{ type: 'compaction', ...checkpoint }] as unknown as Message['content'],
     toolCalls: [],
   };
+}
+
+function modelHistoryItemFromProjectedMessage(message: Message): ModelHistoryItem {
+  if (message.role === 'user' && message.toolCalls.length === 0 && message.content.length === 1) {
+    const part = message.content[0] as CheckpointReplayPart | undefined;
+    if (part?.type === 'compaction') {
+      const { type: _type, ...checkpoint } = part;
+      return { kind: 'checkpoint', checkpoint };
+    }
+  }
+  return { kind: 'message', message };
 }
 
 function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {

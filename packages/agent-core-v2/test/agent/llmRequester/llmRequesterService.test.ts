@@ -987,6 +987,62 @@ describe('AgentLLMRequesterService compact', () => {
     });
   });
 
+  it('matches the ordinary request projection around an owned checkpoint', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+    });
+    const user = (text: string): ContextMessage => ({
+      role: 'user',
+      content: [{ type: 'text', text }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+    const cp = checkpoint({ itemType: 'compaction_summary', itemId: 'cmp-1' });
+    const history: ContextMessage[] = [
+      user('before one'),
+      user('before two'),
+      ...historyWithCheckpoint(cp).slice(1),
+      user('after one'),
+      user('after two'),
+    ];
+
+    await service.compact({ history });
+
+    expect(captured.input!.history).toEqual([
+      {
+        kind: 'message',
+        message: expect.objectContaining({
+          role: 'user',
+          content: [{ type: 'text', text: 'before one' }],
+        }),
+      },
+      {
+        kind: 'message',
+        message: expect.objectContaining({
+          role: 'user',
+          content: [{ type: 'text', text: 'before two' }],
+        }),
+      },
+      { kind: 'checkpoint', checkpoint: cp },
+      {
+        kind: 'message',
+        message: expect.objectContaining({
+          role: 'user',
+          content: [{ type: 'text', text: 'after one' }],
+        }),
+      },
+      {
+        kind: 'message',
+        message: expect.objectContaining({
+          role: 'user',
+          content: [{ type: 'text', text: 'after two' }],
+        }),
+      },
+    ]);
+  });
+
   it('never calls the provider when the model does not declare remote_compaction', async () => {
     let calls = 0;
     const requester = createRequester({ value: 0 });

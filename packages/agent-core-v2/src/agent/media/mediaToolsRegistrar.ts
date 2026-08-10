@@ -7,7 +7,8 @@
  * that point no model is bound yet — the capabilities are still
  * `UNKNOWN_CAPABILITY`, so a capability gate would permanently skip the
  * tool. Registration instead re-runs whenever the resolved model changes:
- * every profile/model update publishes `agent.status.updated`, and this
+ * every live profile/model update publishes `agent.status.updated`, while
+ * `wire.hooks.onDidRestore` refreshes once after silent resume replay. This
  * service re-invokes {@link registerMediaTools} when the model alias or its
  * media capabilities differ from what it last registered (rebinding the
  * video uploader to the new model, and dropping the tool when the model
@@ -21,9 +22,6 @@
  * (`IAgentStateService`) and read/written through it; `registration` stays an
  * instance field (the live `IDisposable` tool-registration handle, not plain
  * data).
- *
- * Agent scope creation instantiates this service before any `opts.binding`
- * bind runs, so the first `agent.status.updated` is always observed.
  */
 
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
@@ -43,6 +41,7 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { extendWorkspaceWithSkillRoots } from '#/tool/path-access';
+import { IWireService } from '#/wire/wire';
 
 import { IAgentMediaToolsRegistrar } from './mediaTools';
 import { createVideoUploader, registerMediaTools } from './registerMediaTools';
@@ -67,11 +66,18 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
     @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IWireService wire: IWireService,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
   ) {
     super();
     this.states.register(mediaRegisteredKeyKey);
     this.refresh();
+    this._register(
+      wire.hooks.onDidRestore.register('media', async (_ctx, next) => {
+        this.refresh();
+        await next();
+      }),
+    );
     this._register(eventBus.subscribe('agent.status.updated', () => this.refresh()));
     this._register(toDisposable(() => this.registration?.dispose()));
   }

@@ -37,11 +37,13 @@ import {
   type ToolExecution,
 } from '#/tool/toolContract';
 import { EventBusService } from '#/app/event/eventBusService';
+import { OrderedHookSlot } from '#/hooks';
 import type { IAgentProfileService } from '#/agent/profile/profile';
 import type { IModelCatalog } from '#/kosong/model/catalog';
 import type { ModelRequester } from '#/kosong/model/modelRequester';
 import type { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import type { WorkspaceConfig } from '#/tool/path-access';
+import type { IWireService } from '#/wire/wire';
 import { sniffImageDimensions } from '#/agent/media/file-type';
 
 const WORKSPACE: WorkspaceConfig = { workspaceDir: '/workspace', additionalDirs: [] };
@@ -827,6 +829,9 @@ describe('AgentMediaToolsRegistrar', () => {
   function createRegistrarHarness() {
     const registry = new AgentToolRegistryService();
     const eventBus = new EventBusService();
+    const wire = {
+      hooks: { onDidRestore: new OrderedHookSlot() },
+    } as unknown as IWireService;
     const state: ProfileState = {
       alias: '',
       capabilities: capabilities({ image_in: false, video_in: false }),
@@ -854,18 +859,31 @@ describe('AgentMediaToolsRegistrar', () => {
       workspaceCtx,
       recordingTelemetry([]),
       new AgentStateService(),
+      wire,
     );
-    const bindModel = (alias: string, caps: ModelCapability): void => {
+    const restoreModel = (alias: string, caps: ModelCapability): void => {
       state.alias = alias;
       state.capabilities = caps;
+    };
+    const bindModel = (alias: string, caps: ModelCapability): void => {
+      restoreModel(alias, caps);
       eventBus.publish({
         type: 'agent.status.updated',
         model: alias,
         maxContextTokens: caps.max_context_tokens,
       });
     };
-    return { registry, registrar, bindModel };
+    return { registry, registrar, wire, restoreModel, bindModel };
   }
+
+  it('registers ReadMediaFile after silent profile restore before the first status update', async () => {
+    const { registry, wire, restoreModel } = createRegistrarHarness();
+    restoreModel('vision-model', capabilities({ image_in: true, video_in: false }));
+    expect(registry.resolve('ReadMediaFile')).toBeUndefined();
+
+    await wire.hooks.onDidRestore.run({});
+    expect(registry.resolve('ReadMediaFile')).toBeInstanceOf(ReadMediaFileTool);
+  });
 
   it('registers nothing until a media-capable model binds, then registers ReadMediaFile', () => {
     const { registry, bindModel } = createRegistrarHarness();
