@@ -134,7 +134,7 @@ export class AuthFlowController {
       availableModels,
       availableProviders,
       model: defaultModel,
-      maxContextTokens: selected.maxContextSize,
+      maxContextTokens: selected.overrides?.maxContextSize ?? selected.maxContextSize,
     };
     host.setAppState(appStatePatch);
   }

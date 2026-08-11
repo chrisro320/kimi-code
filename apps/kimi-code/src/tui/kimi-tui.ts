@@ -1840,8 +1840,11 @@ export class KimiTUI {
     if (startupModel !== undefined) {
       patch.model = startupModel;
       const selected = config.models?.[startupModel];
-      if (selected?.maxContextSize !== undefined) {
-        patch.maxContextTokens = selected.maxContextSize;
+      // Mirror the engine's effectiveModelConfig merge: user `overrides` win
+      // over the entry's top-level fields.
+      const maxContextSize = selected?.overrides?.maxContextSize ?? selected?.maxContextSize;
+      if (maxContextSize !== undefined) {
+        patch.maxContextTokens = maxContextSize;
       }
     } else {
       // The default disappeared from config (edited externally): clear the
