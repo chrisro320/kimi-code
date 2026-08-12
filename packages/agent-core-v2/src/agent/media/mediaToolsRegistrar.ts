@@ -16,7 +16,10 @@
  * refresh: it is derived from the model's protocol because only the OpenAI
  * family drops inline video on the wire — every other protocol that
  * converts `video_url` takes the inline fallback when no upload hook
- * exists.
+ * exists. A model alias that fails to resolve keeps the previous
+ * registration and an uncommitted key, so the next refresh retries instead
+ * of installing degraded media behavior; unexpected resolution failures are
+ * logged through `log`.
  *
  * The plain-data state (`registeredKey`) is registered into `agentState`
  * (`IAgentStateService`) and read/written through it; `registration` stays an
@@ -29,6 +32,7 @@ import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
+import { ILogService } from '#/_base/log/log';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -42,6 +46,8 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { extendWorkspaceWithSkillRoots } from '#/tool/path-access';
 import { IWireService } from '#/wire/wire';
+import { isCodedError } from '#/errors';
+import { CONFIG_INVALID_ERROR_CODE } from '#/kosong/contract/errors';
 
 import { IAgentMediaToolsRegistrar } from './mediaTools';
 import { createVideoUploader, registerMediaTools } from './registerMediaTools';
@@ -65,6 +71,7 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
     @IHostEnvironment private readonly env: IHostEnvironment,
     @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @ILogService private readonly log: ILogService,
     @IAgentStateService private readonly states: IAgentStateService,
     @IWireService wire: IWireService,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
@@ -98,8 +105,6 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
       String(capabilities.video_in),
     ].join('|');
     if (key === this.registeredKey) return;
-    this.registeredKey = key;
-    this.registration?.dispose();
     const workspaceCtx = this.workspaceCtx;
     const skillCatalog = this.skillCatalog;
     const env = this.env;
@@ -110,11 +115,20 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
       try {
         requester = this.modelCatalog.getRequester(modelAlias);
         model = requester.model;
-      } catch {
-        requester = undefined;
-        model = undefined;
+      } catch (error) {
+        // Keep the previous registration and the uncommitted key so the next
+        // refresh retries instead of installing degraded media behavior.
+        if (!isExpectedMissingModelError(error)) {
+          this.log.error(
+            `Failed to resolve model "${modelAlias}" for media tool registration.`,
+            { error },
+          );
+        }
+        return;
       }
     }
+    this.registeredKey = key;
+    this.registration?.dispose();
     this.registration = registerMediaTools(this.toolRegistry, {
       fs: this.fs,
       env: this.env,
@@ -143,6 +157,10 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
       telemetry: this.telemetry,
     });
   }
+}
+
+function isExpectedMissingModelError(error: unknown): boolean {
+  return isCodedError(error) && error.code === CONFIG_INVALID_ERROR_CODE;
 }
 
 registerScopedService(

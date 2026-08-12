@@ -4029,6 +4029,56 @@ describe('goal reminder re-injection after full compaction', () => {
       await ctx.expectResumeMatches();
     });
 
+    it('does not invoke the manager delegate when cancelled during PreCompact', async () => {
+      const delegate = vi.fn();
+      const manager = delegateManager(delegate as ContextManager['onWillCompact']);
+      const ctx = delegatedAgent(manager);
+      const compaction = ctx.get(IAgentFullCompactionService);
+      let preCompactStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        preCompactStarted = resolve;
+      });
+      let releasePreCompact!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releasePreCompact = resolve;
+      });
+      compaction.hooks.onWillCompact.register('test', async (_task, next) => {
+        preCompactStarted();
+        await gate;
+        await next();
+      });
+
+      const cancelled = ctx.once('compaction.cancelled');
+      void ctx.rpc.beginCompaction({});
+      await started;
+      const task = compaction.compacting;
+      expect(task).not.toBeNull();
+      task!.abortController.abort();
+      await cancelled;
+      releasePreCompact();
+
+      await expect(task!.promise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(delegate).not.toHaveBeenCalled();
+    });
+
+    it('normalizes an arbitrary abort reason into an AbortError', async () => {
+      const manager = delegateManager(() => new Promise<CompactDelegation>(() => {}));
+      const ctx = delegatedAgent(manager);
+      const compaction = ctx.get(IAgentFullCompactionService);
+
+      await ctx.rpc.beginCompaction({});
+      const task = compaction.compacting;
+      expect(task).not.toBeNull();
+      const cancelled = ctx.once('compaction.cancelled');
+      task!.abortController.abort(new Error('user cancelled'));
+      await cancelled;
+
+      await expect(task!.promise).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'user cancelled',
+      });
+    });
+
     it('hands the remote and local paths the same request-context instance', async () => {
       const records: TelemetryRecord[] = [];
       const manager = delegateManager();

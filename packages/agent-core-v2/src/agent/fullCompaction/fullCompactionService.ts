@@ -600,7 +600,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     } catch (error) {
       if (active.abortController.signal.aborted || isAbortError(error)) {
         this.cancelActive(active);
-        throw error;
+        throw isAbortError(error) ? error : compactionCancelledReason(active);
       }
       const blockedByTurn = this._compacting === active && active.blockedByTurn;
       if (this._compacting === active) {
@@ -635,6 +635,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
   ): Promise<CompactionResult> {
     const manager = requestContext.manager;
     if (manager?.onWillCompact !== undefined) {
+      signal.throwIfAborted();
       const delegation = await abortable(
         Promise.resolve(manager.onWillCompact({ task: active, input: data, signal })),
         signal,
@@ -1097,8 +1098,14 @@ function usageTelemetry(usage: TokenUsage | null): CompactionTelemetryProperties
 
 function compactionCancelledReason(active: ActiveCompaction | null): Error {
   const reason = active?.abortController.signal.reason;
-  if (reason instanceof Error) return reason;
-  const error = new Error('Compaction cancelled.');
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  let message = 'Compaction cancelled.';
+  if (reason instanceof Error) {
+    message = reason.message;
+  } else if (typeof reason === 'string' && reason !== '') {
+    message = reason;
+  }
+  const error = new Error(message);
   error.name = 'AbortError';
   return error;
 }
