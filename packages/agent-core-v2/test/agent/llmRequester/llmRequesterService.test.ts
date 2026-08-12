@@ -209,8 +209,11 @@ function createService(
     get: ((section: string) => options.configValues?.[section]) as IConfigService['get'],
   };
   const warnings: { readonly message: string; readonly payload: unknown }[] = [];
+  const infos: { readonly message: string; readonly payload: unknown }[] = [];
   const log = {
-    info: () => undefined,
+    info: (message: string, payload?: unknown) => {
+      infos.push({ message, payload });
+    },
     warn: (message: string, payload?: unknown) => {
       warnings.push({ message, payload });
     },
@@ -279,6 +282,7 @@ function createService(
     measuredCalls,
     measuredSnapshots,
     warnings,
+    infos,
   };
 }
 
@@ -1288,6 +1292,84 @@ describe('AgentLLMRequesterService compact', () => {
     expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
     expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
   });
+
+  it('falls back to the original messages when the transform rewrites a carrier in place', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const mutating: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        const carrier = messages
+          .flatMap((message) => message.content)
+          .find((part) => (part as { type: string }).type === 'compaction') as
+          | ({ encrypted: string } & { type: string })
+          | undefined;
+        if (carrier !== undefined) carrier.encrypted = 'rewritten-in-place';
+        return { messages, accounting: 'transformed' };
+      },
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(mutating);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    const replayed = captured.input!.history[1];
+    expect(replayed).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(replayed!.kind === 'checkpoint' ? replayed!.checkpoint.encrypted : undefined).toBe(
+      'opaque-payload',
+    );
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
+  });
+
+  it('accepts a transform whose carrier property insertion order differs', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const reordering: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) => {
+          if (
+            !message.content.some((part) => (part as { type: string }).type === 'compaction')
+          ) {
+            return { ...message, content: [{ type: 'text' as const, text: 'compressed' }] };
+          }
+          return {
+            ...message,
+            content: message.content.map((part) => {
+              const carrier = part as unknown as { type: 'compaction' } & CompactionCheckpoint;
+              if (carrier.type !== 'compaction') return part;
+              const { type, ...checkpoint } = carrier;
+              return { ...checkpoint, type } as unknown as Message['content'][number];
+            }),
+          };
+        }),
+      }),
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(reordering);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'compressed' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(false);
+  });
 });
 
 describe('AgentLLMRequesterService context manager registration', () => {
@@ -1342,6 +1424,21 @@ describe('AgentLLMRequesterService context manager registration', () => {
     service.registerContextManager(stubManager('other'));
     expect(service.getActiveContextManager()).toBeUndefined();
     expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+  });
+
+  it('logs once on the first successful activation and stays silent afterwards', () => {
+    const { service, infos } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+
+    service.registerContextManager(stubManager('alpha'));
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(infos.filter((entry) => entry.message.includes('"alpha"'))).toHaveLength(1);
+
+    const { service: quiet } = createService(createRequester({ value: 0 }), undefined);
+    quiet.registerContextManager(stubManager('alpha'));
+    expect(quiet.getActiveContextManager()).toBeUndefined();
   });
 });
 
@@ -1465,6 +1562,64 @@ describe('AgentLLMRequesterService context transform pipeline', () => {
             once: true,
           });
         }),
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const pending = service.request();
+    await started;
+    (service as unknown as { dispose(): void }).dispose();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('unblocks the transform queue when a manager ignores the abort signal', async () => {
+    let calls = 0;
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) {
+          transformStarted();
+          return new Promise<TransformResult>(() => {});
+        }
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const controller = new AbortController();
+    const first = service.request({}, undefined, controller.signal);
+    await started;
+    controller.abort();
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await service.request();
+    expect(calls).toBe(2);
+  });
+
+  it('settles an in-flight transform on dispose even when the manager ignores the signal', async () => {
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: () => {
+        transformStarted();
+        return new Promise<TransformResult>(() => {});
+      },
     };
     const { service } = createService(createRequester({ value: 0 }, null), undefined, {
       configValues: enabledConfig,

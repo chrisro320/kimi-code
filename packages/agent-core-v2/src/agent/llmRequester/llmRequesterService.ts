@@ -65,6 +65,7 @@ import { type Message } from '#/kosong/contract/message';
 import {
   type CompactionCheckpoint,
   type ModelHistoryItem,
+  type ReplayInputTokenEstimate,
 } from '#/kosong/contract/compaction';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
@@ -117,7 +118,7 @@ import {
   llmToolsSnapshot,
   type LlmRequestToolSchema,
 } from './llmRequestOps';
-import { isAbortError } from '#/_base/utils/abort';
+import { abortable, isAbortError } from '#/_base/utils/abort';
 import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
 import { retryErrorFields } from '#/_base/utils/retry';
 
@@ -186,6 +187,10 @@ export const llmRequesterContextManagerMismatchWarningsKey = defineState<Set<str
   'llmRequester.contextManagerMismatchWarnings',
   () => new Set(),
 );
+export const llmRequesterContextManagerActivatedKey = defineState<Set<string>>(
+  'llmRequester.contextManagerActivated',
+  () => new Set(),
+);
 
 export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   declare readonly _serviceBrand: undefined;
@@ -214,6 +219,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.states.register(llmRequesterMediaStrippedTurnsKey);
     this.states.register(llmRequesterEmittedThinkingEffortWarningsKey);
     this.states.register(llmRequesterContextManagerMismatchWarningsKey);
+    this.states.register(llmRequesterContextManagerActivatedKey);
   }
 
   private registeredContextManager: ContextManager | undefined;
@@ -254,6 +260,10 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return this.states.get(llmRequesterContextManagerMismatchWarningsKey);
   }
 
+  private get contextManagerActivated(): Set<string> {
+    return this.states.get(llmRequesterContextManagerActivatedKey);
+  }
+
   registerContextManager(manager: ContextManager): IDisposable {
     if (this.registeredContextManager !== undefined) {
       throw new Error(
@@ -277,7 +287,19 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     const configuredId = this.config.get<string>(CONTEXT_MANAGER_SECTION);
     if (configuredId === undefined) return undefined;
     const manager = this.registeredContextManager;
-    if (manager !== undefined && manager.id === configuredId) return manager;
+    if (manager !== undefined && manager.id === configuredId) {
+      // Activation is otherwise silent: log the first successful match per id
+      // so an operator can tell a manager actually took over, mirroring the
+      // once-per-id mismatch warning below.
+      if (!this.contextManagerActivated.has(configuredId)) {
+        this.contextManagerActivated.add(configuredId);
+        this.log.info(`Context manager "${configuredId}" activated.`, {
+          contextManager: configuredId,
+          version: manager.version,
+        });
+      }
+      return manager;
+    }
     if (!this.contextManagerMismatchWarnings.has(configuredId)) {
       this.contextManagerMismatchWarnings.add(configuredId);
       this.log.warn(`Context manager "${configuredId}" is configured but not registered.`, {
@@ -298,7 +320,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     meta: { readonly source: AgentLLMRequestSource | undefined; readonly maxContextTokens: number },
     signal: AbortSignal | undefined,
   ): Promise<TransformResult> {
-    return this.enqueueTransform(manager, messages, meta, signal).then((result) =>
+    return this.enqueueTransform(manager, structuredClone(messages), meta, signal).then((result) =>
       this.validateCarriers(messages, result),
     );
   }
@@ -311,9 +333,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     const after = compactionCarriersOf(result.messages);
     const intact =
       before.length === after.length &&
-      before.every(
-        (carrier, index) => JSON.stringify(carrier) === JSON.stringify(after[index]),
-      );
+      before.every((carrier, index) => carriersEqual(carrier, after[index]!));
     if (intact) return result;
     this.log.warn(
       'context manager transform dropped, rewrote, or reordered compaction carriers; falling back to the original messages',
@@ -338,13 +358,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         signal === undefined ? [this.transformLifetime.signal] : [this.transformLifetime.signal, signal],
       );
       linked.throwIfAborted();
-      return manager.transformMessages({
-        messages,
-        source: meta.source,
-        usedContextTokens: this.tokenCounting.get().size,
-        maxContextTokens: meta.maxContextTokens,
-        signal: linked,
-      });
+      return abortable(
+        Promise.resolve(
+          manager.transformMessages({
+            messages,
+            source: meta.source,
+            usedContextTokens: this.tokenCounting.get().size,
+            maxContextTokens: meta.maxContextTokens,
+            signal: linked,
+          }),
+        ),
+        linked,
+      );
     };
     const result = this.transformQueue.then(entry, entry);
     this.transformQueue = result.then(
@@ -1106,6 +1131,25 @@ function compactionCarriersOf(messages: readonly Message[]): CheckpointReplayPar
     }
   }
   return carriers;
+}
+
+function carriersEqual(a: CheckpointReplayPart, b: CheckpointReplayPart): boolean {
+  return (
+    a.type === b.type &&
+    a.encrypted === b.encrypted &&
+    a.itemType === b.itemType &&
+    a.itemId === b.itemId &&
+    a.lineage.provider === b.lineage.provider &&
+    a.lineage.model === b.lineage.model &&
+    a.lineage.baseUrl === b.lineage.baseUrl &&
+    replayTokensEqual(a.replayInputTokens, b.replayInputTokens)
+  );
+}
+
+function replayTokensEqual(a: ReplayInputTokenEstimate, b: ReplayInputTokenEstimate): boolean {
+  if (a.kind === 'unknown' && b.kind === 'unknown') return true;
+  if (a.kind === 'measured' && b.kind === 'measured') return a.tokens === b.tokens;
+  return false;
 }
 
 function modelHistoryItemFromProjectedMessage(message: Message): ModelHistoryItem {
