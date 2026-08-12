@@ -1325,3 +1325,114 @@ describe('AgentLLMRequesterService context transform pipeline', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
+
+describe('AgentLLMRequesterService identity and test transformers', () => {
+  function yieldUsage(requester: ModelRequester): ModelRequester {
+    const base = requester.request.bind(requester);
+    requester.request = async function* (input, signal, options) {
+      yield {
+        type: 'usage',
+        usage: { inputOther: 40, output: 2, inputCacheRead: 0, inputCacheCreation: 0 },
+        model: 'wire-model',
+      };
+      yield* base(input, signal, options);
+    };
+    return requester;
+  }
+
+  it('identity manager: manager runs yet the payload stays byte-identical to disabled', async () => {
+    const baselineCaptured: ModelRequestInput[] = [];
+    const baseline = createService(
+      createRequester({ value: 0 }, null, [], baselineCaptured),
+      undefined,
+    );
+    await baseline.service.request();
+
+    let calls = 0;
+    const identity: ContextManager = {
+      id: 'identity',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const captured: ModelRequestInput[] = [];
+    const { service, measuredCalls } = createService(
+      yieldUsage(createRequester({ value: 0 }, null, [], captured)),
+      undefined,
+      { configValues: { [CONTEXT_MANAGER_SECTION]: 'identity' } },
+    );
+    service.registerContextManager(identity);
+    await service.request();
+
+    expect(calls).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(JSON.stringify(captured[0])).toBe(JSON.stringify(baselineCaptured[0]));
+    expect(measuredCalls).toHaveLength(1);
+  });
+
+  it('test transformer: replacement lands while adjacency, think, and toolCallId stay legal', async () => {
+    const toolHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'run the tool' }], toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: 'thinking…', encrypted: 'enc-blob' },
+          { type: 'text', text: 'calling the tool' },
+        ],
+        toolCalls: [{ type: 'function', id: 'call-1', name: 'Lookup', arguments: '{"q":"x"}' }],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: 'x'.repeat(500) }],
+        toolCalls: [],
+        toolCallId: 'call-1',
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'final answer' }], toolCalls: [] },
+    ];
+    const truncating: ContextManager = {
+      id: 'trunc',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) =>
+          message.role === 'tool'
+            ? { ...message, content: [{ type: 'text' as const, text: '[truncated]' }] }
+            : message,
+        ),
+      }),
+    };
+    const captured: ModelRequestInput[] = [];
+    const passthrough = {
+      project: (messages: readonly ContextMessage[]) => [...messages],
+      projectStrict: (messages: readonly ContextMessage[]) => [...messages],
+    };
+    const { service } = createService(
+      createRequester({ value: 0 }, null, [], captured),
+      passthrough,
+      {
+        historyOverride: toolHistory,
+        configValues: { [CONTEXT_MANAGER_SECTION]: 'trunc' },
+      },
+    );
+    service.registerContextManager(truncating);
+    await service.request();
+
+    expect(captured).toHaveLength(1);
+    const messages = captured[0]!.messages;
+    const assistant = messages[1]!;
+    const tool = messages[2]!;
+    expect(assistant.role).toBe('assistant');
+    expect(assistant.toolCalls.map((call) => call.id)).toEqual(['call-1']);
+    expect(tool.role).toBe('tool');
+    expect(tool.toolCallId).toBe('call-1');
+    expect(assistant.content[0]).toEqual({
+      type: 'think',
+      think: 'thinking…',
+      encrypted: 'enc-blob',
+    });
+    expect(tool.content).toEqual([{ type: 'text', text: '[truncated]' }]);
+    expect(JSON.stringify(messages)).not.toContain('x'.repeat(500));
+  });
+});
