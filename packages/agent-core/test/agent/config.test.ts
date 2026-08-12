@@ -1,6 +1,7 @@
 import type { ModelCapability, ProviderConfig, ToolCall } from '@moonshot-ai/kosong';
 import { describe, expect, it, vi } from 'vitest';
 
+import { InMemoryAgentRecordPersistence } from '../../src/agent/records/persistence';
 import { FLAG_DEFINITIONS, FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import { createCommandKaos, testAgent } from './harness/agent';
@@ -155,24 +156,85 @@ describe('Agent config', () => {
   });
 
   it('refreshSystemPrompt reproduces an unchanged prompt byte for byte', async () => {
-    const ctx = testAgent();
+    let cwdListing = 'listing-v1';
+    const persistence = new InMemoryAgentRecordPersistence();
+    const ctx = testAgent({
+      persistence,
+      systemPromptContextProvider: async () => ({ cwdListing }),
+    });
     ctx.configure();
     const profile: ResolvedAgentProfile = {
       name: 'refresh-profile',
-      // Mirrors the builtin renderer's fallback (`profile/resolve.ts`): when the
-      // agent supplies no `now`, the template stamps render time instead, and a
-      // refresh silently rewrites the prompt.
-      systemPrompt: (context) => `now=${String(context.now ?? new Date().toISOString())}`,
+      systemPrompt: (context) =>
+        `now=${String(context.now ?? new Date().toISOString())} ls=${context.cwdListing ?? ''}`,
       tools: [],
     };
 
-    ctx.agent.useProfile(profile);
+    ctx.agent.useProfile(profile, { cwdListing });
     const before = ctx.agent.config.systemPrompt;
-    expect(before).toMatch(/^now=\d{4}-\d{2}-\d{2}T/);
+    expect(before).toContain('ls=listing-v1');
+    const recordCount = persistence.records.length;
+    cwdListing = 'listing-v2';
 
     await ctx.agent.refreshSystemPrompt();
 
     expect(ctx.agent.config.systemPrompt).toBe(before);
+    expect(
+      persistence.records
+        .slice(recordCount)
+        .filter((record) => record.type === 'config.update' && record.systemPrompt !== undefined),
+    ).toEqual([]);
+  });
+
+  it('keeps non-cwd prompt inputs live across refreshes', async () => {
+    let agentsMd = 'old instructions';
+    const ctx = testAgent({
+      systemPromptContextProvider: async () => ({
+        cwdListing: 'listing-v2',
+        agentsMd,
+      }),
+    });
+    ctx.configure();
+    const profile: ResolvedAgentProfile = {
+      name: 'live-context-profile',
+      systemPrompt: (context) =>
+        `ls=${context.cwdListing ?? ''} agents=${context.agentsMd ?? ''}`,
+      tools: [],
+    };
+
+    ctx.agent.useProfile(profile, {
+      cwdListing: 'listing-v1',
+      agentsMd,
+    });
+    agentsMd = 'new instructions';
+    await ctx.agent.refreshSystemPrompt();
+
+    expect(ctx.agent.config.systemPrompt).toBe('ls=listing-v1 agents=new instructions');
+  });
+
+  it('does not freeze a cwd listing from a failed context refresh', async () => {
+    let shouldFail = true;
+    let cwdListing = 'listing-v1';
+    const ctx = testAgent({
+      systemPromptContextProvider: async () => {
+        if (shouldFail) throw new Error('context unavailable');
+        return { cwdListing };
+      },
+    });
+    ctx.configure();
+    const profile: ResolvedAgentProfile = {
+      name: 'retry-context-profile',
+      systemPrompt: (context) => `ls=${context.cwdListing ?? ''}`,
+      tools: [],
+    };
+    ctx.agent.useProfile(profile);
+
+    await expect(ctx.agent.refreshSystemPrompt()).rejects.toThrow('context unavailable');
+    shouldFail = false;
+    cwdListing = 'listing-v2';
+    await ctx.agent.refreshSystemPrompt();
+
+    expect(ctx.agent.config.systemPrompt).toBe('ls=listing-v2');
   });
 
   it('useProfile injects enabled plugin system-prompt sections', async () => {

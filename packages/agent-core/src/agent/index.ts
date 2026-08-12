@@ -183,6 +183,7 @@ export class Agent {
   private additionalDirs: readonly string[];
   private activeProfile?: ResolvedAgentProfile;
   private brandHome?: string;
+  private frozenCwdListing?: string;
   private readonly emittedThinkingEffortWarnings = new Set<string>();
   private pluginSystemPrompts: readonly EnabledPluginSystemPrompt[];
   private readonly emittedPluginBudgetWarnings = new Set<string>();
@@ -494,10 +495,10 @@ export class Agent {
   }
 
   /**
-   * Re-render the system prompt with freshly gathered runtime context (cwd
-   * listing, AGENTS.md, additional-dirs info, skill list). Invalidates the
-   * prompt-cache prefix by design, so it must only run on a turn boundary —
-   * see `requestSystemPromptRefresh`.
+   * Re-render the system prompt with freshly gathered runtime context (AGENTS.md,
+   * additional-dirs info, skill list) while retaining the first successful cwd
+   * listing for this Agent. Invalidates the prompt-cache prefix by design, so it
+   * must only run on a turn boundary — see `requestSystemPromptRefresh`.
    */
   async refreshSystemPrompt(): Promise<void> {
     if (this.activeProfile === undefined) return;
@@ -545,6 +546,7 @@ export class Agent {
   ): void {
     const pluginSections = composePluginSections(this.pluginSystemPrompts);
     this.warnAboutSkippedPluginSections(pluginSections.skipped);
+    const cwdListing = this.frozenCwdListing ?? context?.cwdListing;
     const systemPrompt = profile.systemPrompt({
       osEnv: this.kaos.osEnv,
       cwd: this.config.cwd,
@@ -552,11 +554,16 @@ export class Agent {
       skills: this.skills?.registry,
       compactSkillListing: this.experimentalFlags.enabled('compact-skill-listing'),
       pluginSections: pluginSections.content,
-      cwdListing: context?.cwdListing,
+      cwdListing,
       agentsMd: context?.agentsMd,
       additionalDirsInfo: context?.additionalDirsInfo,
     });
-    this.config.update({ profileName: profile.name, systemPrompt, subagentNames });
+    this.frozenCwdListing ??= cwdListing;
+    this.config.update({
+      profileName: profile.name,
+      systemPrompt: systemPrompt === this.config.systemPrompt ? undefined : systemPrompt,
+      subagentNames,
+    });
   }
 
   /**
