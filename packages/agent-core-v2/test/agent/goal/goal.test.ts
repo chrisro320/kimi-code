@@ -28,6 +28,7 @@ import {
 import { MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
+import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import type { PermissionMode, PermissionPolicyResult } from '#/agent/permissionPolicy/types';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -62,7 +63,7 @@ import {
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 import { stubLoopWithHooks, type StubLoop } from '../loop/stubs';
 import { stubToolExecutorEvents, type ToolExecutorEventStubs } from '../toolExecutor/stubs';
-import { stubAgentSwarm } from './stubs';
+import { stubAgentSwarm, stubAgentTasks, type StubAgentTasks } from './stubs';
 
 function createTestAgent(
   ...inputs: readonly (TestAgentServiceOverride | TestAgentOptions)[]
@@ -90,6 +91,8 @@ interface ManualDeadline {
 class ManualGoalDeadlineScheduler implements IGoalDeadlineScheduler {
   declare readonly _serviceBrand: undefined;
 
+  readonly delays: number[] = [];
+
   private currentTime = 0;
   private readonly deadlines = new Set<ManualDeadline>();
 
@@ -98,6 +101,7 @@ class ManualGoalDeadlineScheduler implements IGoalDeadlineScheduler {
   }
 
   schedule(delayMs: number, callback: () => void): IDisposable {
+    this.delays.push(delayMs);
     const deadline: ManualDeadline = {
       dueAt: this.currentTime + Math.max(0, delayMs),
       callback,
@@ -2323,5 +2327,294 @@ describe('AgentGoalService fork boundaries', () => {
     ]);
 
     expect(context.get()).toEqual([]);
+  });
+});
+
+describe('AgentGoalService background task waiting', () => {
+  let ctx: TestAgentContext | undefined;
+  let context: IAgentContextMemoryService;
+  let goals: IAgentGoalService;
+  let loopService: StubLoop;
+  let toolExecutor: IAgentToolExecutorService;
+  let eventBus: IEventBus;
+  let clock: ManualGoalDeadlineScheduler;
+  let tasks: StubAgentTasks;
+  let records: WireRecord[];
+
+  beforeEach(() => {
+    const persistence = new InMemoryWireRecordPersistence();
+    loopService = stubLoopWithHooks();
+    clock = new ManualGoalDeadlineScheduler();
+    tasks = stubAgentTasks();
+    ctx = createTestAgent(
+      wireRecordPersistenceServices(persistence),
+      appService(IGoalDeadlineScheduler, clock),
+      agentService(IAgentLoopService, loopService),
+      agentService(IAgentTaskService, tasks),
+      permissionModeServices('auto'),
+    );
+    context = ctx.get(IAgentContextMemoryService);
+    goals = ctx.get(IAgentGoalService);
+    toolExecutor = ctx.get(IAgentToolExecutorService);
+    eventBus = ctx.get(IEventBus);
+    records = persistence.records;
+  });
+
+  afterEach(async () => {
+    await ctx?.dispose();
+    ctx = undefined;
+  });
+
+  async function startGoalTurn(turnId: number): Promise<Turn> {
+    const turn = makeTurn(turnId);
+    eventBus.publish({ type: 'turn.started', turnId: turn.id, origin: USER_PROMPT_ORIGIN });
+    await loopService.hooks.onWillBeginStep.run({
+      turnId: turn.id,
+      step: 1,
+      signal: turn.signal,
+    });
+    return turn;
+  }
+
+  async function runGoalTurn(turnId: number, ...startTasks: readonly string[]): Promise<void> {
+    const turn = await startGoalTurn(turnId);
+    for (const taskId of startTasks) tasks.start(taskId);
+    endTurn(eventBus, turn);
+    await Promise.resolve();
+  }
+
+  it('continues immediately when the goal owns no background task', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+
+    await runGoalTurn(60);
+
+    expect(loopService.launches).toHaveLength(1);
+    expect(clock.delays).toHaveLength(0);
+  });
+
+  it('withholds the continuation while an owned background task is still running', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+
+    await runGoalTurn(60, 'task-a');
+
+    expect(loopService.launches).toHaveLength(0);
+    expect(loopService.drainNextBatch(context)).toBeUndefined();
+  });
+
+  it('does not open a turn or append context when the watchdog fires with no change', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    const contextLength = context.get().length;
+
+    clock.advanceBy(120_000);
+
+    expect(loopService.launches).toHaveLength(0);
+    expect(context.get()).toHaveLength(contextLength);
+  });
+
+  it('resumes at the next turn boundary once the owned task settles', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    expect(loopService.launches).toHaveLength(0);
+
+    tasks.setStatus('task-a', 'completed');
+    await runGoalTurn(61);
+
+    expect(loopService.launches).toHaveLength(1);
+    expect(clock.delays).toEqual([120_000]);
+  });
+
+  it('stops waiting once the owned task asks for user input', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+
+    tasks.setStatus('task-a', 'input_required');
+    await runGoalTurn(61);
+
+    expect(loopService.launches).toHaveLength(1);
+  });
+
+  it('backs off 2m then 5m and caps at 15m while the owned task stays unsettled', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+
+    clock.advanceBy(120_000);
+    clock.advanceBy(300_000);
+    clock.advanceBy(900_000);
+    clock.advanceBy(900_000);
+
+    expect(clock.delays).toEqual([120_000, 300_000, 900_000, 900_000, 900_000]);
+    expect(loopService.launches).toHaveLength(0);
+  });
+
+  it('resets the backoff after the wait condition changes', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    clock.advanceBy(120_000);
+    clock.advanceBy(300_000);
+    expect(clock.delays).toEqual([120_000, 300_000, 900_000]);
+
+    tasks.setStatus('task-a', 'completed');
+    await runGoalTurn(61, 'task-b');
+
+    expect(clock.delays).toEqual([120_000, 300_000, 900_000, 120_000]);
+    expect(loopService.launches).toHaveLength(0);
+  });
+
+  it('launches the continuation from the watchdog when no turn observed the settlement', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+
+    tasks.setStatus('task-a', 'completed');
+    clock.advanceBy(120_000);
+
+    expect(loopService.launches).toHaveLength(1);
+  });
+
+  it('does not enqueue a continuation when the watchdog fires during another turn', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+
+    await startGoalTurn(61);
+    tasks.setStatus('task-a', 'completed');
+    clock.advanceBy(900_000);
+
+    expect(loopService.launches).toHaveLength(0);
+  });
+
+  it('drops the watchdog when the agent is disposed', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+
+    await ctx?.dispose();
+    ctx = undefined;
+    tasks.setStatus('task-a', 'completed');
+    clock.advanceBy(900_000);
+
+    expect(loopService.launches).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      exit: 'pause',
+      act: async () => {
+        await goals.pauseGoal();
+      },
+    },
+    {
+      exit: 'blocked',
+      act: async () => {
+        await goals.markBlocked({ reason: 'stuck' });
+      },
+    },
+    {
+      exit: 'cancel',
+      act: async () => {
+        await goals.cancelGoal();
+      },
+    },
+    {
+      exit: 'complete',
+      act: async () => {
+        await goals.markComplete({ reason: 'done' });
+      },
+    },
+    {
+      exit: 'replace',
+      act: async () => {
+        await goals.createGoal({ objective: 'next', replace: true });
+      },
+    },
+  ])('drops the watchdog when the waiting goal leaves active via $exit', async ({ act }) => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    expect(loopService.launches).toHaveLength(0);
+
+    await act();
+    const launchesAfterExit = loopService.launches.length;
+    tasks.setStatus('task-a', 'completed');
+    clock.advanceBy(900_000);
+
+    expect(loopService.launches).toHaveLength(launchesAfterExit);
+  });
+
+  it('does not adopt a task that was already running before the goal started', async () => {
+    tasks.start('task-old');
+    await goals.createGoal({ objective: 'finish the task' });
+
+    await runGoalTurn(60);
+
+    expect(loopService.launches).toHaveLength(1);
+  });
+
+  it('keeps waiting when only one of two owned tasks settles', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a', 'task-b');
+    expect(loopService.launches).toHaveLength(0);
+
+    tasks.setStatus('task-b', 'completed');
+    await runGoalTurn(61);
+    expect(loopService.launches).toHaveLength(0);
+
+    tasks.setStatus('task-a', 'completed');
+    await runGoalTurn(62);
+
+    expect(loopService.launches).toHaveLength(1);
+  });
+
+  it('keeps task ownership across a user turn while waiting', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    expect(loopService.launches).toHaveLength(0);
+
+    await runGoalTurn(61);
+
+    expect(loopService.launches).toHaveLength(0);
+  });
+
+  it('does not transfer task ownership to a goal replacing the old one in the same turn', async () => {
+    await goals.createGoal({ objective: 'old task' });
+    const turn = await startGoalTurn(60);
+    tasks.start('task-a');
+    const toolCall: ToolCall = {
+      type: 'function',
+      id: 'call_replace_goal',
+      name: 'CreateGoal',
+      arguments: JSON.stringify({ objective: 'new task', replace: true }),
+    };
+    const results = await executeToolCall(toolExecutor, turn, toolCall);
+    expect(results[0]?.result.isError).not.toBe(true);
+
+    endTurn(eventBus, turn);
+
+    await vi.waitFor(() => {
+      expect(loopService.launches).toHaveLength(1);
+    });
+  });
+
+  it('clears task ownership on pause and re-accumulates it after resume', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    expect(loopService.launches).toHaveLength(0);
+
+    await goals.pauseGoal();
+    await goals.resumeGoal();
+    await runGoalTurn(61);
+
+    expect(loopService.launches).toHaveLength(1);
+  });
+
+  it('does not inherit task ownership across a replay', async () => {
+    await goals.createGoal({ objective: 'finish the task' });
+    await runGoalTurn(60, 'task-a');
+    expect(loopService.launches).toHaveLength(0);
+    await ctx?.wire.flush();
+
+    goals.getGoal();
+    await ctx?.restore(records);
+    await goals.resumeGoal();
+    await runGoalTurn(61);
+
+    expect(loopService.launches).toHaveLength(1);
   });
 });
