@@ -42,7 +42,15 @@ import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } fro
 import { agentService, appServices, createCommandRunner, execEnvServices, hostEnvironmentServices, logServices, sessionServices, testAgent } from '../../harness';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
-import { cacheCliffFields, dropOrphanToolResults } from '#/agent/fullCompaction/fullCompactionService';
+import { cacheCliffFields, dropOrphanToolResults, fullCompactionLastCompactedTokenCountKey } from '#/agent/fullCompaction/fullCompactionService';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { CONTEXT_MANAGER_SECTION } from '#/agent/llmRequester/configSection';
+import type { CompactDelegation, ContextManager } from '#/agent/llmRequester/llmRequester';
+import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
+import { IAgentStateService } from '#/agent/state/agentState';
+import { IConfigService } from '#/app/config/config';
+import { IEventBus } from '#/app/event/eventBus';
+import { IWireService } from '#/wire/wire';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import {
   IAgentFullCompactionService,
@@ -3478,7 +3486,7 @@ describe('goal reminder re-injection after full compaction', () => {
     it('takes the local path silently when the model does not declare remote_compaction', async () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records, CATALOGUED_MODEL_CAPABILITIES);
-      const compactSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact');
+      const compactSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal');
 
       await runManualCompaction(ctx);
 
@@ -3531,7 +3539,7 @@ describe('goal reminder re-injection after full compaction', () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
       const compactSpy = vi
-        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal')
         .mockResolvedValue({ kind: 'error', error: new APIConnectionError('endpoint down') });
 
       await runManualCompaction(ctx);
@@ -3555,7 +3563,7 @@ describe('goal reminder re-injection after full compaction', () => {
     it('propagates a remote abort instead of swallowing it into a fallback', async () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
-      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockRejectedValue(
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal').mockRejectedValue(
         abortError('remote aborted'),
       );
       const cancelled = ctx.once('compaction.cancelled');
@@ -3577,7 +3585,7 @@ describe('goal reminder re-injection after full compaction', () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
       const compactSpy = vi
-        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal')
         .mockResolvedValue(remoteOkOutcome(remoteCheckpoint()));
 
       await runManualCompaction(ctx);
@@ -3585,7 +3593,7 @@ describe('goal reminder re-injection after full compaction', () => {
       // The remote attempt saw the unshrunk history; the summarizer ran too
       // (its output is the only portable record of the fold).
       expect(compactSpy).toHaveBeenCalledTimes(1);
-      expect(compactSpy.mock.calls[0]?.[0]?.history).toHaveLength(4);
+      expect(compactSpy.mock.calls[0]?.[1]?.history).toHaveLength(4);
       expect(ctx.llmCalls).toHaveLength(1);
       expect(
         records.find((record) => record.event === 'compaction_finished')?.properties,
@@ -3605,7 +3613,7 @@ describe('goal reminder re-injection after full compaction', () => {
     it('discards the endpoint retainedMessages echo instead of merging it into history', async () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
-      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockResolvedValue(
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal').mockResolvedValue(
         remoteOkOutcome(remoteCheckpoint(), [textMessage('user', 'endpoint-retained-echo')]),
       );
 
@@ -3619,7 +3627,7 @@ describe('goal reminder re-injection after full compaction', () => {
       const ctx = configuredAgent(records);
       const usageService = ctx.get(IAgentUsageService);
       const recordSpy = vi.spyOn(usageService, 'record');
-      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compact').mockImplementation(async (input) => {
+      vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal').mockImplementation(async (_context, input) => {
         // Mirror compact()'s real contract: usage is recorded inside, once.
         usageService.record(
           'kimi-code',
@@ -3645,7 +3653,7 @@ describe('goal reminder re-injection after full compaction', () => {
         .spyOn(ctx.get(IAgentToolSelectService), 'shapeHistory')
         .mockReturnValue(shaped);
       const compactSpy = vi
-        .spyOn(ctx.get(IAgentLLMRequesterService), 'compact')
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal')
         .mockResolvedValue(remoteOkOutcome(remoteCheckpoint()));
 
       await runManualCompaction(ctx);
@@ -3654,7 +3662,7 @@ describe('goal reminder re-injection after full compaction', () => {
       // to be handed to it explicitly — that is what keeps the remote request
       // able to reuse the turn's provider prompt cache.
       expect(shapeSpy).toHaveBeenCalled();
-      expect(compactSpy.mock.calls[0]?.[0]?.history).toBe(shaped);
+      expect(compactSpy.mock.calls[0]?.[1]?.history).toBe(shaped);
     });
 
     it('hands the summarizer an unstripped history so shapeHistory decides alone', async () => {
@@ -3670,7 +3678,7 @@ describe('goal reminder re-injection after full compaction', () => {
       });
       // Spy the summarizer's own entry point: `shapeHistory` has several
       // callers, so asserting on it would pass on someone else's call.
-      const startSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'start');
+      const startSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'startInternal');
 
       await runManualCompaction(ctx);
 
@@ -3678,7 +3686,7 @@ describe('goal reminder re-injection after full compaction', () => {
       // ever saw it, leaving the summarizer prefix short of what the turn sent
       // and voiding the provider cache from that message on.
       expect(startSpy).toHaveBeenCalled();
-      const summarizerMessages = startSpy.mock.calls[0]?.[0]?.messages ?? [];
+      const summarizerMessages = startSpy.mock.calls[0]?.[1]?.messages ?? [];
       expect(summarizerMessages.some((message) => (message.tools?.length ?? 0) > 0)).toBe(true);
     });
 
@@ -3770,6 +3778,297 @@ describe('goal reminder re-injection after full compaction', () => {
       const cut = [toolResult('gone-1'), toolResult('gone-2'), textMessage('user', 'kept')];
 
       expect(dropOrphanToolResults(cut)).toEqual([textMessage('user', 'kept')]);
+    });
+  });
+
+  describe('context-manager compaction delegate (I-5)', () => {
+    const DELEGATE_MANAGER_ID = 'test-compaction-delegate';
+    const DELEGATE_SUMMARY = 'Delegate compacted summary.';
+    const DELEGATE_REMOTE_CAPS = {
+      ...CATALOGUED_MODEL_CAPABILITIES,
+      remote_compaction: true,
+    } as const;
+
+    function delegateManager(onWillCompact?: ContextManager['onWillCompact']): ContextManager {
+      return {
+        id: DELEGATE_MANAGER_ID,
+        version: '1.0.0',
+        transformMessages: ({ messages }) => ({ messages, accounting: 'raw-equivalent' }),
+        ...(onWillCompact === undefined ? {} : { onWillCompact }),
+      };
+    }
+
+    function delegatedAgent(manager: ContextManager): TestAgentContext {
+      const ctx = testAgent();
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+        tools: SNAPSHOT_VISIBLE_TOOLS,
+      });
+      ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+      ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+      ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
+      void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
+      return ctx;
+    }
+
+    it('runs the common envelope in the fixed order around a handled delegate', async () => {
+      const order: string[] = [];
+      let ctx!: TestAgentContext;
+      const manager = delegateManager(({ task }) => {
+        order.push('delegate');
+        // Delegate contract: the durable mutation (wire op) lands BEFORE the
+        // return — the returned result is only a receipt.
+        const result = ctx.get(IAgentContextMemoryService).applyCompaction({
+          summary: DELEGATE_SUMMARY,
+          compactedCount: 4,
+          tokensBefore: task.tokenCount,
+        });
+        return { handled: true, result };
+      });
+      ctx = delegatedAgent(manager);
+      const compaction = ctx.get(IAgentFullCompactionService);
+      compaction.hooks.onWillCompact.register('test', async (_task, next) => {
+        order.push('precompact');
+        await next();
+      });
+      vi.spyOn(ctx.get(IAgentProfileService), 'requestSystemPromptRefresh').mockImplementation(
+        () => {
+          order.push('refresh');
+        },
+      );
+      const states = ctx.get(IAgentStateService);
+      const originalSet = states.set.bind(states) as (key: unknown, value: unknown) => void;
+      vi.spyOn(states, 'set').mockImplementation(((key: unknown, value: unknown) => {
+        if (key === fullCompactionLastCompactedTokenCountKey) order.push('tokens');
+        originalSet(key, value);
+      }) as unknown as typeof states.set);
+      vi.spyOn(ctx.get(IAgentContextInjectorService), 'injectAfterCompaction').mockImplementation(
+        async () => {
+          order.push('inject');
+        },
+      );
+      const wire = ctx.get(IWireService);
+      const originalDispatch = wire.dispatch.bind(wire) as (op: unknown) => void;
+      vi.spyOn(wire, 'dispatch').mockImplementation(((op: { type?: string }) => {
+        if (op?.type === 'full_compaction.complete') order.push('wire-complete');
+        originalDispatch(op);
+      }) as unknown as typeof wire.dispatch);
+      ctx.get(IEventBus).subscribe('compaction.completed', () => {
+        order.push('completed');
+      });
+      compaction.onDidFinishCompaction(() => {
+        order.push('finish');
+      });
+      // The built-in worker must never start for a handled delegation.
+      const compactSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal');
+      const startSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'startInternal');
+
+      await ctx.rpc.beginCompaction({});
+      const task = compaction.compacting;
+      expect(task).not.toBeNull();
+      void task!.promise.then(() => {
+        order.push('settle');
+      });
+      await task!.promise;
+
+      expect(order).toEqual([
+        'precompact',
+        'delegate',
+        'refresh',
+        'tokens',
+        'inject',
+        'tokens',
+        'wire-complete',
+        'completed',
+        'finish',
+        'settle',
+      ]);
+      expect(ctx.llmCalls).toHaveLength(0);
+      expect(compactSpy).not.toHaveBeenCalled();
+      expect(startSpy).not.toHaveBeenCalled();
+
+      // Durable-mutation contract: the wire op exists, the live context is
+      // shorter, and a resume replays to the same state.
+      const events = ctx.newEvents();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: '[wire]', event: 'full_compaction.complete' }),
+      );
+      expect(ctx.context.get().length).toBeLessThan(4);
+      expect(ctx.compactHistory().some((entry) => entry.text.includes(DELEGATE_SUMMARY))).toBe(
+        true,
+      );
+      await ctx.expectResumeMatches();
+    });
+
+    it('falls through to the built-in round when the delegate declines', async () => {
+      const manager = delegateManager(() => ({ handled: false }));
+      const transformSpy = vi.spyOn(manager, 'transformMessages');
+      const ctx = delegatedAgent(manager);
+      const completed = ctx.once('compaction.completed');
+
+      ctx.mockNextResponse({ type: 'text', text: 'Built-in summary.' });
+      await ctx.rpc.beginCompaction({});
+      await completed;
+
+      expect(ctx.llmCalls).toHaveLength(1);
+      expect(transformSpy).toHaveBeenCalled();
+      expect(ctx.compactHistory().some((entry) => entry.text.includes('Built-in summary.'))).toBe(
+        true,
+      );
+      await ctx.expectResumeMatches();
+    });
+
+    it('cancels the lifecycle and surfaces the error when a manual delegate throws', async () => {
+      const manager = delegateManager(() => {
+        throw new Error('delegate exploded');
+      });
+      const ctx = delegatedAgent(manager);
+      const failed = ctx.once('error');
+
+      await ctx.rpc.beginCompaction({});
+      await failed;
+
+      const events = ctx.newEvents();
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: '[wire]', event: 'full_compaction.cancel' }),
+          expect.objectContaining({ type: '[rpc]', event: 'compaction.cancelled' }),
+          expect.objectContaining({ type: '[rpc]', event: 'error' }),
+        ]),
+      );
+      expect(eventIndex(events, 'compaction.cancelled')).toBeLessThan(eventIndex(events, 'error'));
+      expect(countEvents(events, 'compaction.completed')).toBe(0);
+      expect(ctx.llmCalls).toHaveLength(0);
+      expect(ctx.compactHistory()).toEqual([
+        { role: 'user', text: 'old user one' },
+        { role: 'assistant', text: 'old assistant one' },
+        { role: 'user', text: 'recent user two' },
+        { role: 'assistant', text: 'recent assistant two' },
+      ]);
+      await ctx.expectResumeMatches();
+    });
+
+    it('fails the turn without a duplicate error event when an overflow-blocked delegate throws', async () => {
+      let callCount = 0;
+      const generate: GenerateFn = async () => {
+        callCount += 1;
+        throw new APIContextOverflowError(400, 'Context length exceeded', 'req-delegate-overflow');
+      };
+      const manager = delegateManager(() => {
+        throw new Error('delegate exploded');
+      });
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+      });
+      ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
+      void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
+      ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+      ctx.newEvents();
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'prompt that overflows' }] });
+      const events = await ctx.untilTurnEnd();
+
+      expect(callCount).toBe(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: 'compaction.started',
+          args: { trigger: 'auto' },
+        }),
+      );
+      expect(countEvents(events, 'compaction.completed')).toBe(0);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: 'turn.ended',
+          args: expect.objectContaining({
+            reason: 'failed',
+            error: expect.objectContaining({
+              message: expect.stringContaining('delegate exploded'),
+            }),
+          }),
+        }),
+      );
+      // The blocked-by-turn path rethrows for the loop to surface through
+      // `turn.ended` — unlike the manual path, no standalone `error` event.
+      expect(countEvents(events, 'error')).toBe(0);
+      await ctx.expectResumeMatches();
+    });
+
+    it('settles task.promise with an AbortError when a delegated compaction is cancelled', async () => {
+      let delegateStarted!: () => void;
+      const delegateRunning = new Promise<void>((resolve) => {
+        delegateStarted = resolve;
+      });
+      const manager = delegateManager(() => {
+        delegateStarted();
+        return new Promise<CompactDelegation>(() => {});
+      });
+      const ctx = delegatedAgent(manager);
+      const compaction = ctx.get(IAgentFullCompactionService);
+      let finishCount = 0;
+      compaction.onDidFinishCompaction(() => {
+        finishCount += 1;
+      });
+      const cancelled = ctx.once('compaction.cancelled');
+
+      await ctx.rpc.beginCompaction({});
+      const task = compaction.compacting;
+      expect(task).not.toBeNull();
+      await delegateRunning;
+
+      task!.abortController.abort();
+      await cancelled;
+
+      await expect(task!.promise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(finishCount).toBe(1);
+      const events = ctx.newEvents();
+      expect(countEvents(events, 'compaction.completed')).toBe(0);
+      expect(ctx.llmCalls).toHaveLength(0);
+      await ctx.expectResumeMatches();
+    });
+
+    it('hands the remote and local paths the same request-context instance', async () => {
+      const records: TelemetryRecord[] = [];
+      const manager = delegateManager();
+      const ctx = testAgent({ telemetry: recordingTelemetry(records) });
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: DELEGATE_REMOTE_CAPS,
+        tools: SNAPSHOT_VISIBLE_TOOLS,
+      });
+      ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+      ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+      ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
+      void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
+
+      const checkpoint: CompactionCheckpoint = {
+        encrypted: 'opaque-remote-payload',
+        itemType: 'compaction',
+        lineage: { provider: 'kimi', model: 'kimi-code', baseUrl: 'https://api.example/v1' },
+        replayInputTokens: { kind: 'measured', tokens: 1234 },
+      };
+      const compactSpy = vi
+        .spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal')
+        .mockResolvedValue({
+          kind: 'ok',
+          result: { checkpoint, retainedMessages: [], usage: null, traceId: 'trace-remote' },
+        });
+      const startSpy = vi.spyOn(ctx.get(IAgentLLMRequesterService), 'startInternal');
+      const completed = ctx.once('compaction.completed');
+
+      ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
+      await ctx.rpc.beginCompaction({});
+      await completed;
+
+      expect(compactSpy).toHaveBeenCalledTimes(1);
+      expect(startSpy).toHaveBeenCalled();
+      const remoteContext = compactSpy.mock.calls[0]?.[0];
+      const localContext = startSpy.mock.calls[0]?.[0];
+      expect(remoteContext).toBe(localContext);
+      expect(remoteContext).toEqual({ manager, transform: 'apply' });
+      await ctx.expectResumeMatches();
     });
   });
 });
