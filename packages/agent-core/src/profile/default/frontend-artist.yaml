@@ -12,8 +12,6 @@ promptVars:
 whenToUse: |
   Use this agent for frontend implementation, UI polish, visual design, game or digital art assets, image/media processing, and related tests.
 tools:
-  - Agent
-  - AgentSwarm
   - Bash
   - CronCreate
   - CronDelete

@@ -125,4 +125,3 @@ export function signalExitCode(signal: NodeJS.Signals): number {
   if (signal === 'SIGHUP') return 129;
   return 143;
 }
-
