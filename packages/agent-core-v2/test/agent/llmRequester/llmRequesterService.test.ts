@@ -130,6 +130,19 @@ function createRequester(
 
 let disposables: DisposableStore;
 
+function yieldUsage(requester: ModelRequester): ModelRequester {
+  const base = requester.request.bind(requester);
+  requester.request = async function* (input, signal, options) {
+    yield {
+      type: 'usage',
+      usage: { inputOther: 40, output: 2, inputCacheRead: 0, inputCacheCreation: 0 },
+      model: 'wire-model',
+    };
+    yield* base(input, signal, options);
+  };
+  return requester;
+}
+
 beforeEach(() => {
   disposables = new DisposableStore();
 });
@@ -154,6 +167,7 @@ function createService(
     readonly capabilitiesOverride?: ModelCapability;
     readonly historyOverride?: readonly ContextMessage[];
     readonly configValues?: Record<string, unknown>;
+    readonly tokenCounts?: { readonly size: number; readonly measured: number; readonly estimated: number };
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
@@ -180,10 +194,12 @@ function createService(
     }),
   };
   const measuredCalls: { readonly messages: number; readonly usage: TokenUsage }[] = [];
+  const measuredSnapshots: (readonly Message[])[] = [];
   const tokenCounting = {
-    get: () => ({ size: 0, measured: 0, estimated: 0 }),
+    get: () => options.tokenCounts ?? { size: 0, measured: 0, estimated: 0 },
     measured: (input: readonly Message[], _output: readonly Message[], usage: TokenUsage) => {
       measuredCalls.push({ messages: input.length, usage });
+      measuredSnapshots.push(input);
     },
   };
   const usage = { record: () => undefined, status: () => ({}) };
@@ -261,6 +277,7 @@ function createService(
     events,
     telemetryRecords,
     measuredCalls,
+    measuredSnapshots,
     warnings,
   };
 }
@@ -1463,19 +1480,6 @@ describe('AgentLLMRequesterService context transform pipeline', () => {
 });
 
 describe('AgentLLMRequesterService identity and test transformers', () => {
-  function yieldUsage(requester: ModelRequester): ModelRequester {
-    const base = requester.request.bind(requester);
-    requester.request = async function* (input, signal, options) {
-      yield {
-        type: 'usage',
-        usage: { inputOther: 40, output: 2, inputCacheRead: 0, inputCacheCreation: 0 },
-        model: 'wire-model',
-      };
-      yield* base(input, signal, options);
-    };
-    return requester;
-  }
-
   it('identity manager: manager runs yet the payload stays byte-identical to disabled', async () => {
     const baselineCaptured: ModelRequestInput[] = [];
     const baseline = createService(
@@ -1570,5 +1574,118 @@ describe('AgentLLMRequesterService identity and test transformers', () => {
     });
     expect(tool.content).toEqual([{ type: 'text', text: '[truncated]' }]);
     expect(JSON.stringify(messages)).not.toContain('x'.repeat(500));
+  });
+});
+
+describe('AgentLLMRequesterService transform accounting', () => {
+  const ACCOUNTING_LINEAGE = { provider: 'p', model: 'wire-model', baseUrl: 'https://example.test' };
+
+  function accountingCheckpoint(): CompactionCheckpoint {
+    return {
+      encrypted: 'opaque-payload',
+      itemType: 'compaction',
+      lineage: { ...ACCOUNTING_LINEAGE },
+      replayInputTokens: { kind: 'unknown' },
+    };
+  }
+
+  function identityManager(id: string, captured?: { usedContextTokens?: number }): ContextManager {
+    return {
+      id,
+      version: '1',
+      transformMessages: (input) => {
+        if (captured !== undefined) captured.usedContextTokens = input.usedContextTokens;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+  }
+
+  it('writes no raw-context anchor when the call reports transformed', async () => {
+    const transforming: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) => ({ ...message })),
+      }),
+    };
+    const { service, measuredCalls } = createService(
+      yieldUsage(createRequester({ value: 0 }, null)),
+      undefined,
+      { configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' } },
+    );
+    service.registerContextManager(transforming);
+
+    await service.request();
+
+    expect(measuredCalls).toHaveLength(0);
+  });
+
+  it('passes tokenCounting.get().size as usedContextTokens, not the measured floor', async () => {
+    const captured: { usedContextTokens?: number } = {};
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+      tokenCounts: { size: 777, measured: 100, estimated: 677 },
+    });
+    service.registerContextManager(identityManager('pipe', captured));
+
+    await service.request();
+
+    expect(captured.usedContextTokens).toBe(777);
+  });
+
+  it('anchors against the pre-shaping snapshot even when the projector merges adjacent user messages', async () => {
+    const history: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'user', content: [{ type: 'text', text: 'second' }], toolCalls: [], origin: { kind: 'user' } },
+    ];
+    const captured: ModelRequestInput[] = [];
+    const { service, measuredSnapshots } = createService(
+      yieldUsage(createRequester({ value: 0 }, null, [], captured)),
+      undefined,
+      {
+        historyOverride: history,
+        configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+      },
+    );
+    service.registerContextManager(identityManager('pipe'));
+
+    await service.request();
+
+    expect(captured[0]!.messages).toHaveLength(1);
+    expect(measuredSnapshots).toHaveLength(1);
+    expect(measuredSnapshots[0]).toHaveLength(2);
+    expect(measuredSnapshots[0]![0]).toBe(history[0]);
+    expect(measuredSnapshots[0]![1]).toBe(history[1]);
+  });
+
+  it('anchors against the pre-projection snapshot around checkpoint replay', async () => {
+    const cp = accountingCheckpoint();
+    const history: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'kept' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'readable summary' }],
+        toolCalls: [],
+        origin: { kind: 'compaction_summary', checkpoint: cp },
+      },
+    ];
+    const captured: ModelRequestInput[] = [];
+    const requester = yieldUsage(createRequester({ value: 0 }, null, [], captured));
+    requester.compactionLineage = () => ({ ...ACCOUNTING_LINEAGE });
+    const { service, measuredSnapshots } = createService(requester, undefined, {
+      historyOverride: history,
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(identityManager('pipe'));
+
+    await service.request();
+
+    const parts = captured[0]!.messages.flatMap((message) => message.content);
+    expect(parts.some((part) => (part as { type: string }).type === 'compaction')).toBe(true);
+    expect(measuredSnapshots).toHaveLength(1);
+    expect(measuredSnapshots[0]).toHaveLength(2);
+    expect(measuredSnapshots[0]![0]).toBe(history[0]);
+    expect(measuredSnapshots[0]![1]).toBe(history[1]);
   });
 });
