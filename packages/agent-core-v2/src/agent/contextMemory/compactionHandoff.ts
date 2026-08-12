@@ -55,6 +55,12 @@ export interface ContextCompactionShapeInput {
    *  the generated summary. Preferred over the summary-text estimate in the
    *  `tokensAfter` fallback when present. */
   readonly summaryOutputTokens?: number;
+  /** Estimated fixed request overhead (system prompt + non-deferred tool
+   *  schemas) surviving the compaction; counted into the `tokensAfter`
+   *  fallback so the result stays on the same full-request basis as the
+   *  measured exchange anchors. Live path only — replay reads the persisted
+   *  `tokensAfter` verbatim. */
+  readonly requestOverheadTokens?: number;
   readonly keptUserMessageCount?: number;
   readonly keptHeadUserMessageCount?: number;
   readonly droppedCount?: number;
@@ -132,7 +138,8 @@ export function buildContextCompactionShape(
     estimateNote = contribution.diagnostic;
   }
   const tokensAfter =
-    input.tokensAfter ?? replayTokens + estimate.messages(keptMessages);
+    input.tokensAfter ??
+    (input.requestOverheadTokens ?? 0) + replayTokens + estimate.messages(keptMessages);
   const keptUserMessageCount =
     input.keptUserMessageCount ?? selection.head.length + selection.tail.length;
   const keptHeadUserMessageCount =

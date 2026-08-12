@@ -556,7 +556,7 @@ describe('Agent tool description', () => {
     const description = agentDescription();
 
     expect(description).toContain('Tools: Bash, Read, ReadMediaFile, Glob, Grep, WebSearch, FetchURL');
-    expect(description).toContain('Tools: Agent, AgentSwarm, Bash');
+    expect(description).toContain('Tools: Bash, CronCreate, CronDelete, CronList, Edit');
   });
 
   it('renders global tool restrictions in subagent type descriptions', () => {

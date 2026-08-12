@@ -22,6 +22,7 @@ import { argsRecord, serializeToolResultOutput } from '../utils/event-payload';
 import { formatHookResultPlain } from '../utils/hook-result-format';
 import { nextTranscriptId } from '../utils/transcript-id';
 import type { SessionEventHost } from './session-event-handler';
+import { SubagentActivityStore } from './subagent-activity-store';
 
 export interface SubagentInfo {
   readonly parentToolCallId: string;
@@ -57,6 +58,8 @@ export class SubAgentEventHandler {
   private readonly agentSwarmProgress: Map<string, AgentSwarmProgressComponent> = new Map();
   backgroundAgentMetadata: Map<string, BackgroundAgentMetadata> = new Map();
   private readonly backgroundAgentEntries = new Map<string, TranscriptEntry>();
+  /** Bounded per-agent activity fold feeding the background-agent detail view. */
+  readonly activityStore = new SubagentActivityStore();
 
   constructor(
     private readonly host: SessionEventHost,
@@ -67,6 +70,7 @@ export class SubAgentEventHandler {
     this.subagentInfo.clear();
     this.backgroundAgentMetadata.clear();
     this.backgroundAgentEntries.clear();
+    this.activityStore.clear();
     this.clearAgentSwarmProgress();
   }
 
@@ -76,6 +80,11 @@ export class SubAgentEventHandler {
     const childAgentId = event.agentId;
     if (childAgentId === MAIN_AGENT_ID) return false;
     if (this.host.btwPanelController.routeEvent(event)) return true;
+
+    // Tee every child-agent event into the activity store before the routing
+    // below swallows events whose parent card is gone (Ctrl+B) or never
+    // existed (run_in_background) — that data is the background detail view.
+    this.activityStore.applyEvent(event);
 
     const info = this.subagentInfo.get(childAgentId);
     if (info === undefined || info.parentToolCallId.length === 0) return true;
@@ -312,6 +321,8 @@ export class SubAgentEventHandler {
   private handleSubagentCompleted(
     event: SubagentLifecycleEventOf<'subagent.completed'>,
   ): void {
+    this.activityStore.markCompleted(event.subagentId, event.resultSummary);
+    this.pruneForegroundOnlyRecord(event.subagentId);
     const backgroundMeta = this.backgroundAgentMetadata.get(event.subagentId);
     if (backgroundMeta !== undefined) {
       const taskId = this.findAgentTaskId(
@@ -348,7 +359,11 @@ export class SubAgentEventHandler {
     // exhausted event is a real terminal failure. Tearing down on a transient
     // attempt would leave the UI permanently "failed" even when a later
     // retry succeeds (metadata gone, swarm member stuck in failed phase).
+    // The guard runs before the activity store is told, so a transient attempt
+    // does not mark the fold failed either.
     if (event.exhausted === false) return;
+    this.activityStore.markFailed(event.subagentId, event.error);
+    this.pruneForegroundOnlyRecord(event.subagentId);
     const backgroundMeta = this.backgroundAgentMetadata.get(event.subagentId);
     if (backgroundMeta !== undefined) {
       const taskId = this.findAgentTaskId(
@@ -405,6 +420,28 @@ export class SubAgentEventHandler {
       match = info.taskId;
     }
     return match;
+  }
+
+  /** A subagent that never became a background task (foreground-only) can
+   *  never appear in /tasks, so its activity record is dropped at terminal
+   *  state — otherwise records would pile up for the rest of the session. */
+  private pruneForegroundOnlyRecord(subagentId: string): void {
+    // A spawn-time background agent keeps its record even when the
+    // background.task.started sync has not landed yet (short-lived agents).
+    if (this.backgroundAgentMetadata.has(subagentId)) return;
+    for (const info of this.deps.backgroundTasks.values()) {
+      if (info.kind === 'agent' && info.agentId === subagentId) return;
+    }
+    this.activityStore.drop(subagentId);
+  }
+
+  /** Drop every foreground-only record. Called when the main turn ends: any
+   *  foreground subagent of the turn is over at that point, and an aborted
+   *  one emits no `subagent.completed`/`subagent.failed` to prune it. */
+  dropForegroundOnlyActivityRecords(): void {
+    for (const agentId of this.activityStore.agentIds()) {
+      this.pruneForegroundOnlyRecord(agentId);
+    }
   }
 
   private buildBackgroundAgentMetadata(
@@ -473,6 +510,14 @@ export class SubAgentEventHandler {
       name: event.dispatch?.displayName ?? event.backendName ?? event.subagentName,
       runInBackground: event.runInBackground,
       swarmIndex: event.swarmIndex,
+    });
+    this.activityStore.ensureRecord({
+      agentId: event.subagentId,
+      agentName: event.subagentName,
+      description: event.description,
+      parentToolCallId: event.parentToolCallId,
+      model: this.spawnedModelDisplay(event),
+      effort: this.subagentEffortDisplay(event.thinkingEffort),
     });
   }
 
