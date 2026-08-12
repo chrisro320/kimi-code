@@ -1135,6 +1135,142 @@ describe('AgentLLMRequesterService compact', () => {
 
     expect(captured.input!.retainedMessages).toEqual(retained);
   });
+
+  it('passes the compact history through the active manager transform', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        transformCalls += 1;
+        return {
+          accounting: 'transformed',
+          messages: messages.map((message) => ({
+            ...message,
+            content: [{ type: 'text' as const, text: 'compressed' }],
+          })),
+        };
+      },
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(manager);
+
+    const plain: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }], toolCalls: [] },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply' }], toolCalls: [] },
+    ];
+    await service.compact({ history: plain });
+
+    expect(transformCalls).toBe(1);
+    expect(captured.input!.history.length).toBeGreaterThan(0);
+    expect(
+      captured.input!.history.every(
+        (item) =>
+          item.kind === 'checkpoint' ||
+          item.message.content.every(
+            (part) =>
+              (part as { type: string }).type !== 'text' ||
+              (part as { text?: string }).text === 'compressed',
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it('skips the transform for a bypass request context', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        transformCalls += 1;
+        return { messages, accounting: 'transformed' };
+      },
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(manager);
+
+    await service.compactInternal(
+      { manager: undefined, transform: 'bypass' },
+      { history: historyWithCheckpoint(checkpoint()) },
+    );
+
+    expect(transformCalls).toBe(0);
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+  });
+
+  it('accepts a transform that preserves the checkpoint carrier', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const preserving: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) =>
+          message.content.some((part) => (part as { type: string }).type === 'compaction')
+            ? message
+            : { ...message, content: [{ type: 'text' as const, text: 'compressed' }] },
+        ),
+      }),
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(preserving);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'compressed' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+  });
+
+  it('falls back to the original messages when the transform loses the carrier', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const dropping: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.filter(
+          (message) =>
+            !message.content.some((part) => (part as { type: string }).type === 'compaction'),
+        ),
+      }),
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(dropping);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'kept' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
+  });
 });
 
 describe('AgentLLMRequesterService context manager registration', () => {

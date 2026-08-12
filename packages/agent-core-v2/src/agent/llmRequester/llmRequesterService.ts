@@ -290,10 +290,40 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return { manager: this.getActiveContextManager(), transform: 'apply' };
   }
 
+  private applyContextTransform(
+    manager: ContextManager,
+    messages: readonly Message[],
+    meta: { readonly source: AgentLLMRequestSource | undefined; readonly maxContextTokens: number },
+    signal: AbortSignal | undefined,
+  ): Promise<TransformResult> {
+    return this.enqueueTransform(manager, messages, meta, signal).then((result) =>
+      this.validateCarriers(messages, result),
+    );
+  }
+
+  private validateCarriers(
+    input: readonly Message[],
+    result: TransformResult,
+  ): TransformResult {
+    const before = compactionCarriersOf(input);
+    const after = compactionCarriersOf(result.messages);
+    const intact =
+      before.length === after.length &&
+      before.every(
+        (carrier, index) => JSON.stringify(carrier) === JSON.stringify(after[index]),
+      );
+    if (intact) return result;
+    this.log.warn(
+      'context manager transform dropped, rewrote, or reordered compaction carriers; falling back to the original messages',
+      { carriersBefore: before.length, carriersAfter: after.length },
+    );
+    return { messages: input, accounting: 'raw-equivalent' };
+  }
+
   private enqueueTransform(
     manager: ContextManager,
     messages: readonly Message[],
-    request: ResolvedLLMRequest,
+    meta: { readonly source: AgentLLMRequestSource | undefined; readonly maxContextTokens: number },
     signal: AbortSignal | undefined,
   ): Promise<TransformResult> {
     const entry = async (): Promise<TransformResult> => {
@@ -303,12 +333,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       linked.throwIfAborted();
       return manager.transformMessages({
         messages,
-        source: request.source,
+        source: meta.source,
         usedContextTokens: this.tokenCounting.get().size,
-        maxContextTokens:
-          request.model.capabilities.max_input_tokens ??
-          request.model.capabilities.max_context_tokens ??
-          0,
+        maxContextTokens: meta.maxContextTokens,
         signal: linked,
       });
     };
@@ -400,17 +427,34 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         : { supportsCheckpointReplay: false };
     const history = this.toolSelect.shapeHistory(input.history ?? this.context.get());
     const checkpointAware = projectModelHistory(history, target);
-    const projected = checkpointAware.some((item) => item.kind === 'checkpoint')
-      ? this.projector
-          .project(
-            checkpointAware.map((item) =>
-              item.kind === 'checkpoint'
-                ? checkpointReplayMessage(item.checkpoint)
-                : item.message,
-            ),
-          )
-          .map(modelHistoryItemFromProjectedMessage)
-      : this.projector.project(history).map((message) => ({ kind: 'message' as const, message }));
+    const replayed = checkpointAware.some((item) => item.kind === 'checkpoint')
+      ? this.projector.project(
+          checkpointAware.map((item) =>
+            item.kind === 'checkpoint'
+              ? checkpointReplayMessage(item.checkpoint)
+              : item.message,
+          ),
+        )
+      : this.projector.project(history);
+    // The compaction request path passes through the same transform seam as
+    // ordinary requests; bypass contexts skip it entirely.
+    let messages: readonly Message[] = replayed;
+    if (context.manager !== undefined && context.transform === 'apply') {
+      const transformed = await this.applyContextTransform(
+        context.manager,
+        replayed,
+        {
+          source: input.source,
+          maxContextTokens:
+            resolved.modelCapabilities.max_input_tokens ??
+            resolved.modelCapabilities.max_context_tokens ??
+            0,
+        },
+        signal,
+      );
+      messages = transformed.messages;
+    }
+    const projected = messages.map(modelHistoryItemFromProjectedMessage);
     this.log.info('llm compact request', {
       ...logFieldsForSource(input.source),
       model: resolved.modelAlias ?? 'unknown',
@@ -596,7 +640,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       let messages = projected.messages;
       let transformAccounting: TransformAccounting | undefined;
       if (context.manager !== undefined && context.transform === 'apply') {
-        const transformed = await this.enqueueTransform(context.manager, messages, request, signal);
+        const transformed = await this.applyContextTransform(
+          context.manager,
+          messages,
+          {
+            source: request.source,
+            maxContextTokens:
+              request.model.capabilities.max_input_tokens ??
+              request.model.capabilities.max_context_tokens ??
+              0,
+          },
+          signal,
+        );
         messages = [...transformed.messages];
         transformAccounting = transformed.accounting;
       }
@@ -1032,6 +1087,17 @@ function checkpointReplayMessage(checkpoint: CompactionCheckpoint): Message {
     content: [{ type: 'compaction', ...checkpoint }] as unknown as Message['content'],
     toolCalls: [],
   };
+}
+
+function compactionCarriersOf(messages: readonly Message[]): CheckpointReplayPart[] {
+  const carriers: CheckpointReplayPart[] = [];
+  for (const message of messages) {
+    for (const part of message.content) {
+      const candidate = part as unknown as CheckpointReplayPart;
+      if (candidate.type === 'compaction') carriers.push(candidate);
+    }
+  }
+  return carriers;
 }
 
 function modelHistoryItemFromProjectedMessage(message: Message): ModelHistoryItem {
