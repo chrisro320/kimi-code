@@ -559,6 +559,18 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     );
   }
 
+  /**
+   * `originalHistory` is captured before PreCompact: messages a hook handler
+   * appends while compacting must stay out of the summarizer's history (and a
+   * changed prefix still cancels the round), exactly as when the hook ran
+   * inside the round after the snapshot. PreCompact runs exactly once, before
+   * the delegate/built-in branch. One manager snapshot covers the whole
+   * compaction: the built-in path's remote and local requests share this
+   * exact instance, and the delegate is invoked on the same resolved manager.
+   * The common envelope runs in a fixed order — settling task.promise stays
+   * with the begin() .then chain, which runs after this function (including
+   * the finally block) completes.
+   */
   private async compactionOrchestrator(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
@@ -566,24 +578,13 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     try {
       const signal = active.abortController.signal;
       signal.throwIfAborted();
-      // Captured before PreCompact: messages a hook handler appends while
-      // compacting must stay out of the summarizer's history (and a changed
-      // prefix still cancels the round), exactly as when the hook ran inside
-      // the round after the snapshot.
       const originalHistory = [...this.context.get()];
-      // PreCompact runs exactly once, before the delegate/built-in branch.
       await this.hooks.onWillCompact.run(active);
-      // One manager snapshot for the whole compaction: the built-in path's
-      // remote and local requests share this exact instance, and the
-      // delegate is invoked on the same resolved manager.
       const requestContext: LlmRequestContext = {
         manager: this.llmRequester.getActiveContextManager(),
         transform: 'apply',
       };
       const result = await this.runCompaction(active, data, requestContext, originalHistory, signal);
-      // Common envelope, fixed order — settling task.promise stays with the
-      // begin() .then chain, which runs after this function (including the
-      // finally block below) completes.
       if (this._compacting !== active) throw compactionCancelledReason(active);
       this.profile.requestSystemPromptRefresh();
       this.lastCompactedTokenCount = result.tokensAfter;
@@ -618,6 +619,13 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     }
   }
 
+  /**
+   * The abort race keeps task.promise settling with an AbortError even when a
+   * delegate ignores the signal; the manager's own promise keeps running in
+   * the background and its late outcome is discarded. Delegate contract: the
+   * durable mutation (wire op) already landed before a handled return — the
+   * result is only a receipt.
+   */
   private async runCompaction(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
@@ -627,16 +635,11 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
   ): Promise<CompactionResult> {
     const manager = requestContext.manager;
     if (manager?.onWillCompact !== undefined) {
-      // The abort race keeps task.promise settling with an AbortError even
-      // when a delegate ignores the signal; the manager's own promise keeps
-      // running in the background and its late outcome is discarded.
       const delegation = await abortable(
         Promise.resolve(manager.onWillCompact({ task: active, input: data, signal })),
         signal,
       );
       if (delegation.handled) {
-        // Delegate contract: the durable mutation (wire op) already landed
-        // before this return — the result is only a receipt.
         return delegation.result;
       }
     }
@@ -747,20 +750,22 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
-      // Remote compaction first when the model opted in (B4-G): the checkpoint
-      // preserves model-native state the text summary cannot, but it is never
-      // required — anything short of success falls through to the summarizer
-      // below, which runs either way (its output is the only portable record
-      // of the fold). The remote attempt sees the unshrunk history, and its
-      // failure does not consume the loop's retry/shrink budget.
-      //
-      // Both paths reach the same turn-aligned shape, by different routes: the
-      // summarizer goes through `llmRequester.startInternal()` → `runRequest`,
-      // which shapes for it, while `compactInternal()` never touches
-      // `runRequest` and so has to be handed a shaped history here. Tools
-      // already agree — `compactInternal()` builds them with the same
-      // `shapeTools` call the turn uses. Both requests share the
-      // orchestrator's single `LlmRequestContext` snapshot.
+      /**
+       * Remote compaction first when the model opted in (B4-G): the checkpoint
+       * preserves model-native state the text summary cannot, but it is never
+       * required — anything short of success falls through to the summarizer
+       * below, which runs either way (its output is the only portable record
+       * of the fold). The remote attempt sees the unshrunk history, and its
+       * failure does not consume the loop's retry/shrink budget.
+       *
+       * Both paths reach the same turn-aligned shape, by different routes: the
+       * summarizer goes through `llmRequester.startInternal()` → `runRequest`,
+       * which shapes for it, while `compactInternal()` never touches
+       * `runRequest` and so has to be handed a shaped history here. Tools
+       * already agree — `compactInternal()` builds them with the same
+       * `shapeTools` call the turn uses. Both requests share the
+       * orchestrator's single `LlmRequestContext` snapshot.
+       */
       const remote = await this.tryRemoteCompaction(
         active,
         data,

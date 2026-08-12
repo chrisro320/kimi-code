@@ -268,14 +268,16 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
   }
 
+  /**
+   * Config naming a manager that has no (matching) registration warns once
+   * per configured id — at first resolution, not at config load, because an
+   * Agent-scope registration does not exist yet when config is read.
+   */
   getActiveContextManager(): ContextManager | undefined {
     const configuredId = this.config.get<string>(CONTEXT_MANAGER_SECTION);
     if (configuredId === undefined) return undefined;
     const manager = this.registeredContextManager;
     if (manager !== undefined && manager.id === configuredId) return manager;
-    // Config naming a manager that has no (matching) registration warns once
-    // per configured id — at first resolution, not at config load, because an
-    // Agent-scope registration does not exist yet when config is read.
     if (!this.contextManagerMismatchWarnings.has(configuredId)) {
       this.contextManagerMismatchWarnings.add(configuredId);
       this.log.warn(`Context manager "${configuredId}" is configured but not registered.`, {
@@ -320,6 +322,11 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return { messages: input, accounting: 'raw-equivalent' };
   }
 
+  /**
+   * Per-agent serialization: the entry runs only after the queue tail
+   * settles, and the tail swallows this entry's outcome so one rejection
+   * never poisons later requests.
+   */
   private enqueueTransform(
     manager: ContextManager,
     messages: readonly Message[],
@@ -339,9 +346,6 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         signal: linked,
       });
     };
-    // Per-agent serialization: the entry runs only after the queue tail
-    // settles, and the tail swallows this entry's outcome so one rejection
-    // never poisons later requests.
     const result = this.transformQueue.then(entry, entry);
     this.transformQueue = result.then(
       () => undefined,
@@ -392,6 +396,10 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return this.compactInternal(this.defaultRequestContext(), input, signal);
   }
 
+  /**
+   * The compaction request path passes through the same transform seam as
+   * ordinary requests; bypass contexts skip it entirely.
+   */
   async compactInternal(
     context: LlmRequestContext,
     input: AgentCompactionInput = {},
@@ -436,8 +444,6 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           ),
         )
       : this.projector.project(history);
-    // The compaction request path passes through the same transform seam as
-    // ordinary requests; bypass contexts skip it entirely.
     let messages: readonly Message[] = replayed;
     if (context.manager !== undefined && context.transform === 'apply') {
       const transformed = await this.applyContextTransform(
@@ -632,11 +638,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       };
     };
 
+    /**
+     * The disabled / bypass guard stays synchronous: no manager call and no
+     * extra async boundary on the default path.
+     */
     const run = async (projection: RequestProjection): Promise<AgentLLMRequestFinish> => {
       onRequestTrace(undefined);
       const projected = requestInput(projection);
-      // The disabled / bypass guard stays synchronous: no manager call and
-      // no extra async boundary on the default path.
       let messages = projected.messages;
       let transformAccounting: TransformAccounting | undefined;
       if (context.manager !== undefined && context.transform === 'apply') {
