@@ -107,8 +107,13 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
     let requester: ModelRequester | undefined;
     let model: Model | undefined;
     if (modelAlias !== '') {
-      requester = this.modelCatalog.getRequester(modelAlias);
-      model = requester.model;
+      try {
+        requester = this.modelCatalog.getRequester(modelAlias);
+        model = requester.model;
+      } catch {
+        requester = undefined;
+        model = undefined;
+      }
     }
     this.registration = registerMediaTools(this.toolRegistry, {
       fs: this.fs,
