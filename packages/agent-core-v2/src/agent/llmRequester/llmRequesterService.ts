@@ -23,14 +23,19 @@
  * warnings through `eventBus`, records durable request-trace Ops
  * through `wire`, reports each request's `x-trace-id` to its caller, and
  * reports provider failures through `telemetry`. The mutable request state
- * (`lastConfigLogSignature`, `turnConfigs`, `mediaDegradedTurns`,
- * `mediaStrippedTurns`, `emittedThinkingEffortWarnings`) is registered into
- * `agentState` (`IAgentStateService`) and read/written through it. Bound at
- * Agent scope.
+ * `turnConfigs`, `mediaDegradedTurns`, `mediaStrippedTurns`,
+ * `emittedThinkingEffortWarnings`, `contextManagerMismatchWarnings`) is
+ * registered into `agentState` (`IAgentStateService`) and read/written
+ * through it. The opt-in request-time context manager
+ * (`ContextManager`, registered per agent and activated through the
+ * engine-internal `contextManager` config section) threads through every
+ * request/compaction as an `LlmRequestContext`; unregistered or
+ * unconfigured means zero-cost passthrough. Bound at Agent scope.
  */
 
 import { createHash } from 'node:crypto';
 import { LifecycleScope } from '#/app/scopes';
+import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -94,8 +99,11 @@ import {
   type AgentLLMRequestPartHandler,
   type AgentLLMRequestSource,
   type AgentLLMRequestTask,
+  type ContextManager,
+  type LlmRequestContext,
   type PreparedTurnRequestConfig,
 } from './llmRequester';
+import { CONTEXT_MANAGER_SECTION } from './configSection';
 import {
   projectModelHistory,
   type CheckpointTarget,
@@ -172,6 +180,10 @@ export const llmRequesterEmittedThinkingEffortWarningsKey = defineState<Set<stri
   'llmRequester.emittedThinkingEffortWarnings',
   () => new Set(),
 );
+export const llmRequesterContextManagerMismatchWarningsKey = defineState<Set<string>>(
+  'llmRequester.contextManagerMismatchWarnings',
+  () => new Set(),
+);
 
 export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   declare readonly _serviceBrand: undefined;
@@ -199,7 +211,10 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.states.register(llmRequesterMediaDegradedTurnsKey);
     this.states.register(llmRequesterMediaStrippedTurnsKey);
     this.states.register(llmRequesterEmittedThinkingEffortWarningsKey);
+    this.states.register(llmRequesterContextManagerMismatchWarningsKey);
   }
+
+  private registeredContextManager: ContextManager | undefined;
 
   private get lastConfigLogSignature(): string | undefined {
     return this.states.get(llmRequesterLastConfigLogSignatureKey);
@@ -225,6 +240,46 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return this.states.get(llmRequesterEmittedThinkingEffortWarningsKey);
   }
 
+  private get contextManagerMismatchWarnings(): Set<string> {
+    return this.states.get(llmRequesterContextManagerMismatchWarningsKey);
+  }
+
+  registerContextManager(manager: ContextManager): IDisposable {
+    if (this.registeredContextManager !== undefined) {
+      throw new Error(
+        `A context manager is already registered: '${this.registeredContextManager.id}'.`,
+      );
+    }
+    this.registeredContextManager = manager;
+    return toDisposable(() => {
+      if (this.registeredContextManager === manager) {
+        this.registeredContextManager = undefined;
+      }
+    });
+  }
+
+  getActiveContextManager(): ContextManager | undefined {
+    const configuredId = this.config.get<string>(CONTEXT_MANAGER_SECTION);
+    if (configuredId === undefined) return undefined;
+    const manager = this.registeredContextManager;
+    if (manager !== undefined && manager.id === configuredId) return manager;
+    // Config naming a manager that has no (matching) registration warns once
+    // per configured id — at first resolution, not at config load, because an
+    // Agent-scope registration does not exist yet when config is read.
+    if (!this.contextManagerMismatchWarnings.has(configuredId)) {
+      this.contextManagerMismatchWarnings.add(configuredId);
+      this.log.warn(`Context manager "${configuredId}" is configured but not registered.`, {
+        contextManager: configuredId,
+        registered: manager?.id,
+      });
+    }
+    return undefined;
+  }
+
+  private defaultRequestContext(): LlmRequestContext {
+    return { manager: this.getActiveContextManager(), transform: 'apply' };
+  }
+
   prepareTurnConfig(turnId: number): PreparedTurnRequestConfig | undefined {
     if (!this.profile.hasProvider()) return undefined;
     const config = this.getOrCreateTurnConfig(turnId);
@@ -244,14 +299,31 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     onPart: AgentLLMRequestPartHandler = noopOnPart,
     signal?: AbortSignal,
   ): AgentLLMRequestTask {
+    return this.startInternal(this.defaultRequestContext(), overrides, onPart, signal);
+  }
+
+  startInternal(
+    context: LlmRequestContext,
+    overrides: AgentLLMRequestOverrides = {},
+    onPart: AgentLLMRequestPartHandler = noopOnPart,
+    signal?: AbortSignal,
+  ): AgentLLMRequestTask {
     const trace = new MutableLLMRequestTrace();
     return {
       trace,
-      result: this.requestWithTrace(trace, overrides, onPart, signal),
+      result: this.requestWithTrace(trace, context, overrides, onPart, signal),
     };
   }
 
   async compact(
+    input: AgentCompactionInput = {},
+    signal?: AbortSignal,
+  ): Promise<ModelCompactionOutcome> {
+    return this.compactInternal(this.defaultRequestContext(), input, signal);
+  }
+
+  async compactInternal(
+    context: LlmRequestContext,
     input: AgentCompactionInput = {},
     signal?: AbortSignal,
   ): Promise<ModelCompactionOutcome> {
@@ -350,6 +422,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private async requestWithTrace(
     trace: MutableLLMRequestTrace,
+    context: LlmRequestContext,
     overrides: AgentLLMRequestOverrides,
     onPart: AgentLLMRequestPartHandler,
     signal: AbortSignal | undefined,
@@ -360,6 +433,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     try {
       return await this.runRequest(
         this.resolveRequest(overrides),
+        context,
         onPart,
         signal,
         (traceId) => {
@@ -434,6 +508,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private async runRequest(
     request: ResolvedLLMRequest,
+    context: LlmRequestContext,
     onPart: AgentLLMRequestPartHandler,
     signal: AbortSignal | undefined,
     onRequestTrace: (traceId: string | undefined) => void,

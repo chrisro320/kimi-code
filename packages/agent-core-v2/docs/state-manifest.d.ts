@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 71 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 72 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -81,6 +81,7 @@
 //     goal.liveWallClockStartedAt                     src/agent/goal/goalService.ts
 //     goal.pendingContinuationGoals                   src/agent/goal/goalService.ts
 //     goal.resumeContinuation                         src/agent/goal/goalService.ts
+//     llmRequester.contextManagerMismatchWarnings     src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.emittedThinkingEffortWarnings      src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.lastConfigLogSignature             src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.mediaDegradedTurns                 src/agent/llmRequester/llmRequesterService.ts
@@ -1100,6 +1101,7 @@ export interface AgentStateSnapshot {
     readonly goalId: string;
   } | undefined;
   // src/agent/llmRequester/llmRequesterService.ts
+  'llmRequester.contextManagerMismatchWarnings': Set<string>;
   'llmRequester.emittedThinkingEffortWarnings': Set<string>;
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;

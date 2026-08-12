@@ -25,7 +25,11 @@ import {
 } from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterService';
-import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
+import {
+  IAgentLLMRequesterService,
+  type ContextManager,
+} from '#/agent/llmRequester/llmRequester';
+import { CONTEXT_MANAGER_SECTION } from '#/agent/llmRequester/configSection';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -148,6 +152,7 @@ function createService(
     readonly thinkingLevel?: ThinkingEffort;
     readonly capabilitiesOverride?: ModelCapability;
     readonly historyOverride?: readonly ContextMessage[];
+    readonly configValues?: Record<string, unknown>;
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
@@ -184,9 +189,15 @@ function createService(
   const context = { get: () => options.historyOverride ?? history };
   const tools = { list: () => [] };
   const config: Partial<IConfigService> = {
-    get: (() => undefined) as IConfigService['get'],
+    get: ((section: string) => options.configValues?.[section]) as IConfigService['get'],
   };
-  const log = { info: () => undefined, warn: () => undefined };
+  const warnings: { readonly message: string; readonly payload: unknown }[] = [];
+  const log = {
+    info: () => undefined,
+    warn: (message: string, payload?: unknown) => {
+      warnings.push({ message, payload });
+    },
+  };
   const telemetryRecords: TelemetryRecord[] = [];
   const telemetry = recordingTelemetry(telemetryRecords);
   const toolSelect: Partial<IAgentToolSelectService> = {
@@ -249,6 +260,7 @@ function createService(
     events,
     telemetryRecords,
     measuredCalls,
+    warnings,
   };
 }
 
@@ -1121,5 +1133,60 @@ describe('AgentLLMRequesterService compact', () => {
     await service.compact({ retainedMessages: retained });
 
     expect(captured.input!.retainedMessages).toEqual(retained);
+  });
+});
+
+describe('AgentLLMRequesterService context manager registration', () => {
+  function stubManager(id: string): ContextManager {
+    return {
+      id,
+      version: '1',
+      transformMessages: (input) => ({ messages: input.messages, accounting: 'raw-equivalent' }),
+    };
+  }
+
+  it('throws on a duplicate registration and restores the slot on dispose', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+
+    const registration = service.registerContextManager(stubManager('alpha'));
+    expect(() => service.registerContextManager(stubManager('beta'))).toThrow(
+      /already registered/,
+    );
+
+    registration.dispose();
+    expect(service.getActiveContextManager()).toBeUndefined();
+
+    const replacement = service.registerContextManager(stubManager('alpha'));
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    replacement.dispose();
+  });
+
+  it('resolves the manager only when the config section names its id', () => {
+    const { service: disabled } = createService(createRequester({ value: 0 }), undefined);
+    disabled.registerContextManager(stubManager('alpha'));
+    expect(disabled.getActiveContextManager()).toBeUndefined();
+
+    const { service: enabled } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+    const manager = stubManager('alpha');
+    enabled.registerContextManager(manager);
+    expect(enabled.getActiveContextManager()).toBe(manager);
+  });
+
+  it('warns once on first resolution when the configured id has no matching registration', () => {
+    const { service, warnings } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'ghost' },
+    });
+
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+
+    service.registerContextManager(stubManager('other'));
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
   });
 });
