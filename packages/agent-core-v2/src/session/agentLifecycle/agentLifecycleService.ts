@@ -188,7 +188,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       LifecycleScope.Agent,
       agentId,
       {
-        extra,
+        seeds: extra,
       },
     ) as IAgentScopeHandle;
     this.handles.set(agentId, handle);

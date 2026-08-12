@@ -21,6 +21,10 @@ import {
   getLiveSessionById,
 } from '@moonshot-ai/agent-core-v2';
 
+import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
+
+import { startMcpAuthStatusServer } from './mcp-auth-status-server';
+
 import {
   createKimiHarness,
   createKimiHarnessV2,
@@ -2423,28 +2427,26 @@ describe('v1↔v2 agent interaction parity', () => {
     }
   });
 
-  it('steer on an idle session: v1 launches a turn, v2 rejects prompt.not_found (pinned)', async () => {
+  it('steer on an idle session: both engines launch a turn and update metadata', async () => {
     const restoreEnv = scrubConfigEnv();
     const pair = await makeSessionParityPair();
     try {
       await createOnBoth(pair, { id: 'session_parity_agent_steer' });
       const input = { sessionId: 'session_parity_agent_steer' } as const;
-      // Pinned divergence: v1 treats an idle steer like a prompt — it
-      // launches a fresh turn and updates title/lastPrompt. v2's steer RPC
-      // enqueues first (which itself launches the turn), so the follow-up
-      // steer step finds no pending prompt and rejects with prompt.not_found;
-      // the v2 path never touches the metadata.
+      // v1 treats an idle steer like a prompt — it launches a fresh turn and
+      // updates title/lastPrompt. v2's steer RPC enqueues first (which itself
+      // launches the turn) and converges on the same end state: the launched
+      // turn is returned instead of rejecting, and the metadata is updated.
       await pair.v1.steer({ ...input, input: [{ type: 'text', text: 'steer text' }] });
-      await expect(
-        pair.v2.steer({ ...input, input: [{ type: 'text', text: 'steer text' }] }),
-      ).rejects.toMatchObject({ code: 'prompt.not_found' });
+      await pair.v2.steer({ ...input, input: [{ type: 'text', text: 'steer text' }] });
       const [v1List, v2List] = await Promise.all([
         pair.v1.listSessions(),
         pair.v2.listSessions(),
       ]);
       expect(v1List[0]?.title).toBe('steer text');
       expect(v1List[0]?.lastPrompt).toBe('steer text');
-      expect(v2List[0]?.lastPrompt).not.toBe('steer text');
+      expect(v2List[0]?.title).toBe('steer text');
+      expect(v2List[0]?.lastPrompt).toBe('steer text');
       await settleTurns();
     } finally {
       await closeSessionPair(pair);
@@ -3461,6 +3463,65 @@ async function expectSameMcpRejection(
 }
 
 describe('v1↔v2 global MCP parity', () => {
+  it('classifies global MCP authorization identically from persisted credentials', async () => {
+    const statusServer = await startMcpAuthStatusServer();
+    const authorizedUrl = 'https://authorized.example.test/mcp';
+    const pair = await makeGlobalMcpParityPair({
+      mcpServers: {
+        stdio: { command: 'local-command' },
+        plain: { transport: 'http', url: statusServer.plainUrl },
+        detected: { transport: 'http', url: statusServer.oauthUrl },
+        sse: { transport: 'sse', url: statusServer.oauthUrl },
+        'sse-oauth': { transport: 'sse', url: statusServer.oauthUrl, auth: 'oauth' },
+        bearer: {
+          transport: 'http',
+          url: 'https://bearer.example.test/mcp',
+          bearerTokenEnvVar: 'EXAMPLE_MCP_TOKEN',
+        },
+        'oauth-required': {
+          transport: 'http',
+          url: 'https://required.example.test/mcp',
+          auth: 'oauth',
+        },
+        'oauth-authorized': {
+          transport: 'http',
+          url: authorizedUrl,
+          auth: 'oauth',
+        },
+      },
+    });
+    for (const homeDir of [pair.v1HomeDir, pair.v2HomeDir]) {
+      const externalOAuth = new McpOAuthService({ kimiHomeDir: homeDir });
+      externalOAuth
+        .getProvider('oauth-authorized', authorizedUrl)
+        .saveTokens({ access_token: 'test-access-token', token_type: 'Bearer' });
+      externalOAuth
+        .getProvider('sse', statusServer.oauthUrl)
+        .saveTokens({ access_token: 'stale-sse-token', token_type: 'Bearer' });
+    }
+
+    try {
+      const [v1Statuses, v2Statuses] = await Promise.all([
+        pair.v1.listGlobalMcpServerAuthStatuses(),
+        pair.v2.listGlobalMcpServerAuthStatuses(),
+      ]);
+      expect(v2Statuses).toEqual(v1Statuses);
+      expect(v1Statuses).toEqual([
+        { name: 'stdio', authStatus: 'not-applicable' },
+        { name: 'plain', authStatus: 'not-applicable' },
+        { name: 'detected', authStatus: 'oauth-required' },
+        { name: 'sse', authStatus: 'not-applicable' },
+        { name: 'sse-oauth', authStatus: 'oauth-required' },
+        { name: 'bearer', authStatus: 'bearer-token' },
+        { name: 'oauth-required', authStatus: 'oauth-required' },
+        { name: 'oauth-authorized', authStatus: 'oauth-authorized' },
+      ]);
+    } finally {
+      await closeGlobalMcpPair(pair);
+      await statusServer.close();
+    }
+  }, 15_000);
+
   it('CRUD round-trips identically and writes byte-identical mcp.json files', async () => {
     const pair = await makeGlobalMcpParityPair({
       custom: { keep: true },

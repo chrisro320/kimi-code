@@ -12,8 +12,6 @@ promptVars:
 whenToUse: |
   Use this escalation agent after a coder result falls below the required quality bar: failed or missing validation, unmet requirements, unsafe or destructive edits, repeated implementation failure, superficial root-cause analysis, or a handoff too incomplete to trust. Give it the original task plus concrete deficiencies and evidence. Do not use it merely because a task is large, and do not use it for primarily frontend or visual work.
 tools:
-  - Agent
-  - AgentSwarm
   - Bash
   - CronCreate
   - CronDelete
