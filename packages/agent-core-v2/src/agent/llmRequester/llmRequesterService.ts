@@ -102,6 +102,8 @@ import {
   type ContextManager,
   type LlmRequestContext,
   type PreparedTurnRequestConfig,
+  type TransformAccounting,
+  type TransformResult,
 } from './llmRequester';
 import { CONTEXT_MANAGER_SECTION } from './configSection';
 import {
@@ -216,6 +218,14 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private registeredContextManager: ContextManager | undefined;
 
+  private transformQueue: Promise<void> = Promise.resolve();
+
+  private readonly transformLifetime = new AbortController();
+
+  dispose(): void {
+    this.transformLifetime.abort();
+  }
+
   private get lastConfigLogSignature(): string | undefined {
     return this.states.get(llmRequesterLastConfigLogSignatureKey);
   }
@@ -278,6 +288,39 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private defaultRequestContext(): LlmRequestContext {
     return { manager: this.getActiveContextManager(), transform: 'apply' };
+  }
+
+  private enqueueTransform(
+    manager: ContextManager,
+    messages: readonly Message[],
+    request: ResolvedLLMRequest,
+    signal: AbortSignal | undefined,
+  ): Promise<TransformResult> {
+    const entry = async (): Promise<TransformResult> => {
+      const linked = AbortSignal.any(
+        signal === undefined ? [this.transformLifetime.signal] : [this.transformLifetime.signal, signal],
+      );
+      linked.throwIfAborted();
+      return manager.transformMessages({
+        messages,
+        source: request.source,
+        usedContextTokens: this.tokenCounting.get().size,
+        maxContextTokens:
+          request.model.capabilities.max_input_tokens ??
+          request.model.capabilities.max_context_tokens ??
+          0,
+        signal: linked,
+      });
+    };
+    // Per-agent serialization: the entry runs only after the queue tail
+    // settles, and the tail swallows this entry's outcome so one rejection
+    // never poisons later requests.
+    const result = this.transformQueue.then(entry, entry);
+    this.transformQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   prepareTurnConfig(turnId: number): PreparedTurnRequestConfig | undefined {
@@ -548,13 +591,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     const run = async (projection: RequestProjection): Promise<AgentLLMRequestFinish> => {
       onRequestTrace(undefined);
       const projected = requestInput(projection);
+      // The disabled / bypass guard stays synchronous: no manager call and
+      // no extra async boundary on the default path.
+      let messages = projected.messages;
+      let transformAccounting: TransformAccounting | undefined;
+      if (context.manager !== undefined && context.transform === 'apply') {
+        const transformed = await this.enqueueTransform(context.manager, messages, request, signal);
+        messages = [...transformed.messages];
+        transformAccounting = transformed.accounting;
+      }
       const input = {
         ...projected,
-        messages: await this.videoResolver.resolve(
-          projected.messages,
-          request.requester,
-          signal,
-        ),
+        messages: await this.videoResolver.resolve(messages, request.requester, signal),
       };
       const fields =
         projection === 'normal'
@@ -621,7 +669,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       // Only a stream that actually reported usage may write a measured
       // anchor — recording emptyUsage() zeros would zero the context size and
       // silence compaction for providers without usage reporting.
-      if (usage !== undefined) {
+      if (usage !== undefined && transformAccounting !== 'transformed') {
         this.tokenCounting.measured(request.messages, [message], usage);
       }
       this.logResponse(request.logFields, usage ?? emptyUsage(), timing);

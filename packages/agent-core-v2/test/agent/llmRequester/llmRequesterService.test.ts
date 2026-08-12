@@ -28,6 +28,7 @@ import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterServi
 import {
   IAgentLLMRequesterService,
   type ContextManager,
+  type TransformResult,
 } from '#/agent/llmRequester/llmRequester';
 import { CONTEXT_MANAGER_SECTION } from '#/agent/llmRequester/configSection';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
@@ -1188,5 +1189,139 @@ describe('AgentLLMRequesterService context manager registration', () => {
     service.registerContextManager(stubManager('other'));
     expect(service.getActiveContextManager()).toBeUndefined();
     expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+  });
+});
+
+describe('AgentLLMRequesterService context transform pipeline', () => {
+  const enabledConfig = { [CONTEXT_MANAGER_SECTION]: 'pipe' };
+  const sentinel: Message[] = [
+    { role: 'user', content: [{ type: 'text', text: 'sentinel' }], toolCalls: [] },
+  ];
+  const sentinelProjector = {
+    project: () => sentinel,
+    projectStrict: () => sentinel,
+  };
+
+  it('keeps both disabled cases byte-identical, reference-identical, and manager-free', async () => {
+    const baselineCaptured: ModelRequestInput[] = [];
+    const baseline = createService(
+      createRequester({ value: 0 }, null, [], baselineCaptured),
+      sentinelProjector,
+    );
+    await baseline.service.request();
+
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        transformCalls += 1;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const registeredCaptured: ModelRequestInput[] = [];
+    const registered = createService(
+      createRequester({ value: 0 }, null, [], registeredCaptured),
+      sentinelProjector,
+    );
+    registered.service.registerContextManager(manager);
+    await registered.service.request();
+
+    expect(transformCalls).toBe(0);
+    expect(baselineCaptured).toHaveLength(1);
+    expect(registeredCaptured).toHaveLength(1);
+    expect(registeredCaptured[0]).toEqual(baselineCaptured[0]);
+    expect(baselineCaptured[0]!.messages).toBe(sentinel);
+    expect(registeredCaptured[0]!.messages).toBe(sentinel);
+  });
+
+  it('does not poison the transform queue after a rejection', async () => {
+    let calls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) throw new Error('transform boom');
+        return { messages: input.messages, accounting: 'transformed' };
+      },
+    };
+    const captured: ModelRequestInput[] = [];
+    const { service } = createService(createRequester({ value: 0 }, null, [], captured), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    await expect(service.request()).rejects.toThrow('transform boom');
+    await service.request();
+
+    expect(calls).toBe(2);
+    expect(captured).toHaveLength(1);
+  });
+
+  it('aborts only the cancelled queue entry', async () => {
+    let calls = 0;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<TransformResult>((_resolve, reject) => {
+            firstStarted();
+            input.signal.addEventListener('abort', () => reject(input.signal.reason), {
+              once: true,
+            });
+          });
+        }
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const controller = new AbortController();
+    const first = service.request({}, undefined, controller.signal);
+    await started;
+    const second = service.request();
+    controller.abort();
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await second;
+    expect(calls).toBe(2);
+  });
+
+  it('aborts an in-flight transform when the service is disposed', async () => {
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) =>
+        new Promise<TransformResult>((_resolve, reject) => {
+          transformStarted();
+          input.signal.addEventListener('abort', () => reject(input.signal.reason), {
+            once: true,
+          });
+        }),
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const pending = service.request();
+    await started;
+    (service as unknown as { dispose(): void }).dispose();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
