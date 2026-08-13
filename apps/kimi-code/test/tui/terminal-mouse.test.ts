@@ -96,6 +96,13 @@ describe('viewport scroll controls', () => {
   function createState() {
     const listeners: Array<(data: string) => { consume: true } | undefined> = [];
     const setTransientHint = vi.fn();
+    const placeCursorAtComponentRow = vi.fn(() => true);
+    const requestRender = vi.fn();
+    const editorContainer = { id: 'editor-container' };
+    let hit: { component: unknown; rowWithinComponent: number } | undefined;
+    const setHit = (next: typeof hit) => {
+      hit = next;
+    };
     let offset = 0;
     const scrollViewportBy = vi.fn((delta: number) => {
       offset = Math.max(0, offset + delta);
@@ -106,6 +113,8 @@ describe('viewport scroll controls', () => {
     const state = {
       terminal: { write: vi.fn() },
       footer: { setTransientHint },
+      editorContainer,
+      editor: { placeCursorAtComponentRow },
       ui: {
         addInputListener: vi.fn((listener) => {
           listeners.push(listener);
@@ -113,12 +122,24 @@ describe('viewport scroll controls', () => {
         }),
         scrollViewportBy,
         resetViewportScroll,
+        requestRender,
+        hitTestScreenRow: vi.fn(() => hit),
         get viewportScrollOffset() {
           return offset;
         },
       },
     } as unknown as TUIState;
-    return { state, listeners, scrollViewportBy, resetViewportScroll, setTransientHint };
+    return {
+      state,
+      listeners,
+      scrollViewportBy,
+      resetViewportScroll,
+      setTransientHint,
+      placeCursorAtComponentRow,
+      requestRender,
+      editorContainer,
+      setHit,
+    };
   }
 
   it('scrolls the viewport on wheel events', () => {
@@ -146,6 +167,39 @@ describe('viewport scroll controls', () => {
     // scrolled up, the way Claude Code behaves.
     expect(keyListener?.('a')).toBeUndefined();
     expect(resetViewportScroll).toHaveBeenCalledOnce();
+  });
+
+  it('routes a left click inside the editor to a cursor placement', () => {
+    const { state, listeners, placeCursorAtComponentRow, requestRender, editorContainer, setHit } = createState();
+    installViewportScrollControls(state);
+    const mouseListener = listeners[0];
+
+    setHit({ component: editorContainer, rowWithinComponent: 2 });
+    // Row 7, column 9 in the terminal's 1-based reporting.
+    mouseListener?.('\x1b[<0;9;7M');
+    // Column loses the 1-based offset and the gutter inset (CHROME_GUTTER = 1).
+    expect(placeCursorAtComponentRow).toHaveBeenCalledWith(2, 7);
+    expect(requestRender).toHaveBeenCalledOnce();
+  });
+
+  it('ignores clicks outside the editor and non-left buttons', () => {
+    const { state, listeners, placeCursorAtComponentRow, setHit } = createState();
+    installViewportScrollControls(state);
+    const mouseListener = listeners[0];
+
+    // A click landing on some other component.
+    setHit({ component: { id: 'transcript' }, rowWithinComponent: 0 });
+    mouseListener?.('\x1b[<0;9;7M');
+    expect(placeCursorAtComponentRow).not.toHaveBeenCalled();
+
+    // Right button inside the editor.
+    setHit({ component: state.editorContainer, rowWithinComponent: 1 });
+    mouseListener?.('\x1b[<2;9;7M');
+    expect(placeCursorAtComponentRow).not.toHaveBeenCalled();
+
+    // Release events must not move the cursor either.
+    mouseListener?.('\x1b[<0;9;7m');
+    expect(placeCursorAtComponentRow).not.toHaveBeenCalled();
   });
 
   it('shows the jump-to-bottom hint only while scrolled back', () => {

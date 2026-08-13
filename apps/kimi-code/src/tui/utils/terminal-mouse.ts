@@ -1,5 +1,6 @@
 import { Key, matchesKey } from '@moonshot-ai/pi-tui';
 
+import { CHROME_GUTTER } from '#/tui/constant/rendering';
 import {
   DISABLE_TERMINAL_MOUSE_REPORTING,
   ENABLE_TERMINAL_MOUSE_REPORTING,
@@ -129,9 +130,21 @@ export function installViewportScrollControls(state: TUIState): () => void {
   };
 
   const disposeMouse = installTerminalMouseTracking(state, (event) => {
-    if (event.kind !== 'wheel') return;
-    state.ui.scrollViewportBy(event.direction === 'up' ? WHEEL_SCROLL_ROWS : -WHEEL_SCROLL_ROWS);
-    syncJumpHint();
+    if (event.kind === 'wheel') {
+      state.ui.scrollViewportBy(event.direction === 'up' ? WHEEL_SCROLL_ROWS : -WHEEL_SCROLL_ROWS);
+      syncJumpHint();
+      return;
+    }
+    if (event.kind !== 'press' || event.button !== 'left') return;
+
+    // Mouse reports are 1-based; hit testing is 0-based.
+    const hit = state.ui.hitTestScreenRow(event.row - 1);
+    if (hit?.component !== state.editorContainer) return;
+
+    // The editor sits inside a gutter container, so the click column has to lose
+    // the left inset before the editor can resolve it.
+    const placed = state.editor.placeCursorAtComponentRow(hit.rowWithinComponent, event.column - 1 - CHROME_GUTTER);
+    if (placed) state.ui.requestRender();
   });
 
   const disposeKeys = state.ui.addInputListener((data) => {

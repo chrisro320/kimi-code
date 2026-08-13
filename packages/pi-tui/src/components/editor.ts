@@ -229,6 +229,14 @@ interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	/**
+	 * Which logical line this row came from, and the offset into it where the
+	 * row starts. Recorded so a click on a rendered row can be resolved back to
+	 * a cursor position through the exact wrapping that produced the row — a
+	 * second wrapping pass would drift from what is on screen.
+	 */
+	sourceLine: number;
+	startIndex: number;
 }
 
 export interface EditorTheme {
@@ -282,6 +290,8 @@ export class Editor implements Component, Focusable {
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
+	/** Last painted layout, kept for mouse hit testing. See `placeCursorAtComponentRow`. */
+	private lastLayout: { lines: LayoutLine[]; paddingX: number } | null = null;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
@@ -586,6 +596,11 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+
+		// Anchor for mouse hit testing: the rows and the left inset actually used
+		// by this paint. Recorded rather than re-derived, so click mapping cannot
+		// drift from the layout on screen.
+		this.lastLayout = { lines: layoutLines, paddingX };
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
@@ -987,6 +1002,43 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Moves the cursor to the character a click landed on.
+	 *
+	 * `row` and `column` are 0-based within this component, as returned by the
+	 * TUI's screen-row hit test. Row 0 is the top border; text starts at row 1.
+	 * Resolution goes through the layout rows recorded by the last paint, so the
+	 * editor's own scroll offset, its padding and the exact soft-wrap boundaries
+	 * are all accounted for without re-deriving any of them.
+	 *
+	 * Returns false when the click was on the border or past the last row, so the
+	 * caller can leave the event unconsumed.
+	 */
+	public placeCursorAtComponentRow(row: number, column: number): boolean {
+		const layout = this.lastLayout;
+		if (!layout) return false;
+
+		const textRow = row - 1; // row 0 is the top border
+		if (textRow < 0) return false;
+
+		const layoutLine = layout.lines[textRow + this.scrollOffset];
+		if (!layoutLine) return false;
+
+		const targetColumn = Math.max(0, column - layout.paddingX);
+		let consumedWidth = 0;
+		let offset = 0;
+		for (const grapheme of this.segment(layoutLine.text, "grapheme")) {
+			const graphemeWidth = visibleWidth(grapheme.segment);
+			if (consumedWidth + graphemeWidth > targetColumn) break;
+			consumedWidth += graphemeWidth;
+			offset += grapheme.segment.length;
+		}
+
+		this.state.cursorLine = layoutLine.sourceLine;
+		this.setCursorCol(layoutLine.startIndex + offset);
+		return true;
+	}
+
 	private layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
 
@@ -996,6 +1048,8 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				sourceLine: 0,
+				startIndex: 0,
 			});
 			return layoutLines;
 		}
@@ -1013,11 +1067,15 @@ export class Editor implements Component, Focusable {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
+						sourceLine: i,
+						startIndex: 0,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
 						hasCursor: false,
+						sourceLine: i,
+						startIndex: 0,
 					});
 				}
 			} else {
@@ -1061,11 +1119,15 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							sourceLine: i,
+							startIndex: chunk.startIndex,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							sourceLine: i,
+							startIndex: chunk.startIndex,
 						});
 					}
 				}
