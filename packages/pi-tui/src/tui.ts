@@ -760,6 +760,15 @@ export class TUI extends Container {
 		return changed;
 	}
 
+	/**
+	 * Resolves a 0-based screen row to the component that painted it and the
+	 * row's offset within that component. Used for mouse hit testing.
+	 */
+	hitTestScreenRow(screenRow: number): { component: Component; rowWithinComponent: number } | undefined {
+		if (!TUI.LEDGER_ENABLED) return undefined;
+		return this.getLedgerEngine().hitTestScreenRow(screenRow);
+	}
+
 	/** Rows the viewport is currently scrolled back by; 0 means bottom-following. */
 	get viewportScrollOffset(): number {
 		if (!TUI.LEDGER_ENABLED) return 0;

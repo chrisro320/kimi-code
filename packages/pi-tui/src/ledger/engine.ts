@@ -780,6 +780,26 @@ export class LedgerTuiEngine {
 		return this.#userScrollOffset;
 	}
 
+	/**
+	 * Resolves a screen row to the component that painted it, plus the row's
+	 * offset inside that component. Components render rows without knowing where
+	 * they land, so this is the only place that mapping exists — mouse hit
+	 * testing needs it to turn a click into a position within a component.
+	 *
+	 * Returns undefined for rows below the last component (padding) or when no
+	 * frame has been composed yet.
+	 */
+	public hitTestScreenRow(screenRow: number): { component: Component; rowWithinComponent: number } | undefined {
+		if (screenRow < 0) return undefined;
+		const frameRow = this.#windowTopRow + screenRow;
+		for (const segment of this.#frameSegments) {
+			if (frameRow >= segment.start && frameRow < segment.start + segment.rowCount) {
+				return { component: segment.component, rowWithinComponent: frameRow - segment.start };
+			}
+		}
+		return undefined;
+	}
+
 	/** Resumes bottom-following. Called when new content or user input arrives. */
 	public resetScroll(): boolean {
 		if (this.#userScrollOffset === 0) return false;

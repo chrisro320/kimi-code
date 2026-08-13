@@ -239,6 +239,40 @@ describe("ledger engine golden", () => {
 	});
 
 	/**
+	 * Mouse hit testing. Components render rows without knowing where they land,
+	 * so the frame segments are the only record of which component owns which
+	 * row. The mapping has to follow the scroll offset, or a click while scrolled
+	 * back would resolve against the wrong content.
+	 */
+	it("resolves a screen row to the component that painted it", async () => {
+		await withLedger(async () => {
+			await withoutMultiplexer(async () => {
+				const terminal = new LoggingVirtualTerminal(40, 10);
+				const tui = new TUI(terminal);
+				const top = new TestComponent();
+				const bottom = new TestComponent();
+				top.lines = ["top-0", "top-1"];
+				bottom.lines = ["bottom-0", "bottom-1", "bottom-2"];
+				tui.addChild(top);
+				tui.addChild(bottom);
+				tui.start();
+				await terminal.waitForRender();
+
+				assert.strictEqual(tui.hitTestScreenRow(0)?.component, top);
+				assert.strictEqual(tui.hitTestScreenRow(1)?.rowWithinComponent, 1);
+				assert.strictEqual(tui.hitTestScreenRow(2)?.component, bottom);
+				assert.strictEqual(tui.hitTestScreenRow(2)?.rowWithinComponent, 0);
+				assert.strictEqual(tui.hitTestScreenRow(4)?.rowWithinComponent, 2);
+				// Below the last component: padding, owned by nobody.
+				assert.strictEqual(tui.hitTestScreenRow(9), undefined);
+				assert.strictEqual(tui.hitTestScreenRow(-1), undefined);
+
+				tui.stop();
+			});
+		});
+	});
+
+	/**
 	 * User scrollback. Enabling mouse reporting takes the wheel away from the
 	 * terminal, so the TUI has to provide the scrolling itself. Only the window
 	 * origin moves — `window[r]` still maps to `frame[windowTop + r]` — which is
