@@ -32,10 +32,12 @@ export class LedgerTuiEngine {
 	#committedPrefixAuditRows = 0;
 	#committedPrefixDurableRows = 0;
 	#windowTopRow = 0;
-	// Rows the user has scrolled back by, counted up from the bottom-follow
-	// position. Non-zero only while the user is looking at history; any new
-	// content or input snaps it back to 0 so the view resumes following.
-	#userScrollOffset = 0;
+	// Absolute frame row the user scrolled to, or null while bottom-following.
+	//
+	// This must be an absolute anchor, not a distance from the bottom: streaming
+	// output grows the frame, so a relative offset would slide the view downward
+	// on every token and the content the user is reading would drift away.
+	#userScrollAnchor: number | null = null;
 	#previousWindow: string[] = [];
 	#previousFrameLength = 0;
 	#previousWidth = 0;
@@ -683,10 +685,16 @@ export class LedgerTuiEngine {
 		// `windowTop - prevWindowTop` scroll handling. Committed rows are held
 		// back with the window, since re-committing while scrolled up would
 		// permanently truncate the frame.
-		if (this.#userScrollOffset > 0) {
-			const scrolled = Math.max(0, windowTop - this.#userScrollOffset);
-			if (scrolled !== windowTop) {
-				windowTop = scrolled;
+		if (this.#userScrollAnchor !== null) {
+			// Pin to the anchored frame row. Clamped against this frame so the
+			// anchor stays valid when content is removed, and released once the
+			// frame shrinks back to where following would show the same rows.
+			const maxTop = Math.max(0, frameLength - height);
+			const pinned = Math.max(0, Math.min(this.#userScrollAnchor, maxTop));
+			if (pinned >= maxTop) {
+				this.#userScrollAnchor = null;
+			} else if (pinned !== windowTop) {
+				windowTop = pinned;
 				chunkTo = Math.min(chunkTo, windowTop);
 			}
 		}
@@ -767,17 +775,24 @@ export class LedgerTuiEngine {
 	 * offset actually changed, so the caller can skip a repaint on a no-op.
 	 */
 	public scrollBy(delta: number): boolean {
-		// The furthest we may scroll back is the number of rows that sit above the
-		// bottom-following window, taken from the last painted frame.
-		const maxOffset = Math.max(0, this.#previousFrameLength - this.#previousHeight);
-		const next = Math.max(0, Math.min(maxOffset, this.#userScrollOffset + delta));
-		if (next === this.#userScrollOffset) return false;
-		this.#userScrollOffset = next;
+		const bottom = this.#bottomFollowRow();
+		const from = this.#userScrollAnchor ?? bottom;
+		const next = Math.max(0, Math.min(bottom, from - delta));
+		if (next === from) return false;
+		// Landing back on the bottom resumes following instead of pinning there,
+		// so subsequent output scrolls in normally.
+		this.#userScrollAnchor = next >= bottom ? null : next;
 		return true;
 	}
 
+	#bottomFollowRow(): number {
+		return Math.max(0, this.#previousFrameLength - this.#previousHeight);
+	}
+
+	/** Rows the view sits above the bottom-follow position; 0 while following. */
 	public get userScrollOffset(): number {
-		return this.#userScrollOffset;
+		if (this.#userScrollAnchor === null) return 0;
+		return Math.max(0, this.#bottomFollowRow() - this.#userScrollAnchor);
 	}
 
 	/**
@@ -800,10 +815,10 @@ export class LedgerTuiEngine {
 		return undefined;
 	}
 
-	/** Resumes bottom-following. Called when new content or user input arrives. */
+	/** Resumes bottom-following. */
 	public resetScroll(): boolean {
-		if (this.#userScrollOffset === 0) return false;
-		this.#userScrollOffset = 0;
+		if (this.#userScrollAnchor === null) return false;
+		this.#userScrollAnchor = null;
 		return true;
 	}
 

@@ -239,6 +239,90 @@ describe("ledger engine golden", () => {
 	});
 
 	/**
+	 * Regression: an in-place repaint must still paint *every* row it owns.
+	 * Asserting only the first rows and the absence of ED3 would not catch a
+	 * repaint that silently drops the trailing rows — which is where an input box
+	 * and a footer live.
+	 */
+	it("keeps every row of a short frame after an in-place repaint", async () => {
+		await withLedger(async () => {
+			await withoutMultiplexer(async () => {
+				const terminal = new LoggingVirtualTerminal(40, 20);
+				const tui = new TUI(terminal);
+				const transcript = new TestComponent();
+				const editor = new TestComponent();
+				const footer = new TestComponent();
+				transcript.lines = ["msg-0", "msg-1", "msg-2"];
+				editor.lines = ["> input", "───────"];
+				footer.lines = ["footer-a", "footer-b"];
+				tui.addChild(transcript);
+				tui.addChild(editor);
+				tui.addChild(footer);
+				tui.start();
+				await terminal.waitForRender();
+
+				const expected = [...transcript.lines, ...editor.lines, ...footer.lines];
+				assert.deepStrictEqual(terminal.getViewport().slice(0, expected.length), expected, "first paint");
+
+				tui.requestRender(true);
+				await terminal.waitForRender();
+
+				assert.deepStrictEqual(
+					terminal.getViewport().slice(0, expected.length),
+					expected,
+					`in-place repaint dropped rows: ${JSON.stringify(terminal.getViewport().slice(0, expected.length))}`,
+				);
+
+				tui.stop();
+			});
+		});
+	});
+
+	/**
+	 * Regression: the scroll position must be an absolute frame row, not a
+	 * distance from the bottom. Streaming output grows the frame every token; a
+	 * relative offset would slide the view downward each time and the content
+	 * being read would drift away — which is exactly what "it still scrolls while
+	 * the model is thinking" looks like.
+	 */
+	it("holds the scrolled position while new content streams in", async () => {
+		await withLedger(async () => {
+			await withoutMultiplexer(async () => {
+				const terminal = new LoggingVirtualTerminal(40, 5);
+				const tui = new TUI(terminal);
+				const c = new TestComponent();
+				tui.addChild(c);
+				c.lines = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+				tui.start();
+				await terminal.waitForRender();
+
+				tui.scrollViewportBy(5);
+				await terminal.waitForRender();
+				const before = terminal.getViewport();
+				assert.ok(before.at(-1)?.includes("line-14"), `expected line-14 at the bottom, got ${JSON.stringify(before)}`);
+
+				// Ten more rows stream in while the user is reading history.
+				c.lines = [...c.lines, ...Array.from({ length: 10 }, (_, i) => `new-${i}`)];
+				tui.requestRender();
+				await terminal.waitForRender();
+
+				assert.deepStrictEqual(
+					terminal.getViewport(),
+					before,
+					"streaming output must not move a scrolled-back view",
+				);
+
+				// Returning to the bottom shows the newest content.
+				tui.resetViewportScroll();
+				await terminal.waitForRender();
+				assert.ok(terminal.getViewport().at(-1)?.includes("new-9"), "reset must land on the newest row");
+
+				tui.stop();
+			});
+		});
+	});
+
+	/**
 	 * Mouse hit testing. Components render rows without knowing where they land,
 	 * so the frame segments are the only record of which component owns which
 	 * row. The mapping has to follow the scroll offset, or a click while scrolled
