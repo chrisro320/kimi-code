@@ -748,6 +748,26 @@ export class TUI extends Container {
 		this.terminal.stop();
 	}
 
+	/**
+	 * Scrolls the transcript viewport back through frame history. Positive delta
+	 * moves toward older content. Returns false when already at the limit, so a
+	 * wheel event at the end of the scrollback costs no repaint.
+	 */
+	scrollViewportBy(delta: number): boolean {
+		if (!TUI.LEDGER_ENABLED) return false;
+		const changed = this.getLedgerEngine().scrollBy(delta);
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	/** Resumes bottom-following after the user has scrolled back. */
+	resetViewportScroll(): boolean {
+		if (!TUI.LEDGER_ENABLED) return false;
+		const changed = this.getLedgerEngine().resetScroll();
+		if (changed) this.requestRender();
+		return changed;
+	}
+
 	/** Resynchronize ledger rendering after a caller writes directly to the terminal. */
 	notifyExternalOutput(): void {
 		if (TUI.LEDGER_ENABLED) this.getLedgerEngine().requestFullPaint(false);

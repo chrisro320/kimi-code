@@ -32,6 +32,10 @@ export class LedgerTuiEngine {
 	#committedPrefixAuditRows = 0;
 	#committedPrefixDurableRows = 0;
 	#windowTopRow = 0;
+	// Rows the user has scrolled back by, counted up from the bottom-follow
+	// position. Non-zero only while the user is looking at history; any new
+	// content or input snaps it back to 0 so the view resumes following.
+	#userScrollOffset = 0;
 	#previousWindow: string[] = [];
 	#previousFrameLength = 0;
 	#previousWidth = 0;
@@ -375,10 +379,37 @@ export class LedgerTuiEngine {
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
-		options: { clearScrollback: boolean; chunkTo: number; windowTop: number },
+		options: { clearScrollback: boolean; chunkTo: number; windowTop: number; rewriteInPlace?: boolean },
 	): void {
 		this.#fullRedrawCount += 1;
 		const { chunkTo, windowTop } = options;
+
+		// In-place variant: no erase, no absolute home. Move back up to our own
+		// first row and rewrite exactly the rows we own; every row below stays as
+		// the terminal left it. Only taken when the caller established that the
+		// hardware cursor row is trustworthy (see the call site).
+		if (options.rewriteInPlace) {
+			const contentRows = Math.max(1, Math.min(height, frame.length - windowTop));
+			const screenRow = Math.max(0, Math.min(height - 1, this.#hardwareCursorRow - windowTop));
+			let inPlace = this.#paintBeginSequence;
+			if (screenRow > 0) inPlace += `\x1b[${screenRow}A`;
+			inPlace += "\r";
+			for (let i = 0; i < contentRows; i++) {
+				if (i > 0) inPlace += "\r\n";
+				inPlace += this.#lineRewriteSequence(window[i] ?? "", width);
+			}
+			const inPlaceBottomRow = windowTop + contentRows - 1;
+			const inPlaceCursor = this.#cursorControlSequence(cursorPos, frame.length, inPlaceBottomRow);
+			inPlace += inPlaceCursor.seq;
+			inPlace += this.#paintEndSequence;
+			this.terminal.write(inPlace);
+
+			this.#committedRows = chunkTo;
+			this.#windowTopRow = windowTop;
+			this.#commit(frame, window, width, height, inPlaceCursor);
+			return;
+		}
+
 		let buffer = this.#paintBeginSequence;
 		if (options.clearScrollback) {
 			buffer += "\x1b[2J\x1b[H\x1b[3J";
@@ -646,6 +677,20 @@ export class LedgerTuiEngine {
 			}
 		}
 
+		// User scrollback: shift the window up by the requested offset. Only the
+		// window origin moves — `window[r]` still maps to `frame[windowTop + r]`,
+		// so the differential paths keep working through their existing
+		// `windowTop - prevWindowTop` scroll handling. Committed rows are held
+		// back with the window, since re-committing while scrolled up would
+		// permanently truncate the frame.
+		if (this.#userScrollOffset > 0) {
+			const scrolled = Math.max(0, windowTop - this.#userScrollOffset);
+			if (scrolled !== windowTop) {
+				windowTop = scrolled;
+				chunkTo = Math.min(chunkTo, windowTop);
+			}
+		}
+
 		// 6. cursor marker + window slice (OMP: 2736-2758)
 		let cursorPos: { row: number; col: number } | null = null;
 		for (let i = cursorMarkers.length - 1; i >= 0; i--) {
@@ -661,15 +706,32 @@ export class LedgerTuiEngine {
 		const window = this.compositeOverlays(rawWindow, width, height);
 
 		const intent: RenderIntent = fullPaint
-			? { kind: "fullPaint", clearScrollback: replaceRequested || geometryRebuild ? !isMultiplexerSession() : false }
+			? { kind: "fullPaint", clearScrollback: geometryRebuild ? !isMultiplexerSession() : false }
 			: { kind: "update", chunkTo, windowTop };
 
 		// 7. emit + ledger advance (OMP: 2779-2822)
 		if (intent.kind === "fullPaint") {
+			// A full paint normally clears the screen and repaints from the top,
+			// which erases whatever sat below our own rows and leaves an empty band
+			// under the input line whenever the frame is shorter than the screen.
+			// When the repaint was requested by the TUI itself (not by a first
+			// paint, a geometry rebuild, or external output that moved the cursor
+			// out from under us) and the whole frame is already on screen at
+			// windowTop 0, the hardware cursor row *is* the screen row, so the
+			// rows can be rewritten in place instead — leaving everything below
+			// them untouched, the way an inline TUI is expected to behave.
+			const paintContentRows = Math.max(1, Math.min(height, frame.length - windowTop));
+			const rewriteInPlace =
+				!firstPaint &&
+				!geometryRebuild &&
+				!this.#fullPaintOnNextRender &&
+				windowTop === 0 &&
+				paintContentRows < height;
 			this.#emitFullPaint(frame, window, width, height, cursorPos, {
 				clearScrollback: intent.clearScrollback,
 				chunkTo,
 				windowTop,
+				rewriteInPlace,
 			});
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
 			this.#updateCommittedAuditRows(true, preCommitRows, preCommitAuditRows, preCommitDurableRows, byteStableBoundary, durableBoundary, false);
@@ -696,6 +758,33 @@ export class LedgerTuiEngine {
 			durableBoundary,
 			auditRan,
 		);
+	}
+
+	/**
+	 * Scrolls the viewport back by `delta` rows (positive scrolls toward older
+	 * content, negative toward newer). Clamped so it can never move past the top
+	 * of the frame or below the bottom-follow position. Returns true when the
+	 * offset actually changed, so the caller can skip a repaint on a no-op.
+	 */
+	public scrollBy(delta: number): boolean {
+		// The furthest we may scroll back is the number of rows that sit above the
+		// bottom-following window, taken from the last painted frame.
+		const maxOffset = Math.max(0, this.#previousFrameLength - this.#previousHeight);
+		const next = Math.max(0, Math.min(maxOffset, this.#userScrollOffset + delta));
+		if (next === this.#userScrollOffset) return false;
+		this.#userScrollOffset = next;
+		return true;
+	}
+
+	public get userScrollOffset(): number {
+		return this.#userScrollOffset;
+	}
+
+	/** Resumes bottom-following. Called when new content or user input arrives. */
+	public resetScroll(): boolean {
+		if (this.#userScrollOffset === 0) return false;
+		this.#userScrollOffset = 0;
+		return true;
 	}
 
 	public requestFullPaint(clearScrollback: boolean): void {
