@@ -238,45 +238,6 @@ describe("ledger engine golden", () => {
 		});
 	});
 
-	/**
-	 * Regression: an in-place repaint must still paint *every* row it owns.
-	 * Asserting only the first rows and the absence of ED3 would not catch a
-	 * repaint that silently drops the trailing rows — which is where an input box
-	 * and a footer live.
-	 */
-	it("keeps every row of a short frame after an in-place repaint", async () => {
-		await withLedger(async () => {
-			await withoutMultiplexer(async () => {
-				const terminal = new LoggingVirtualTerminal(40, 20);
-				const tui = new TUI(terminal);
-				const transcript = new TestComponent();
-				const editor = new TestComponent();
-				const footer = new TestComponent();
-				transcript.lines = ["msg-0", "msg-1", "msg-2"];
-				editor.lines = ["> input", "───────"];
-				footer.lines = ["footer-a", "footer-b"];
-				tui.addChild(transcript);
-				tui.addChild(editor);
-				tui.addChild(footer);
-				tui.start();
-				await terminal.waitForRender();
-
-				const expected = [...transcript.lines, ...editor.lines, ...footer.lines];
-				assert.deepStrictEqual(terminal.getViewport().slice(0, expected.length), expected, "first paint");
-
-				tui.requestRender(true);
-				await terminal.waitForRender();
-
-				assert.deepStrictEqual(
-					terminal.getViewport().slice(0, expected.length),
-					expected,
-					`in-place repaint dropped rows: ${JSON.stringify(terminal.getViewport().slice(0, expected.length))}`,
-				);
-
-				tui.stop();
-			});
-		});
-	});
 
 	/**
 	 * Regression: the scroll position must be an absolute frame row, not a
@@ -400,46 +361,6 @@ describe("ledger engine golden", () => {
 		});
 	});
 
-	/**
-	 * The fix for the empty band below the input line: a TUI-requested repaint of
-	 * a short frame rewrites its own rows in place instead of erasing the screen,
-	 * so whatever the terminal holds below those rows survives. `\x1b[2J` is the
-	 * thing that used to destroy it, so its absence is the property under test.
-	 *
-	 * The escape hatches are deliberately narrow — a first paint, a geometry
-	 * rebuild, or external output all leave the cursor somewhere this path cannot
-	 * reason about, and each still takes the absolute repaint.
-	 */
-	it("rewrites a short frame in place instead of erasing the screen", async () => {
-		await withLedger(async () => {
-			await withoutMultiplexer(async () => {
-				const terminal = new LoggingVirtualTerminal(40, 10);
-				const tui = new TUI(terminal);
-				const c = new TestComponent();
-				tui.addChild(c);
-				c.lines = ["content-0", "content-1", "content-2"];
-				tui.start();
-				await terminal.waitForRender();
-
-				terminal.clearWrites();
-				tui.requestRender(true);
-				await terminal.waitForRender();
-
-				const writes = terminal.getWrites();
-				assert.ok(
-					!writes.includes("\x1b[2J"),
-					`an in-place repaint must not erase the screen, got: ${JSON.stringify(writes)}`,
-				);
-				assert.deepStrictEqual(
-					terminal.getViewport().slice(0, 3),
-					c.lines,
-					"the content must still be correct after an in-place repaint",
-				);
-
-				tui.stop();
-			});
-		});
-	});
 
 	it("commits appended rows and repaints window on streaming append", async () => {
 		await withLedger(async () => {

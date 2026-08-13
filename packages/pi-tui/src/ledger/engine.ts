@@ -381,36 +381,10 @@ export class LedgerTuiEngine {
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
-		options: { clearScrollback: boolean; chunkTo: number; windowTop: number; rewriteInPlace?: boolean },
+		options: { clearScrollback: boolean; chunkTo: number; windowTop: number },
 	): void {
 		this.#fullRedrawCount += 1;
 		const { chunkTo, windowTop } = options;
-
-		// In-place variant: no erase, no absolute home. Move back up to our own
-		// first row and rewrite exactly the rows we own; every row below stays as
-		// the terminal left it. Only taken when the caller established that the
-		// hardware cursor row is trustworthy (see the call site).
-		if (options.rewriteInPlace) {
-			const contentRows = Math.max(1, Math.min(height, frame.length - windowTop));
-			const screenRow = Math.max(0, Math.min(height - 1, this.#hardwareCursorRow - windowTop));
-			let inPlace = this.#paintBeginSequence;
-			if (screenRow > 0) inPlace += `\x1b[${screenRow}A`;
-			inPlace += "\r";
-			for (let i = 0; i < contentRows; i++) {
-				if (i > 0) inPlace += "\r\n";
-				inPlace += this.#lineRewriteSequence(window[i] ?? "", width);
-			}
-			const inPlaceBottomRow = windowTop + contentRows - 1;
-			const inPlaceCursor = this.#cursorControlSequence(cursorPos, frame.length, inPlaceBottomRow);
-			inPlace += inPlaceCursor.seq;
-			inPlace += this.#paintEndSequence;
-			this.terminal.write(inPlace);
-
-			this.#committedRows = chunkTo;
-			this.#windowTopRow = windowTop;
-			this.#commit(frame, window, width, height, inPlaceCursor);
-			return;
-		}
 
 		let buffer = this.#paintBeginSequence;
 		if (options.clearScrollback) {
@@ -719,27 +693,10 @@ export class LedgerTuiEngine {
 
 		// 7. emit + ledger advance (OMP: 2779-2822)
 		if (intent.kind === "fullPaint") {
-			// A full paint normally clears the screen and repaints from the top,
-			// which erases whatever sat below our own rows and leaves an empty band
-			// under the input line whenever the frame is shorter than the screen.
-			// When the repaint was requested by the TUI itself (not by a first
-			// paint, a geometry rebuild, or external output that moved the cursor
-			// out from under us) and the whole frame is already on screen at
-			// windowTop 0, the hardware cursor row *is* the screen row, so the
-			// rows can be rewritten in place instead — leaving everything below
-			// them untouched, the way an inline TUI is expected to behave.
-			const paintContentRows = Math.max(1, Math.min(height, frame.length - windowTop));
-			const rewriteInPlace =
-				!firstPaint &&
-				!geometryRebuild &&
-				!this.#fullPaintOnNextRender &&
-				windowTop === 0 &&
-				paintContentRows < height;
 			this.#emitFullPaint(frame, window, width, height, cursorPos, {
 				clearScrollback: intent.clearScrollback,
 				chunkTo,
 				windowTop,
-				rewriteInPlace,
 			});
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
 			this.#updateCommittedAuditRows(true, preCommitRows, preCommitAuditRows, preCommitDurableRows, byteStableBoundary, durableBoundary, false);
