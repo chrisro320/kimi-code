@@ -777,7 +777,11 @@ export class KimiTUI {
     this.state.ui.start();
     this.startClipboardImageHintController();
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
-    this.terminalMouseTrackingDispose = installViewportScrollControls(this.state);
+    // Escape hatch: mouse reporting changes what the terminal does with the
+    // wheel and with clicks, so it needs to be switchable off without a rebuild.
+    if (process.env['KIMI_TUI_NO_MOUSE'] !== '1') {
+      this.terminalMouseTrackingDispose = installViewportScrollControls(this.state);
+    }
     this.refreshTerminalThemeTracking();
   }
 
