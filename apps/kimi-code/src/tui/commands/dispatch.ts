@@ -448,7 +448,7 @@ async function handleBuiltInSlashCommand(
     case 'subagent':
       await handleSubagentCommand(host, args);
       return;
-    case 'secondary_model':
+    case 'secondary-model':
       await handleSecondaryModelCommand(host, args);
       return;
     case 'effort':

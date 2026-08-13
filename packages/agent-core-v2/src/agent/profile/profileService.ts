@@ -133,7 +133,6 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import type { ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { subagentDisplayModel } from '#/session/subagent/configSection';
 import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { BUILTIN_SKILL_SOURCE_ID } from '#/app/skillCatalog/skillSource';
@@ -798,7 +797,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const maxContextTokens = capabilities?.max_input_tokens ?? capabilities?.max_context_tokens;
     this.eventBus.publish({
       type: 'agent.status.updated',
-      model: subagentDisplayModel(this.config, modelAlias),
+      model: modelAlias,
       thinkingEffort: includeThinkingEffort
         ? this.getEffectiveThinkingLevel()
         : undefined,

@@ -1,16 +1,18 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
-import { TUI } from "../src/tui.ts";
+import { PasteBurst } from "../src/paste-burst.ts";
+import type { TUI } from "../src/tui.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 /** Create a TUI with a virtual terminal for testing */
 function createTestTUI(cols = 80, rows = 24): TUI {
-	return new TUI(new VirtualTerminal(cols, rows));
+	return new TuiMainScreen(new VirtualTerminal(cols, rows));
 }
 
 /** Standard applyCompletion that replaces prefix with item.value */
@@ -37,6 +39,60 @@ async function flushAutocomplete(): Promise<void> {
 	await Promise.resolve();
 	await new Promise((resolve) => setImmediate(resolve));
 }
+
+describe("PasteBurst", () => {
+	it("does not suppress Enter for slow typing", () => {
+		const burst = new PasteBurst();
+		burst.onPlainChar(0);
+		burst.onPlainChar(20);
+
+		assert.strictEqual(burst.shouldInsertNewlineInsteadOfSubmit(40), false);
+	});
+
+	it("suppresses Enter during a rapid paste-like burst", () => {
+		const burst = new PasteBurst();
+		burst.onPlainChar(0);
+		burst.onPlainChar(1);
+		burst.onPlainChar(2);
+		burst.onPlainChar(3);
+		burst.onPlainChar(4);
+		burst.onPlainChar(5);
+		burst.onPlainChar(6);
+		burst.onPlainChar(7);
+
+		assert.strictEqual(burst.shouldInsertNewlineInsteadOfSubmit(8), true);
+	});
+
+	it("keeps suppressing Enter briefly after a burst", () => {
+		const burst = new PasteBurst();
+		burst.onPlainChar(0);
+		burst.onPlainChar(1);
+		burst.onPlainChar(2);
+		burst.onPlainChar(3);
+		burst.onPlainChar(4);
+		burst.onPlainChar(5);
+		burst.onPlainChar(6);
+		burst.onPlainChar(7);
+
+		assert.strictEqual(burst.shouldInsertNewlineInsteadOfSubmit(100), true);
+		assert.strictEqual(burst.shouldInsertNewlineInsteadOfSubmit(200), false);
+	});
+
+	it("resets after explicit paste handling", () => {
+		const burst = new PasteBurst();
+		burst.onPlainChar(0);
+		burst.onPlainChar(1);
+		burst.onPlainChar(2);
+		burst.onPlainChar(3);
+		burst.onPlainChar(4);
+		burst.onPlainChar(5);
+		burst.onPlainChar(6);
+		burst.onPlainChar(7);
+		burst.reset();
+
+		assert.strictEqual(burst.shouldInsertNewlineInsteadOfSubmit(8), false);
+	});
+});
 
 describe("Editor component", () => {
 	describe("Prompt history navigation", () => {
@@ -284,6 +340,162 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("history filter", () => {
+		it("visits all entries when no filter is set", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("first");
+			editor.addToHistory("second");
+
+			editor.handleInput("\x1b[A"); // Up - "second"
+			assert.strictEqual(editor.getText(), "second");
+			editor.handleInput("\x1b[A"); // Up - "first"
+			assert.strictEqual(editor.getText(), "first");
+		});
+
+		it("skips entries that do not pass the filter on Up", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt-a");
+			editor.addToHistory("!cmd-b");
+			editor.addToHistory("prompt-c");
+			// history: ["prompt-c", "!cmd-b", "prompt-a"]
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A"); // Up - "!cmd-b" (skips "prompt-c")
+			assert.strictEqual(editor.getText(), "!cmd-b");
+
+			editor.handleInput("\x1b[A"); // Up - no more shell entries, stays
+			assert.strictEqual(editor.getText(), "!cmd-b");
+		});
+
+		it("skips entries that do not pass the filter on Down", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd-a");
+			editor.addToHistory("prompt-b");
+			editor.addToHistory("!cmd-c");
+			// history: ["!cmd-c", "prompt-b", "!cmd-a"]
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A"); // Up - "!cmd-c"
+			assert.strictEqual(editor.getText(), "!cmd-c");
+			editor.handleInput("\x1b[A"); // Up - "!cmd-a" (skips "prompt-b")
+			assert.strictEqual(editor.getText(), "!cmd-a");
+			editor.handleInput("\x1b[B"); // Down - "!cmd-c" (skips "prompt-b")
+			assert.strictEqual(editor.getText(), "!cmd-c");
+		});
+
+		it("does nothing on Up when no entry passes the filter", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt-a");
+			editor.addToHistory("prompt-b");
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("still restores the draft with a filter active", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd");
+			editor.setHistoryFilter((entry) => entry.startsWith("!"));
+			editor.setText("draft");
+			editor.handleInput("\x1b[D");
+			editor.handleInput("\x1b[D");
+
+			editor.handleInput("\x1b[A"); // to line start
+			editor.handleInput("\x1b[A"); // recall "!cmd"
+			assert.strictEqual(editor.getText(), "!cmd");
+
+			editor.handleInput("\x1b[B"); // restore draft
+			assert.strictEqual(editor.getText(), "draft");
+		});
+	});
+
+	describe("onRecall", () => {
+		it("uses the returned text instead of the stored entry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("!cmd");
+			editor.onRecall = (entry) => (entry.startsWith("!") ? entry.slice(1) : undefined);
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "cmd");
+		});
+
+		it("uses the stored entry when onRecall returns undefined", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("prompt");
+			editor.onRecall = () => undefined;
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "prompt");
+		});
+
+		it("passes the navigation direction to onRecall", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("a");
+			editor.addToHistory("b");
+			const directions: Array<1 | -1> = [];
+			editor.onRecall = (_entry, direction) => {
+				directions.push(direction);
+				return undefined;
+			};
+
+			editor.handleInput("\x1b[A"); // Up -> "b" (-1)
+			editor.handleInput("\x1b[A"); // Up -> "a" (-1)
+			editor.handleInput("\x1b[B"); // Down -> "b" (1)
+			assert.deepStrictEqual(directions, [-1, -1, 1]);
+		});
+	});
+
+	describe("history draft host state", () => {
+		it("saves host state on entering browse and restores it on draft return", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let restored: unknown;
+			editor.onHistoryDraftSave = () => "prompt-mode";
+			editor.onHistoryDraftRestore = (state) => {
+				restored = state;
+			};
+
+			editor.handleInput("\x1b[A"); // Up - recall "entry", saves host state
+			assert.strictEqual(editor.getText(), "entry");
+			assert.strictEqual(restored, undefined);
+
+			editor.handleInput("\x1b[B"); // Down - restore draft
+			assert.strictEqual(editor.getText(), "");
+			assert.strictEqual(restored, "prompt-mode");
+		});
+
+		it("does not restore host state when leaving browse by typing", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let restored = false;
+			editor.onHistoryDraftSave = () => "state";
+			editor.onHistoryDraftRestore = () => {
+				restored = true;
+			};
+
+			editor.handleInput("\x1b[A"); // recall "entry"
+			editor.handleInput("x"); // type - exits browse without restoring draft
+			assert.strictEqual(restored, false);
+		});
+
+		it("saves and restores host state across multiple browse sessions", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("entry");
+			let count = 0;
+			editor.onHistoryDraftSave = () => "state";
+			editor.onHistoryDraftRestore = () => {
+				count++;
+			};
+
+			editor.handleInput("\x1b[A"); // recall
+			editor.handleInput("\x1b[B"); // restore draft (count=1)
+			editor.handleInput("\x1b[A"); // recall again
+			editor.handleInput("\x1b[B"); // restore draft again (count=2)
+			assert.strictEqual(count, 2);
+		});
+	});
+
 	describe("public state accessors", () => {
 		it("returns cursor position", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
@@ -309,6 +521,75 @@ describe("Editor component", () => {
 
 			lines[0] = "mutated";
 			assert.deepStrictEqual(editor.getLines(), ["a", "b"]);
+		});
+	});
+
+	describe("Paste burst fallback", () => {
+		it("inserts a newline instead of submitting during a rapid burst", () => {
+			// Freeze the clock so the 8 synchronous keystrokes are all seen as one
+			// burst regardless of host speed or scheduler jitter (the production
+			// heuristic uses an 8ms inter-char interval, which a slow CI runner can
+			// exceed between synchronous calls).
+			mock.timers.enable({ apis: ["Date"] });
+			mock.timers.setTime(1000);
+			try {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				let submitted = false;
+				editor.onSubmit = () => {
+					submitted = true;
+				};
+
+				editor.handleInput("a");
+				editor.handleInput("b");
+				editor.handleInput("c");
+				editor.handleInput("d");
+				editor.handleInput("e");
+				editor.handleInput("f");
+				editor.handleInput("g");
+				editor.handleInput("h");
+				editor.handleInput("\r");
+
+				assert.strictEqual(submitted, false);
+				assert.strictEqual(editor.getText(), "abcdefgh\n");
+			} finally {
+				mock.timers.reset();
+			}
+		});
+
+		it("can be disabled", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, { disablePasteBurst: true });
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("a");
+			editor.handleInput("b");
+			editor.handleInput("c");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "abc");
+		});
+
+		it("resets when DEL backspace arrives after a burst", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("a");
+			editor.handleInput("b");
+			editor.handleInput("c");
+			editor.handleInput("d");
+			editor.handleInput("e");
+			editor.handleInput("f");
+			editor.handleInput("g");
+			editor.handleInput("h");
+			editor.handleInput("\x7f");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "abcdefg");
 		});
 	});
 
@@ -696,6 +977,31 @@ describe("Editor component", () => {
 
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 15 }); // end
+		});
+	});
+
+	describe("Scroll indicators", () => {
+		it("keeps truncated scroll indicators within width and preserves their color (issue #6962)", () => {
+			const width = 10;
+			const borderColor = (text: string) => `\x1b[35m${text}\x1b[39m`;
+			const editor = new Editor(createTestTUI(width), { ...defaultEditorTheme, borderColor });
+			editor.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"));
+
+			// Render once to initialize wrapping, then move the cursor so content remains above and below the viewport.
+			editor.render(width);
+			for (let index = 0; index < 10; index++) editor.handleInput("\x1b[A");
+
+			const lines = editor.render(width);
+			const topBorder = lines[0]!;
+			const bottomBorder = lines.at(-1)!;
+
+			assert.match(stripVTControlCharacters(topBorder), /^─── ↑/);
+			assert.match(stripVTControlCharacters(bottomBorder), /^─── ↓/);
+			assert.strictEqual(topBorder, borderColor(stripVTControlCharacters(topBorder)));
+			assert.strictEqual(bottomBorder, borderColor(stripVTControlCharacters(bottomBorder)));
+			for (const line of lines) {
+				assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
+			}
 		});
 	});
 
@@ -3553,6 +3859,11 @@ describe("Editor component", () => {
 			return editor.getText();
 		}
 
+		/** Helper: 12-line paste content with a distinguishing tag */
+		function bigPaste(tag: string): string {
+			return Array.from({ length: 12 }, (_, i) => `${tag}${i}`).join("\n");
+		}
+
 		it("creates a paste marker for large pastes", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const text = pasteWithMarker(editor);
@@ -3688,6 +3999,92 @@ describe("Editor component", () => {
 			// Undo
 			editor.handleInput("\x1b[45;5u");
 			assert.strictEqual(editor.getText(), textBefore);
+		});
+
+		it("undo after paste marker deletion restores the paste registry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const paste = bigPaste("alpha");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			editor.handleInput("\x7f"); // delete the marker
+			editor.handleInput("\x1b[45;5u"); // undo: restores marker text and registry
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, paste);
+		});
+
+		it("undo after deleting the first of two paste markers restores both registry entries", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B, cursor at end
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[C"); // right over marker #1
+			editor.handleInput("\x7f"); // delete marker #1, renumbers #2 -> #1
+			editor.handleInput("\x1b[45;5u"); // undo
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteA + pasteB);
+		});
+
+		it("renumbers the paste registry in ascending id order when markers are out of order in text", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			const pasteC = bigPaste("gamma");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B, text: [#2][#1]
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput(`\x1b[200~${pasteC}\x1b[201~`); // #3 = C, text: [#3][#2][#1]
+			editor.handleInput("\x05"); // Ctrl+E
+			editor.handleInput("\x7f"); // delete marker #1, renumber #3 -> #2 and #2 -> #1
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteC + pasteB);
+		});
+
+		it("undo after setText restores paste markers and registry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const paste = bigPaste("alpha");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			editor.setText("replacement");
+			editor.handleInput("\x1b[45;5u"); // undo
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, paste);
+		});
+
+		it("setText with preservePasteRegistry keeps the registry for surviving markers", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const paste = bigPaste("alpha");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`); // #1 = alpha
+			// A programmatic replace that still contains the marker (e.g. a subclass
+			// expanding one of several paste markers) must not orphan its entry.
+			editor.setText(editor.getText(), { preservePasteRegistry: true });
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, paste);
 		});
 
 		it("handles multiple paste markers in same line", () => {
@@ -4048,157 +4445,125 @@ describe("Editor component", () => {
 			assert.strictEqual(submitted, pastedText);
 		});
 	});
+});
 
-	describe("Mouse text selection", () => {
-		it("selects forward on a single line and reports the selected text", () => {
+describe("wordWrapLine narrow width", () => {
+	it("does not recurse infinitely on a wide grapheme at maxWidth 1", () => {
+		const chunks = wordWrapLine("中", 1);
+		assert.deepStrictEqual(
+			chunks.map((c) => c.text),
+			["中"],
+		);
+	});
+
+	it("splits CJK text into per-grapheme overflow chunks at maxWidth 1", () => {
+		const chunks = wordWrapLine("中文文本", 1);
+		assert.deepStrictEqual(
+			chunks.map((c) => c.text),
+			["中", "文", "文", "本"],
+		);
+		assert.deepStrictEqual(
+			chunks.map((c) => [c.startIndex, c.endIndex]),
+			[
+				[0, 1],
+				[1, 2],
+				[2, 3],
+				[3, 4],
+			],
+		);
+	});
+
+	it("handles mixed narrow and wide graphemes at maxWidth 1", () => {
+		const chunks = wordWrapLine("ab中cd", 1);
+		assert.deepStrictEqual(
+			chunks.map((c) => c.text),
+			["a", "b", "中", "c", "d"],
+		);
+	});
+
+	it("still re-wraps multi-grapheme atomic segments at narrow widths", () => {
+		// Paste markers arrive as one atomic pre-segmented unit; they can
+		// still be broken down grapheme by grapheme — recursion must keep
+		// that ability.
+		const marker = "[paste #1]";
+		const preSegmented: Intl.SegmentData[] = [{ segment: marker, index: 0, input: marker }];
+		const chunks = wordWrapLine(marker, 3, preSegmented);
+		assert.ok(chunks.length > 1);
+		assert.strictEqual(chunks.map((c) => c.text).join(""), marker);
+	});
+
+	it("does not recurse infinitely on a multi-code-unit grapheme at maxWidth 1", () => {
+		// Guards "grapheme count, not code-unit length": a ZWJ family emoji
+		// is 11 code units but 1 grapheme (width 2). A guard mistakenly
+		// written as `grapheme.length <= 1` passes the BMP CJK cases yet
+		// recurses forever on this input.
+		const chunks = wordWrapLine("👨‍👩‍👧‍👦", 1);
+		assert.deepStrictEqual(
+			chunks.map((c) => c.text),
+			["👨‍👩‍👧‍👦"],
+		);
+	});
+});
+
+describe("Editor narrow width rendering", () => {
+	it("renders CJK text without crashing at widths 1-8 (default padding)", () => {
+		for (let width = 1; width <= 8; width++) {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
+			editor.setText("你好世界");
+			assert.doesNotThrow(() => editor.render(width), `width ${width}`);
+		}
+	});
 
-			assert.ok(editor.beginSelectionAtComponentRow(1, 0));
-			assert.ok(editor.extendSelectionToComponentRow(1, 5));
+	it("renders CJK text without crashing at widths 1-8 (paddingX 4, matches kimi-code)", () => {
+		for (let width = 1; width <= 8; width++) {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, { paddingX: 4 });
+			editor.setText("你好，世界！");
+			assert.doesNotThrow(() => editor.render(width), `width ${width}`);
+		}
+	});
 
-			assert.strictEqual(editor.getSelectedText(), "hello");
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+	it("recalls history without crashing after rendering at width 1", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.addToHistory("你好世界");
+		editor.render(1); // narrow render pins lastWidth at 1
+		assert.doesNotThrow(() => {
+			(editor as unknown as { navigateHistory(direction: 1 | -1): void }).navigateHistory(-1);
+			// Recalling CJK text re-wraps it at the pinned narrow width —
+			// without the guard this overflows the stack.
+			editor.render(1);
 		});
+		assert.strictEqual(editor.getText(), "你好世界");
+	});
 
-		it("normalizes a backward drag to the same range", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
+	it("renders inside a TUI at 5 columns without crashing or overflowing", async () => {
+		const terminal = new VirtualTerminal(5, 12);
+		const tui = new TuiMainScreen(terminal);
+		const editor = new Editor(tui, defaultEditorTheme, { paddingX: 4 });
+		tui.addChild(editor);
+		editor.setText("你好世界");
+		tui.start();
+		await terminal.waitForRender();
+		const viewport = terminal.getViewport();
+		// Assert the exact visible rows: without truncation, xterm
+		// auto-wraps the overwide rows and the structure shifts, turning
+		// these assertions red (a tautological every(visibleWidth <= 5)
+		// check cannot fail on a 5-column terminal and was removed).
+		// Each content row is 6 columns wide (left padding 2 + CJK char 2
+		// + right padding 2) and is truncated to 5, leaving the trailing
+		// space.
+		assert.strictEqual(viewport[0], "─────");
+		assert.strictEqual(viewport[1], "  你 ");
+		assert.strictEqual(viewport[2], "  好 ");
+		assert.strictEqual(viewport[3], "  世 ");
+		assert.strictEqual(viewport[4], "  界 ");
+		assert.strictEqual(viewport[5], "─────");
+		tui.stop();
+	});
 
-			editor.beginSelectionAtComponentRow(1, 5);
-			editor.extendSelectionToComponentRow(1, 0);
-
-			assert.strictEqual(editor.getSelectedText(), "hello");
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
-		});
-
-		it("selects across logical lines", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("ab\ncd");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			editor.extendSelectionToComponentRow(2, 2);
-
-			assert.strictEqual(editor.getSelectedText(), "ab\ncd");
-		});
-
-		it("maps drag columns through double-width graphemes", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("甲乙丙");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			// 甲 and 乙 occupy columns 0-3; a drag to column 4 selects both.
-			editor.extendSelectionToComponentRow(1, 4);
-
-			assert.strictEqual(editor.getSelectedText(), "甲乙");
-		});
-
-		it("selects across a soft-wrapped row boundary", () => {
-			const editor = new Editor(createTestTUI(12, 24), defaultEditorTheme);
-			editor.setText("hello world foo");
-			// Layout width 11 wraps to "hello" / "world foo" (startIndex 6).
-			editor.render(12);
-
-			editor.beginSelectionAtComponentRow(1, 2);
-			editor.extendSelectionToComponentRow(2, 5);
-
-			assert.strictEqual(editor.getSelectedText(), "llo world");
-		});
-
-		it("clamps a drag past the last text row to the end of the text", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hi");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			// Rows below the single text row (bottom border included) clamp.
-			editor.extendSelectionToComponentRow(5, 0);
-
-			assert.strictEqual(editor.getSelectedText(), "hi");
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
-		});
-
-		it("refuses to start a selection on the border row", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hi");
-			editor.render(80);
-
-			assert.strictEqual(editor.beginSelectionAtComponentRow(0, 1), false);
-			assert.strictEqual(editor.getSelectedText(), "");
-		});
-
-		it("paints the selection in inverse video and suppresses the fake cursor", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			editor.extendSelectionToComponentRow(1, 5);
-
-			const lines = editor.render(80);
-			const textRow = lines[1] ?? "";
-			assert.ok(textRow.includes("\x1b[7mhello\x1b[27m"), `selection highlight missing: ${JSON.stringify(textRow)}`);
-			// The fake cursor would add a second inverse run terminated by SGR 0.
-			assert.ok(!textRow.includes("\x1b[0m"), `fake cursor leaked into selection paint: ${JSON.stringify(textRow)}`);
-			// The visible width is unchanged by the escape sequences.
-			assert.strictEqual(visibleWidth(stripVTControlCharacters(textRow)), 80);
-		});
-
-		it("keeps an empty press selection invisible", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 2);
-
-			assert.strictEqual(editor.getSelectedText(), "");
-			const lines = editor.render(80);
-			const textRow = lines[1] ?? "";
-			// No selection slice: the ordinary fake cursor still renders.
-			assert.ok(!textRow.includes("\x1b[27m"), `unexpected selection paint: ${JSON.stringify(textRow)}`);
-		});
-
-		it("drops the selection on the next keystroke", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			editor.extendSelectionToComponentRow(1, 5);
-			assert.strictEqual(editor.getSelectedText(), "hello");
-
-			editor.handleInput("\x1b[C"); // any key, not just edits
-			assert.strictEqual(editor.getSelectedText(), "");
-		});
-
-		it("drops the selection on a programmatic setText", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			editor.extendSelectionToComponentRow(1, 5);
-			assert.strictEqual(editor.getSelectedText(), "hello");
-
-			editor.setText("fresh");
-			assert.strictEqual(editor.getSelectedText(), "");
-		});
-
-		it("clearSelection keeps the cursor where the drag ended", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			editor.setText("hello world");
-			editor.render(80);
-
-			editor.beginSelectionAtComponentRow(1, 0);
-			editor.extendSelectionToComponentRow(1, 5);
-			editor.clearSelection();
-
-			assert.strictEqual(editor.getSelectedText(), "");
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
-		});
+	it("does not throw at zero or negative widths", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("你好世界");
+		assert.doesNotThrow(() => editor.render(0));
+		assert.doesNotThrow(() => editor.render(-1));
 	});
 });

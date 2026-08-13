@@ -7,7 +7,7 @@
  * Wiring: real v2 engine bootstrapped on a temp KIMI_CODE_HOME; no provider calls.
  * Run: pnpm exec vitest run test/sdk-rpc-client-v2.test.ts
  */
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -93,10 +93,10 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
     const authorizedUrl = 'https://authorized.example.test/mcp';
     const requiredUrl = 'https://required.example.test/mcp';
     const externalOAuth = new McpOAuthService({ kimiHomeDir: homeDir });
-    externalOAuth
+    await externalOAuth
       .getProvider('oauth-authorized', authorizedUrl)
       .saveTokens({ access_token: 'test-access-token', token_type: 'Bearer' });
-    externalOAuth
+    await externalOAuth
       .getProvider('sse', statusServer.oauthUrl)
       .saveTokens({ access_token: 'stale-sse-token', token_type: 'Bearer' });
     await writeFile(
@@ -141,10 +141,10 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
         { name: 'oauth-authorized', authStatus: 'oauth-authorized' },
       ]);
 
-      externalOAuth
+      await externalOAuth
         .getProvider('oauth-required', requiredUrl)
         .saveTokens({ access_token: 'new-test-access-token', token_type: 'Bearer' });
-      externalOAuth.invalidate('oauth-authorized', authorizedUrl, 'tokens');
+      await externalOAuth.invalidate('oauth-authorized', authorizedUrl, 'tokens');
 
       await expect(harness.listMcpServerAuthStatuses()).resolves.toEqual([
         { name: 'stdio', authStatus: 'not-applicable' },
@@ -344,6 +344,47 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
     }
   });
 
+  it('cascades removeProvider into the secondary_model pool', async () => {
+    const { harness } = await makeHarness();
+    try {
+      await harness.setConfig({
+        providers: {
+          a: { type: 'openai', baseUrl: 'https://a.example.test/v1', apiKey: 'sk-a' },
+          b: { type: 'openai', baseUrl: 'https://b.example.test/v1', apiKey: 'sk-b' },
+        },
+        models: {
+          'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+          'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+        },
+        secondaryModel: {
+          defaultModel: 'a/m1',
+          models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+        },
+      });
+
+      // Pool entries naming a removed model alias are filtered out; the
+      // surviving default keeps the section valid.
+      const filtered = await harness.removeProvider('b');
+      expect(filtered.secondaryModel).toEqual({
+        defaultModel: 'a/m1',
+        models: { 'a/m1': 'fast' },
+      });
+
+      // When the pool's default dangles the whole section is dropped — a
+      // leftover models table without its default would fail pool validation
+      // on every session create.
+      await harness.setConfig({
+        secondaryModel: { defaultModel: 'a/m1', models: { 'a/m1': 'fast' } },
+      });
+      const cleared = await harness.removeProvider('a');
+      expect(cleared.secondaryModel).toBeUndefined();
+      const reread = await harness.getConfig({ reload: true });
+      expect(reread.secondaryModel).toBeUndefined();
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('replaces config sections atomically and clears undefined sections', async () => {
     const { harness } = await makeHarness();
     try {
@@ -359,6 +400,32 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
       // Sections absent from the write stay untouched.
       expect(next.providers['a']).toBeDefined();
       expect(next.models?.['a/m1']).toBeDefined();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('round-trips the secondaryModel pool field to the [secondary_model] config section', async () => {
+    const { harness, homeDir } = await makeHarness();
+    try {
+      await harness.setConfig({
+        secondaryModel: {
+          defaultModel: 'provider/fast',
+          models: { 'provider/fast': 'fast and cheap' },
+        },
+      });
+
+      const toml = await readFile(join(homeDir, 'config.toml'), 'utf-8');
+      expect(toml).toContain('[secondary_model]');
+      expect(toml).toContain('default_model');
+      expect(toml).toContain('[secondary_model.models]');
+      expect(toml).not.toContain('[subagent.models]');
+
+      const reread = await harness.getConfig({ reload: true });
+      expect(reread.secondaryModel).toEqual({
+        defaultModel: 'provider/fast',
+        models: { 'provider/fast': 'fast and cheap' },
+      });
     } finally {
       await harness.close();
     }
@@ -387,7 +454,22 @@ describe('SDKRpcClientV2 workspace trust', () => {
     tempDirs.push(workDir);
     await writeFile(
       join(workDir, '.mcp.json'),
-      JSON.stringify({ mcpServers: { 'root-server': { command: 'root-cmd' } } }),
+      JSON.stringify({
+        mcpServers: {
+          'root-server': {
+            command: 'root-cmd',
+            args: ['--safe'],
+            cwd: '/tmp/root',
+            env: { SECRET: 'hidden' },
+          },
+          'http-server': {
+            transport: 'http',
+            url: 'https://example.test/mcp',
+            headers: { Authorization: 'Bearer hidden' },
+            bearerTokenEnvVar: 'TOKEN',
+          },
+        },
+      }),
       'utf-8',
     );
     await mkdir(join(workDir, '.kimi-code'), { recursive: true });
@@ -399,7 +481,15 @@ describe('SDKRpcClientV2 workspace trust', () => {
     try {
       const info = await harness.getWorkspaceTrustInfo(workDir);
       expect(info.trusted).toBe(false);
-      expect(info.gatedMcpServers).toEqual(['nested-server', 'root-server']);
+      expect(info.gatedMcpServers).toEqual([
+        { name: 'http-server', transport: 'http', url: 'https://example.test/mcp' },
+        { name: 'nested-server', transport: 'stdio', command: 'nested-cmd' },
+        { name: 'root-server', transport: 'stdio', command: 'root-cmd', args: ['--safe'], cwd: '/tmp/root' },
+      ]);
+      const serialized = JSON.stringify(info);
+      expect(serialized).not.toContain('hidden');
+      expect(serialized).not.toContain('SECRET');
+      expect(serialized).not.toContain('TOKEN');
     } finally {
       await harness.close();
     }
@@ -600,6 +690,66 @@ describe('removeProviderFromConfig', () => {
     expect(Object.keys(next.models ?? {})).toEqual(['a/m1']);
     expect(next.defaultModel).toBe('a/m1');
     expect(next.defaultProvider).toBe('a');
+  });
+
+  it('filters secondary_model pool entries whose model alias was removed', () => {
+    const config = {
+      providers: { a: { type: 'openai' }, b: { type: 'openai' } },
+      models: {
+        'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+        'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+      },
+      secondaryModel: {
+        defaultModel: 'a/m1',
+        models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+      },
+    } as unknown as KimiConfig;
+
+    const next = removeProviderFromConfig(config, 'b');
+
+    expect(next.secondaryModel).toEqual({
+      defaultModel: 'a/m1',
+      models: { 'a/m1': 'fast' },
+    });
+  });
+
+  it('drops the secondary_model section when its default model dangles', () => {
+    const config = {
+      providers: { a: { type: 'openai' }, b: { type: 'openai' } },
+      models: {
+        'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+        'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+      },
+      secondaryModel: {
+        defaultModel: 'b/m1',
+        models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+      },
+    } as unknown as KimiConfig;
+
+    expect(removeProviderFromConfig(config, 'b').secondaryModel).toBeUndefined();
+
+    // The legacy recipe's `model` key acts as the default fallback and
+    // cascades the same way.
+    const legacy = {
+      ...config,
+      secondaryModel: { model: 'b/m1', default_effort: 'low' },
+    } as unknown as KimiConfig;
+    expect(removeProviderFromConfig(legacy, 'b').secondaryModel).toBeUndefined();
+  });
+
+  it('leaves the secondary_model section untouched when nothing dangles', () => {
+    const config = {
+      providers: { a: { type: 'openai' }, b: { type: 'openai' } },
+      models: {
+        'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+        'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+      },
+      secondaryModel: { defaultModel: 'a/m1' },
+    } as unknown as KimiConfig;
+
+    const next = removeProviderFromConfig(config, 'b');
+
+    expect(next.secondaryModel).toEqual({ defaultModel: 'a/m1' });
   });
 });
 

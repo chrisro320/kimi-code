@@ -1,0 +1,594 @@
+/**
+ * `sessionSwarm` domain — `ISessionSwarmService` implementation.
+ *
+ * Runs a batch of agents on behalf of a caller agent: builds an
+ * `AgentRunBatchLauncher` on top of the `agentLifecycle` primitives
+ * (`create({ binding })`, `run`), drives the internal `AgentRunBatch`
+ * scheduler, and tracks one `AbortController` per caller so `cancel` can abort
+ * every in-flight run. The caller ↔ child association is this domain's own
+ * business data: requester-side display facts (`subagent.spawned` wire signals
+ * carrying the swarm's tool-call context, `subagent.suspended` when a task is
+ * requeued after a provider rate limit) are emitted from this layer; the
+ * lifecycle registry itself stays flat. Spawn tasks may carry a concrete
+ * `binding` resolved by the caller; without
+ * one, spawns inherit the caller agent's model and thinking level. Profile
+ * routing (`[subagent.routing.*]` / `[[subagent.pools.*]]`, resolved through
+ * `ISessionSubagentRoutingService` per spawn attempt) wins over both — a
+ * pool slot is acquired per spawn and released when the agent's run settles,
+ * held across provider-rate-limit retries of the same agent. Spawn
+ * bindings are resolved through the model catalog before lifecycle allocation.
+ * Before honoring the configured concurrency cap, the R-C1 risk gate
+ * (`subagent/risk.ts`) may silently force the batch's `maxConcurrency` to 1
+ * when the batch itself looks risky (too many concurrent editing-capable
+ * spawns; the scope-based signals stay inert until B6 adds dispatch
+ * scopes). Resumed agents keep the model recorded in their own wire journal — with
+ * per-subagent models there is no "child follows the parent's current model"
+ * invariant to enforce. Bound at Session scope — contributed into every
+ * Session scope by `SwarmFeature` (`features/swarm/swarmFeature`).
+ */
+
+import type { TokenUsage } from '#/kosong/contract/usage';
+import { IModelCatalog } from '#/kosong/model/catalog';
+import { Error2, ErrorCodes } from '#/errors';
+import { linkAbortSignal } from '#/_base/utils/abort';
+import type { IAgentScopeHandle } from '#/_base/di/scope';
+import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { IAgentUserToolService } from '#/agent/userTool/userTool';
+import { IEventBus } from '#/app/event/eventBus';
+import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
+import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import {
+  isSubagentMeta,
+  subagentLabels,
+  subagentParentAgentId,
+  subagentSwarmItem,
+} from '#/session/agentLifecycle/subagentMetadata';
+import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
+import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
+import {
+  resolveSubagentIsolationMode,
+  subagentDisplayModel,
+  wrapSubagentModelError,
+} from '#/session/subagent/configSection';
+import { SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
+import {
+  acquireSubagentWorktree,
+  discardSpawnWorktree,
+  isSubagentWorktreeUnsupported,
+  type SubagentWorktreeFinishResult,
+  type SubagentWorktreeHandle,
+  type SubagentWorktreeServices,
+} from '#/session/subagent/worktree';
+import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
+import { circuitOpeningErrorCode, subagentRouteIdentity } from '#/session/subagent/circuit';
+import { ISessionSubagentCircuitService } from '#/session/subagent/circuitService';
+import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
+import { resolveEditingDispatchScope } from '#/agent/dispatch/scope';
+import { IFlagService } from '#/app/flag/flag';
+import { IGitService } from '#/app/git/git';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostProcessService } from '#/os/interface/hostProcess';
+import {
+  DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+  resolveEffectiveMaxConcurrency,
+  type RiskCheckItem,
+} from '#/session/subagent/risk';
+import { isProviderRateLimitError } from '#/kosong/contract/errors';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionProcessRunner } from '#/session/process/processRunner';
+import { ILogService } from '#/_base/log/log';
+
+import {
+  ISessionSwarmService,
+  type SessionSwarmRunArgs,
+  type SessionSwarmRunResult,
+  type SessionSwarmTask,
+} from './sessionSwarm';
+import {
+  resolveSwarmMaxConcurrency,
+  AgentRunBatch,
+  type AgentRunAttemptOptions,
+  type AgentSpawnAttemptOptions,
+  type AgentRunBatchLauncher,
+  type AgentRunAttemptHandle,
+} from './agentRunBatch';
+
+export interface SubagentSuspendedEvent {
+  readonly type: 'subagent.suspended';
+  readonly subagentId: string;
+  readonly reason: string;
+}
+
+declare module '#/app/event/eventBus' {
+  interface DomainEventMap {
+    'subagent.suspended': SubagentSuspendedEvent;
+  }
+}
+
+const RESUMED_PROFILE_FALLBACK = 'subagent';
+
+export class SessionSwarmService implements ISessionSwarmService {
+  declare readonly _serviceBrand: undefined;
+
+  private readonly inFlight = new Map<string, AbortController>();
+
+  /**
+   * Pool-slot releases of in-flight swarm spawns, keyed by child agent id. A
+   * slot is held across provider-rate-limit retries of the same agent and
+   * released when the agent's run reaches any other terminal state; the
+   * per-batch sweep in `run` covers requeued agents whose retry never came.
+   */
+  private readonly poolSlots = new Map<string, () => void>();
+
+  /**
+   * R-A2 (Case 8) circuit keys of routed swarm spawns, keyed by child agent
+   * id. Unlike pool slots these are never swept: circuit state must outlive
+   * the batch so a later spawn skips the known-dead route.
+   */
+  private readonly circuitEntries = new Map<string, { readonly key: string; readonly identity: string }>();
+
+  constructor(
+    @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
+    @ISessionSubagentService private readonly subagents: ISessionSubagentService,
+    @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
+    @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionMetadata private readonly metadata: ISessionMetadata,
+    @ISessionProcessRunner private readonly processRunner: ISessionProcessRunner,
+    @ILogService private readonly log: ILogService,
+    @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @ISessionSubagentRoutingService
+    private readonly subagentRouting: ISessionSubagentRoutingService,
+    @ISessionSubagentCircuitService
+    private readonly subagentCircuit: ISessionSubagentCircuitService,
+    @IFlagService private readonly flags: IFlagService,
+    @IGitService private readonly git: IGitService,
+    @IHostFileSystem private readonly fs: IHostFileSystem,
+    @IHostProcessService private readonly proc: IHostProcessService,
+    @IConfigService private readonly config: IConfigService,
+  ) {}
+
+  /** Records `error` against the agent's circuit when it is a non-retryable route failure. */
+  private recordCircuitFailure(agentId: string, error: unknown): void {
+    const entry = this.circuitEntries.get(agentId);
+    if (entry === undefined) return;
+    const code = circuitOpeningErrorCode(error);
+    if (code !== undefined) this.subagentCircuit.openCircuit(entry.key, entry.identity, code);
+  }
+
+  async getSwarmItem(args: {
+    readonly callerAgentId: string;
+    readonly agentId: string;
+  }): Promise<string | undefined> {
+    const meta = await this.agentMeta(args.agentId);
+    if (!isSubagentMeta(meta)) return undefined;
+    if (subagentParentAgentId(meta) !== args.callerAgentId) return undefined;
+    return subagentSwarmItem(meta);
+  }
+
+  async run<T>(args: SessionSwarmRunArgs<T>): Promise<readonly SessionSwarmRunResult<T>[]> {
+    const { callerAgentId, tasks } = args;
+    const controller = new AbortController();
+    this.inFlight.set(callerAgentId, controller);
+    const unlinks: Array<() => void> = [];
+    const linkedTasks: SessionSwarmTask<T>[] = tasks.map((task) => {
+      if (task.signal !== undefined) unlinks.push(linkAbortSignal(task.signal, controller));
+      return { ...task, signal: controller.signal };
+    });
+    const batchPoolAgents = new Set<string>();
+    const launcher: AgentRunBatchLauncher = {
+      spawn: (options) => this.spawnAttempt(callerAgentId, options, batchPoolAgents),
+      resume: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, false),
+      retry: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, true),
+      suspended: (event) => {
+        const caller = this.lifecycle.get(callerAgentId);
+        caller?.accessor.get(IEventBus)?.publish({
+          type: 'subagent.suspended',
+          subagentId: event.agentId,
+          reason: event.reason,
+        });
+      },
+    };
+    const maxConcurrency = await this.resolveRiskAwareMaxConcurrency(
+      tasks,
+      resolveSwarmMaxConcurrency(),
+    );
+    const promise = new AgentRunBatch(launcher, linkedTasks, { maxConcurrency }).run();
+    void promise.finally(() => {
+      for (const unlink of unlinks) unlink();
+      if (this.inFlight.get(callerAgentId) === controller) this.inFlight.delete(callerAgentId);
+      // Sweep pool slots of agents whose rate-limit retry never came (batch
+      // aborted or failed while they were requeued). Already-released slots
+      // are no-ops.
+      for (const agentId of batchPoolAgents) this.releasePoolSlotFor(agentId);
+    });
+    return promise;
+  }
+
+  /**
+   * R-C1 (Case 9) risk gate: before honoring the configured concurrency cap,
+   * check whether this batch itself looks risky (dirty scope, too many
+   * concurrent editors, or file-family overlap — see `subagent/risk.ts`) and
+   * silently force `maxConcurrency` to 1 if so. No ask, no turn interruption:
+   * the model's AgentSwarm call is unaffected, the batch just runs slower.
+   * A read-only batch (no editing-capable item) skips detection entirely.
+   *
+   * v2 has no per-task dispatch scope yet (ownership mutual exclusion lands
+   * with B6 worktree isolation), so `scope` is always `undefined` and the
+   * dirty-scope / file-family signals cannot trigger — only the concurrency
+   * threshold is live. A detector hiccup degrades to the configured value
+   * rather than failing an otherwise-legitimate dispatch (Case 10).
+   */
+  private async resolveRiskAwareMaxConcurrency<T>(
+    tasks: readonly SessionSwarmTask<T>[],
+    configured: number | undefined,
+  ): Promise<number | undefined> {
+    try {
+      await this.catalog.ready;
+      const items: RiskCheckItem[] = tasks.map((task) => {
+        const profile = this.catalog.get(task.profileName);
+        // An unresolvable profile is not this function's problem to report;
+        // treat it as non-editing (v1 parity) so risk detection degrades
+        // safely instead of throwing ahead of the spawn's own
+        // profile-resolution error.
+        const isEditingCapable =
+          profile === undefined ? false : isEditingCapableCatalogProfile(profile);
+        return { isEditingCapable, scope: task.dispatchScope };
+      });
+      return await resolveEffectiveMaxConcurrency(items, configured, {
+        workspaceDir: this.sessionContext.cwd,
+        concurrencyThreshold: DEFAULT_RISK_CONCURRENCY_THRESHOLD,
+      });
+    } catch {
+      return configured;
+    }
+  }
+
+  cancel({ callerAgentId }: { readonly callerAgentId: string }): void {
+    this.inFlight.get(callerAgentId)?.abort();
+  }
+
+  private async spawnAttempt(
+    callerAgentId: string,
+    options: AgentSpawnAttemptOptions,
+    batchPoolAgents: Set<string>,
+  ): Promise<AgentRunAttemptHandle> {
+    options.signal.throwIfAborted();
+    const caller = this.requireHandle(callerAgentId, 'Caller agent');
+    await this.catalog.ready;
+    const profile = this.catalog.get(options.profileName);
+    if (profile === undefined) {
+      throw new Error2(ErrorCodes.PROFILE_UNKNOWN, `Unknown agent type: "${options.profileName}"`, {
+        details: { profileName: options.profileName },
+      });
+    }
+    const callerData = caller.accessor.get(IAgentProfileService).data();
+    if (callerData.modelAlias === undefined) {
+      throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Caller agent has no model bound', {
+        details: { agentId: callerAgentId },
+      });
+    }
+    // Profile routing (pool first, then the static entry) overrides the
+    // caller-supplied binding **per field** — see design D-B5R-5: the binding
+    // base is always computed first, the route only overrides fields it sets.
+    // Per-spawn acquisition happens here, not in the tool, so queued
+    // acquisitions interleave with the batch scheduler instead of deadlocking
+    // it.
+    const spawnRoute = await this.subagentRouting.resolveSpawnRoute(
+      options.profileName,
+      options.signal,
+    );
+    let releasePoolSlot = spawnRoute?.releasePoolSlot;
+    let childId: string | undefined;
+    let worktree: SubagentWorktreeHandle | undefined;
+    // This service is Session-scoped, but the caller may itself be an isolated
+    // subagent whose Agent scope overrides `ISessionContext.cwd` with its
+    // worktree. Reading the cwd off the caller's accessor is what keeps a
+    // nested swarm inside the parent's isolation instead of branching a fresh
+    // worktree off — and applying to — the user's workspace.
+    const callerCwd = caller.accessor.get(ISessionContext).cwd;
+    try {
+      const binding = options.binding ?? {
+        model: callerData.modelAlias,
+        thinking: callerData.thinkingLevel,
+      };
+      const final =
+        spawnRoute === undefined
+          ? binding
+          : {
+              model: spawnRoute.route.modelAlias ?? binding.model,
+              thinking: spawnRoute.route.thinkingEffort ?? binding.thinking,
+            };
+      const editingScope = resolveEditingDispatchScope(
+        isEditingCapableCatalogProfile(profile),
+        options.dispatchScope,
+      );
+      if (!editingScope.ok) {
+        throw new Error(`Dispatch rejected (${editingScope.error}-scope): ${editingScope.message}`);
+      }
+      let child: IAgentScopeHandle;
+      try {
+        this.modelCatalog.get(final.model);
+        if (
+          this.flags.enabled(SUBAGENT_WORKTREE_ISOLATION_FLAG_ID) &&
+          isEditingCapableCatalogProfile(profile)
+        ) {
+          worktree = (await this.acquireIsolatedWorktree(callerCwd, editingScope.value)) ?? undefined;
+        }
+        child = await this.lifecycle.create({
+          binding: {
+            profile: profile.name,
+            model: final.model,
+            thinking: final.thinking,
+          },
+          labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
+          workspaceCwd: worktree?.cwd,
+        });
+      } catch (error) {
+        throw wrapSubagentModelError(error, final.model, callerData.modelAlias);
+      }
+      childId = child.id;
+      if (spawnRoute !== undefined) {
+        this.circuitEntries.set(child.id, {
+          key: spawnRoute.circuitKey,
+          identity: subagentRouteIdentity(spawnRoute.route),
+        });
+      }
+      child.accessor
+        .get(IAgentPermissionModeService)
+        .setMode(caller.accessor.get(IAgentPermissionModeService).mode);
+      child.accessor
+        .get(IAgentUserToolService)
+        .inheritUserTools(caller.accessor.get(IAgentUserToolService));
+      emitAgentRunSpawned(caller, child.id, {
+        profileName: options.profileName,
+        parentToolCallId: options.parentToolCallId,
+        parentToolCallUuid: options.parentToolCallUuid,
+        description: options.description,
+        swarmIndex: options.swarmIndex,
+        runInBackground: options.runInBackground,
+        // `final.model`, not `binding.model`: a [subagent.routing.<profile>]
+        // route overrides the binding, and the label has to name the model the
+        // subagent actually runs on.
+        model: subagentDisplayModel(this.config, final.model),
+      });
+      const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
+        cwd: worktree?.cwd ?? callerCwd,
+        runner: this.processRunner,
+        log: this.log,
+      });
+      if (releasePoolSlot !== undefined) {
+        this.poolSlots.set(child.id, releasePoolSlot);
+        batchPoolAgents.add(child.id);
+        releasePoolSlot = undefined;
+      }
+      return this.observe(
+        caller,
+        child.id,
+        options.profileName,
+        {
+          kind: 'prompt',
+          prompt: promptText,
+        },
+        options,
+        worktree,
+      );
+    } catch (error) {
+      await discardSpawnWorktree(worktree);
+      if (childId !== undefined) this.recordCircuitFailure(childId, error);
+      releasePoolSlot?.();
+      throw error;
+    }
+  }
+
+  private async resumeAttempt(
+    callerAgentId: string,
+    agentId: string,
+    options: AgentRunAttemptOptions,
+    retryTurn: boolean,
+  ): Promise<AgentRunAttemptHandle> {
+    options.signal.throwIfAborted();
+    await this.requireOwnedSubagent(callerAgentId, agentId);
+    const caller = this.requireHandle(callerAgentId, 'Caller agent');
+    const child = this.requireHandle(agentId, 'Agent instance');
+    this.requireIdleSubagent(agentId, child);
+    const profileName =
+      child.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_PROFILE_FALLBACK;
+    if (!retryTurn) {
+      const resumedModel = child.accessor.get(IAgentProfileService).data().modelAlias;
+      emitAgentRunSpawned(caller, agentId, {
+        profileName,
+        parentToolCallId: options.parentToolCallId,
+        parentToolCallUuid: options.parentToolCallUuid,
+        description: options.description,
+        swarmIndex: options.swarmIndex,
+        runInBackground: options.runInBackground,
+        model: resumedModel,
+      });
+    }
+    const request = retryTurn
+      ? ({ kind: 'retry' } as const)
+      : ({ kind: 'prompt', prompt: options.prompt } as const);
+    return this.observe(caller, child.id, profileName, request, options);
+  }
+
+  private async observe(
+    caller: IAgentScopeHandle,
+    agentId: string,
+    profileName: string,
+    request: { kind: 'prompt'; prompt: string } | { kind: 'retry' },
+    options: AgentRunAttemptOptions,
+    worktree?: SubagentWorktreeHandle,
+  ): Promise<AgentRunAttemptHandle> {
+    let run: AgentRunHandle;
+    try {
+      run = await this.subagents.run(agentId, request, {
+        signal: options.signal,
+        onReady: options.onReady,
+      });
+    } catch (error) {
+      // The run never started, so no completion handler will ever fire — a
+      // held pool slot would leak here and eventually deadlock the batch
+      // behind `acquireQueued` (the per-batch sweep only runs at settle), and
+      // an acquired worktree would stay registered with its checkout on disk.
+      await discardSpawnWorktree(worktree);
+      this.recordCircuitFailure(agentId, error);
+      this.releasePoolSlotFor(agentId);
+      throw error;
+    }
+    const mirrored = mirrorAgentRun(caller, run, {
+      profileName,
+      prompt: request.kind === 'prompt' ? request.prompt : undefined,
+      suppressRateLimitFailureEvent: options.suppressRateLimitFailureEvent,
+      signal: options.signal,
+    });
+    const completion = mirrored.then(
+      async (r) => {
+        if (worktree === undefined) return { result: r.summary, usage: r.usage };
+        const finishResult = await worktree.finish({ kind: 'success' });
+        return this.completeWithWorktree(r, finishResult);
+      },
+      async (error: unknown) => {
+        if (worktree !== undefined) {
+          await worktree
+            .finish({ kind: 'incomplete', reason: errorMessage(error) })
+            .catch(() => {});
+        }
+        // R-A2 (Case 8): record before the rate-limit branch below — a
+        // rate-limit rejection never opens the circuit
+        // (circuitOpeningErrorCode filters it), so requeued retries are
+        // unaffected.
+        this.recordCircuitFailure(agentId, error);
+        throw error;
+      },
+    );
+    if (!this.poolSlots.has(agentId)) {
+      return { agentId, profileName, completion };
+    }
+    return {
+      agentId,
+      profileName,
+      completion: completion.then(
+        (settled) => {
+          this.releasePoolSlotFor(agentId);
+          return settled;
+        },
+        (error: unknown) => {
+          // A provider rate limit requeues the SAME agent for a retry, so its
+          // pool slot stays held across attempts; every other terminal state
+          // releases. Requeued agents whose retry never comes are covered by
+          // the per-batch sweep in `run`.
+          if (!isProviderRateLimitError(error)) this.releasePoolSlotFor(agentId);
+          throw error;
+        },
+      ),
+    };
+  }
+
+  private releasePoolSlotFor(agentId: string): void {
+    const release = this.poolSlots.get(agentId);
+    if (release === undefined) return;
+    this.poolSlots.delete(agentId);
+    release();
+  }
+
+  private async acquireIsolatedWorktree(
+    callerCwd: string,
+    scope: readonly string[],
+  ): Promise<SubagentWorktreeHandle | null> {
+    const services: SubagentWorktreeServices = {
+      git: this.git,
+      fs: this.fs,
+      proc: this.proc,
+      log: this.log,
+    };
+    const acquisition = await acquireSubagentWorktree(services, callerCwd, { scope });
+    if (isSubagentWorktreeUnsupported(acquisition)) {
+      if (resolveSubagentIsolationMode(this.config) === 'strict') {
+        throw new Error(
+          `Editing subagent isolation is unavailable here: ${acquisition.unsupported}. Dispatch was refused.`,
+        );
+      }
+      this.log.warn('subagent worktree: dispatching without isolation', {
+        cwd: callerCwd,
+        reason: acquisition.unsupported,
+      });
+      return null;
+    }
+    if (acquisition === null) {
+      throw new Error('Editing subagent isolation could not be created; dispatch was refused.');
+    }
+    return acquisition;
+  }
+
+  private completeWithWorktree(
+    r: { readonly summary: string; readonly usage?: TokenUsage },
+    finishResult: SubagentWorktreeFinishResult,
+  ): { readonly result: string; readonly usage?: TokenUsage } {
+    if (finishResult.applied) return { result: r.summary, usage: r.usage };
+    if (finishResult.reason === 'scope-expansion-required' && finishResult.candidate !== undefined) {
+      throw new Error(
+        `Editing subagent changes were not applied: scope expansion required for ` +
+          `${finishResult.outsideScope?.join(', ') ?? 'paths outside the declared scope'}. ` +
+          `The isolated worktree was retained.`,
+      );
+    }
+    const recovery =
+      finishResult.recoveryPath === undefined
+        ? ''
+        : ` Recovery data preserved at ${finishResult.recoveryPath}.`;
+    throw new Error(
+      `Editing subagent changes were not applied: ${finishResult.reason ?? 'unknown reason'}${recovery}`,
+    );
+  }
+
+  private requireHandle(agentId: string, label: string): IAgentScopeHandle {
+    const handle = this.lifecycle.get(agentId);
+    if (handle === undefined) {
+      throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `${label} "${agentId}" does not exist`, {
+        details: { agentId },
+      });
+    }
+    return handle;
+  }
+
+  private requireIdleSubagent(agentId: string, child: IAgentScopeHandle): void {
+    if (child.accessor.get(IAgentLoopService).status().state === 'running') {
+      throw new Error2(
+        ErrorCodes.AGENT_ALREADY_RUNNING,
+        `Agent instance "${agentId}" is already running and cannot run concurrently`,
+        { details: { agentId } },
+      );
+    }
+  }
+
+  private async requireOwnedSubagent(callerAgentId: string, agentId: string): Promise<void> {
+    const meta = await this.agentMeta(agentId);
+    if (!isSubagentMeta(meta)) {
+      throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
+        details: { agentId },
+      });
+    }
+    if (subagentParentAgentId(meta) !== callerAgentId) {
+      throw new Error2(
+        ErrorCodes.AGENT_NOT_OWNED,
+        `Agent instance "${agentId}" does not belong to this parent agent`,
+        { details: { agentId, callerAgentId } },
+      );
+    }
+  }
+
+  private async agentMeta(agentId: string): Promise<AgentMeta | undefined> {
+    const meta = await this.metadata.read();
+    return meta.agents?.[agentId];
+  }
+}
+
+export type _AgentRunUsage = TokenUsage;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

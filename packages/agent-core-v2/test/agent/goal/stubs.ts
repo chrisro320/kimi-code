@@ -2,7 +2,7 @@
  * Shared stubs for goal tests.
  */
 
-import type { IAgentSwarmService } from '#/agent/swarm/swarm';
+import type { IAgentSwarmService } from '#/features/swarm/agent/swarm';
 import type { IAgentTaskService } from '#/agent/task/task';
 import { TERMINAL_STATUSES, type AgentTaskInfo, type AgentTaskStatus } from '#/agent/task/types';
 

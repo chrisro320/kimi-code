@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 import type { createKimiDeviceId as createKimiDeviceIdFn } from '@moonshot-ai/kimi-code-oauth';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -62,6 +62,9 @@ const mocks = vi.hoisted(() => {
     harnessCreatesDeviceIdOnConstruction: false,
     execSync: vi.fn(),
     execFile: vi.fn(),
+    execFileSync: vi.fn(() => ''),
+    spawnSync: vi.fn(),
+    resolveCommandPath: vi.fn(() => '/bin/stty' as string | undefined),
     TuiConfigParseError,
   };
 });
@@ -128,6 +131,8 @@ vi.mock('../../src/tui/index', () => ({
   KimiTUI: class {
     onExit?: () => Promise<void>;
 
+    readonly state = { ui: { mode: 'regular' as const } };
+
     constructor(...args: unknown[]) {
       mocks.kimiTuiConstructor(this, ...args);
     }
@@ -150,6 +155,12 @@ vi.mock('../../src/migration/index', () => ({
 vi.mock('node:child_process', () => ({
   execSync: mocks.execSync,
   execFile: mocks.execFile,
+  execFileSync: mocks.execFileSync,
+  spawnSync: mocks.spawnSync,
+}));
+
+vi.mock('../../src/utils/process/resolve-command', () => ({
+  resolveCommandPath: mocks.resolveCommandPath,
 }));
 
 describe('runShell', () => {
@@ -168,6 +179,7 @@ describe('runShell', () => {
     mocks.resolveKimiHome.mockImplementation(
       (homeDir?: string) => homeDir ?? '/tmp/kimi-code-test-home',
     );
+    mocks.resolveCommandPath.mockImplementation(() => '/bin/stty');
     mocks.harnessCreatesDeviceIdOnConstruction = false;
   });
 
@@ -240,12 +252,15 @@ describe('runShell', () => {
     expect(mocks.harnessEnsureConfigFile.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.harnessGetConfig.mock.invocationCallOrder[0]!,
     );
-    // stty is POSIX-only; on Windows the save/restore block is skipped
-    // entirely (a bare `stty` name would resolve into the untrusted cwd).
+    // stty is resolved to an absolute path before the trust gate and skipped
+    // entirely on Windows (a bare `stty` name would resolve into the
+    // untrusted cwd).
     if (process.platform !== 'win32') {
-      expect(execSync).toHaveBeenCalledWith('stty -ixon', { stdio: ['inherit', 'ignore', 'ignore'] });
+      expect(execFileSync).toHaveBeenCalledWith('/bin/stty', ['-ixon'], {
+        stdio: ['inherit', 'ignore', 'ignore'],
+      });
     } else {
-      expect(execSync).not.toHaveBeenCalled();
+      expect(execFileSync).not.toHaveBeenCalled();
     }
     expect(mocks.kimiTuiConstructor).toHaveBeenCalledTimes(1);
     expect(mocks.createKimiDeviceId).toHaveBeenCalledWith(
@@ -285,6 +300,7 @@ describe('runShell', () => {
       config_ms: expect.any(Number),
       init_ms: expect.any(Number),
       mcp_ms: 47,
+      tui_mode: 'regular',
     });
   });
 
@@ -294,10 +310,19 @@ describe('runShell', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
       await runShell(minimalCliOptions, '1.2.3-test');
-      expect(execSync).not.toHaveBeenCalled();
+      expect(execFileSync).not.toHaveBeenCalled();
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
     }
+  });
+
+  it('skips stty when it cannot be resolved outside the untrusted cwd', async () => {
+    stubTuiStartup();
+    if (process.platform === 'win32') return;
+    mocks.resolveCommandPath.mockReturnValue(undefined);
+    await runShell(minimalCliOptions, '1.2.3-test');
+    expect(mocks.resolveCommandPath).toHaveBeenCalledWith('stty');
+    expect(execFileSync).not.toHaveBeenCalled();
   });
 
   it('resolves the --agent profile into the TUI startup input', async () => {
@@ -483,6 +508,7 @@ describe('runShell', () => {
       config_ms: expect.any(Number),
       init_ms: expect.any(Number),
       mcp_ms: 47,
+      tui_mode: 'regular',
     });
   });
 
@@ -740,7 +766,10 @@ describe('runShell', () => {
     ).rejects.toThrow('boom');
 
     expect(mocks.setCrashPhase).toHaveBeenCalledWith('shutdown');
-    expect(mocks.harnessTrack).toHaveBeenCalledWith('exit', { duration_ms: expect.any(Number) });
+    expect(mocks.harnessTrack).toHaveBeenCalledWith('exit', {
+      duration_ms: expect.any(Number),
+      tui_mode: 'regular',
+    });
     expect(mocks.shutdownTelemetry).toHaveBeenCalledOnce();
     expect(mocks.harnessClose).toHaveBeenCalledOnce();
   });
@@ -789,6 +818,7 @@ describe('runShell', () => {
       expect(mocks.withTelemetryContext).toHaveBeenCalledWith({ sessionId: 'ses-1' });
       expect(mocks.lifecycleTrack).toHaveBeenCalledWith('exit', {
         duration_ms: expect.any(Number),
+        tui_mode: 'regular',
       });
       expect(mocks.harnessTrack).not.toHaveBeenCalledWith('exit', expect.anything());
       expect(mocks.shutdownTelemetry).toHaveBeenCalledOnce();

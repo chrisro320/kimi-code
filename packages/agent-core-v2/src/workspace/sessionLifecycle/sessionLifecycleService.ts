@@ -38,6 +38,11 @@
  * live Agent wire journals, normalizes a missing protocol envelope, and
  * appends the fork boundary before restoring the target Agent; fork is
  * confined to this handler (source and target share the workspace bucket).
+ * Fork restores the source's recency onto the target: the metadata write
+ * carries an explicit `updatedAt` and runs after agent recreation as the
+ * fork's final metadata write (agent registration is non-touching), ahead
+ * of cron duplication, so a mid-fork failure never leaves cloned cron
+ * records behind.
  * On
  * materialize, the agent-profile loaders' `ready` is awaited
  * before the handle is published — agent-file discovery is local-
@@ -62,7 +67,23 @@
  * depends on MCP.
  * The session-level services whose subscriptions
  * must exist before the first agent / turn (external hooks, cron, the
- * secondary-model startup warning) opt into `OnScopeCreated` activation.
+ * subagent model-pool startup validation) opt into `OnScopeCreated` activation.
+ * The subagent model pool itself is validated even earlier — at
+ * the top of `materializeSession`, before the MCP overlay, the session scope,
+ * and any persisted artifact come into existence, and again at the top of
+ * `fork` before the source session's files are copied — so a broken pool
+ * (or invalid `force` configuration) fails create/resume/fork without
+ * leaving orphaned session dirs or leaked
+ * overlay connections behind; the Session-scope validation service
+ * (`session/subagent/subagentModelsValidationService.ts`) repeats the same
+ * check at scope activation as a backstop for paths that bypass this service.
+ * That pre-flight awaits the kosong model/provider registries' `ready`
+ * alongside `config.ready` first: the catalog resolves aliases through those
+ * registries rather than the config document, so a cold bootstrap that
+ * creates a session before hydration completes must not fail a valid pool
+ * with `CONFIG_INVALID`.
+ * The pool is gated behind the `secondary-model` experiment, so with the
+ * experiment off these validations are no-ops and the section stays inert.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -115,7 +136,7 @@ import {
   type SessionLifecycleHookSlots,
 } from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
 import { ISessionMetadata, type SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
-import { drainSessionMetadataWrites } from '#/session/sessionMetadata/sessionMetadataService';
+import { drainSessionMetadataWrites, toEpochMs } from '#/session/sessionMetadata/sessionMetadataService';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
 import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
 import { IWireService } from '#/wire/wire';
@@ -124,6 +145,11 @@ import {
   createWireMetadataRecord,
   type WireRecord,
 } from '#/wire/record';
+import { IModelCatalog } from '#/kosong/model/catalog';
+import { IModelService } from '#/kosong/model/model';
+import { IProviderService } from '#/kosong/provider/provider';
+import { IFlagService } from '#/app/flag/flag';
+import { assertValidSubagentModelConfig } from '#/session/subagent/configSection';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 import { IUserAgentProfileLoader } from '#/workspace/workspaceAgentProfileLoader/userAgentProfileLoader';
 import { IPluginAgentProfileLoader } from '#/workspace/workspaceAgentProfileLoader/pluginAgentProfileLoader';
@@ -202,6 +228,10 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     private readonly pluginAgentProfileLoader: IPluginAgentProfileLoader,
     @IWorkspaceDirs private readonly workspaceDirs: IWorkspaceDirs,
     @ISessionProcessRunner private readonly processRunner: ISessionProcessRunner,
+    @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @IModelService private readonly models: IModelService,
+    @IProviderService private readonly providers: IProviderService,
+    @IFlagService private readonly flags: IFlagService,
   ) {
     super();
   }
@@ -242,11 +272,17 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     return handle;
   }
 
+  private async assertSubagentModelPoolPreFlight(): Promise<void> {
+    await Promise.all([this.config.ready, this.models.ready, this.providers.ready]);
+    assertValidSubagentModelConfig(this.config, this.flags, this.modelCatalog);
+  }
+
   private async materializeSession(opts: MaterializeSessionOptions): Promise<ISessionScopeHandle> {
     const workspaceId = this.workspaceId;
     const sessionScope = sessionScopeOf(this.handlerScope, opts.sessionId);
     const sessionDir = sessionDirOf(this.bootstrap.homeDir, this.handlerScope, opts.sessionId);
     const metaScope = sessionScope;
+    await this.assertSubagentModelPoolPreFlight();
     await this.workspaceDirs.ready;
     await this.workspaceDirs.mergeAdditionalDirs(opts.workDir, opts.additionalDirs ?? []);
     const ctx: ISessionContext = {
@@ -483,6 +519,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     let target: ISessionScopeHandle | undefined;
     let targetSessionDir: string | undefined;
     try {
+      await this.assertSubagentModelPoolPreFlight();
       // A turn that just ended may still have its outcome write queued;
       // settle pending metadata writes before reading the source for
       // inheritance, or the fork could copy a stale (or absent) outcome.
@@ -525,20 +562,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       }
 
       const title = opts.title ?? `Fork: ${sourceMeta?.title || sourceId}`;
-      await targetMeta.update({
-        title,
-        isCustomTitle: opts.title !== undefined ? true : sourceMeta?.isCustomTitle === true,
-        forkedFrom: sourceId,
-        archived: false,
-        lastPrompt: sourceMeta?.lastPrompt,
-        // The fork continues the source's conversation, so it inherits the
-        // last turn's outcome too — otherwise a restart would drop a failure
-        // the warm fork was still reporting.
-        lastTurnReason: sourceMeta?.lastTurnReason,
-        custom: forkCustomMetadata(sourceMeta?.custom, opts.metadata),
-      });
-
-      await this.duplicateCronTasks(sourceId, targetId);
 
       for (const agentId of agentIds) {
         const sourceAgent = sourceAgents[agentId]!;
@@ -548,6 +571,22 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
           labels: labelsFromAgentMeta(sourceAgent),
         });
       }
+
+      await targetMeta.update({
+        title,
+        isCustomTitle: opts.title !== undefined ? true : sourceMeta?.isCustomTitle === true,
+        forkedFrom: sourceId,
+        archived: false,
+        updatedAt: toEpochMs(sourceMeta?.updatedAt) || Date.now(),
+        lastPrompt: sourceMeta?.lastPrompt,
+        // The fork continues the source's conversation, so it inherits the
+        // last turn's outcome too — otherwise a restart would drop a failure
+        // the warm fork was still reporting.
+        lastTurnReason: sourceMeta?.lastTurnReason,
+        custom: forkCustomMetadata(sourceMeta?.custom, opts.metadata),
+      });
+
+      await this.duplicateCronTasks(sourceId, targetId);
 
       await this.appendSessionIndexEntry(targetId, this.workspaceContext.cwd);
       this._onDidForkSession.fire({

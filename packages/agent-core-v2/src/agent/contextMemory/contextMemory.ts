@@ -49,6 +49,8 @@ export interface IAgentContextMemoryService {
 
   appendLoopEvent(event: LoopRecordedEvent): void;
 
+  publishTrailingRemoval(previous: readonly ContextMessage[]): boolean;
+
   clear(): void;
 
   undo(count: number): UndoCut;

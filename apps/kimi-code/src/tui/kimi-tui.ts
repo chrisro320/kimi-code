@@ -26,8 +26,9 @@ import {
   type Component,
   type Focusable,
   getCapabilities,
-  type OverlayHandle,
   Spacer,
+  TuiAltScreen,
+  TuiMainScreen,
 } from '@moonshot-ai/pi-tui';
 import { resolve } from 'pathe';
 
@@ -58,7 +59,6 @@ import { CacheHintController } from './controllers/cache-hint-controller';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { GutterContainer } from './components/chrome/gutter-container';
-import { JUMP_TO_BOTTOM_WIDTH } from './components/chrome/jump-to-bottom';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
 import { WelcomeComponent } from './components/chrome/welcome';
 import { pickRandomWorkingTip } from './components/chrome/working-tips';
@@ -159,13 +159,13 @@ import { installInputLatencyProbe } from './utils/input-latency';
 import { startupTrace } from '#/utils/startup-trace';
 import { REPLAY_TURN_LIMIT } from './utils/message-replay';
 import { hasPatchChanges } from './utils/object-patch';
+import { beginScreenTakeover, endScreenTakeover, type ScreenTakeover } from './utils/screen-takeover';
 import { sessionRowsForPicker } from './utils/session-picker-rows';
 import { formatStepRetryDetail, formatStepRetryLabel } from './utils/step-retry';
 import { formatBashOutputForDisplay } from './utils/shell-output';
 import { thinkingEffortFromConfig } from './utils/thinking-config';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
-import { installViewportScrollControls, isManagedMouseEnabled } from './utils/terminal-mouse';
 import { notifyTerminalOnce } from './utils/terminal-notification';
 import { installTerminalThemeTracking } from './utils/terminal-theme';
 import { detectTmuxKeyboardWarning } from './utils/tmux-keyboard';
@@ -259,6 +259,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     version: input.version,
     editorCommand: input.tuiConfig.editorCommand,
     disablePasteBurst: input.tuiConfig.disablePasteBurst,
+    renderLatex: input.tuiConfig.renderLatex,
     cacheExpiryHint: input.tuiConfig.cacheExpiryHint,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
@@ -401,9 +402,6 @@ export class KimiTUI {
   deferUserMessages = false;
   aborted = false;
   private terminalFocusTrackingDispose: (() => void) | undefined;
-  private terminalMouseTrackingDispose: (() => void) | undefined;
-  private viewportScrollbarOverlay: OverlayHandle | undefined;
-  private jumpToBottomOverlay: OverlayHandle | undefined;
   private terminalThemeTrackingDispose: (() => void) | undefined;
   private clipboardImageHintController: ClipboardImageHintController | undefined;
   private uninstallRainbowDance: () => void;
@@ -444,12 +442,13 @@ export class KimiTUI {
   // preview viewer can restore focus to the exact same instance (and its
   // selection / feedback state) when it closes.
   private activeApprovalPanel: ApprovalPanelComponent | undefined;
-  // Active full-screen approval preview. While set, the root UI's normal
-  // children are stashed in `savedChildren`; closing restores them.
+  // Active full-screen approval preview. While set, the previous screen is
+  // stashed in `takeover` (root children in regular mode, the layout root in
+  // fullscreen); closing restores it.
   private approvalPreview:
     | {
         component: ApprovalPreviewViewer;
-        savedChildren: readonly Component[];
+        takeover: ScreenTakeover;
         panel: ApprovalPanelComponent;
       }
     | undefined;
@@ -797,21 +796,6 @@ export class KimiTUI {
   private installTerminalTracking(): void {
     this.startClipboardImageHintController();
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
-    if (isManagedMouseEnabled()) {
-      this.viewportScrollbarOverlay = this.state.ui.showOverlay(this.state.viewportScrollbar, {
-        anchor: 'top-right',
-        width: 1,
-        maxHeight: '100%',
-        nonCapturing: true,
-      });
-      this.jumpToBottomOverlay = this.state.ui.showOverlay(this.state.jumpToBottom, {
-        anchor: 'bottom-center',
-        width: JUMP_TO_BOTTOM_WIDTH,
-        offsetY: -3,
-        nonCapturing: true,
-      });
-      this.terminalMouseTrackingDispose = installViewportScrollControls(this.state);
-    }
     this.refreshTerminalThemeTracking();
   }
 
@@ -1079,7 +1063,7 @@ export class KimiTUI {
         // best effort — the terminal may already be dead (SIGHUP / EIO).
       }
       try {
-        this.state.ui.stop();
+        this.stopUiForExit();
       } catch {
         // best effort terminal restore.
       }
@@ -1159,7 +1143,10 @@ export class KimiTUI {
 
   suspendTerminalUi(): void {
     this.disposeTerminalTracking();
-    this.state.ui.stop();
+    // Fullscreen: a plain stop() would replay the whole transcript into the
+    // main screen on exit; the external editor only needs the alternate
+    // screen released, so preserve the screen instead.
+    this.state.ui.stop({ preserveScreen: this.state.ui.mode === 'fullscreen' ? true : undefined });
   }
 
   resumeTerminalUi(): void {
@@ -1173,16 +1160,13 @@ export class KimiTUI {
     this.clipboardImageHintController = undefined;
     this.terminalFocusTrackingDispose?.();
     this.terminalFocusTrackingDispose = undefined;
-    this.terminalMouseTrackingDispose?.();
-    this.terminalMouseTrackingDispose = undefined;
-    this.viewportScrollbarOverlay?.hide();
-    this.viewportScrollbarOverlay = undefined;
-    this.jumpToBottomOverlay?.hide();
-    this.jumpToBottomOverlay = undefined;
   }
 
   private buildLayout(): void {
     const { ui } = this.state;
+    // Fullscreen mounts its layout root (transcript ScrollView + bottom dock)
+    // in createTUIState; the root children list stays empty there.
+    if (ui instanceof TuiAltScreen) return;
     ui.clear();
     ui.addChild(this.state.transcriptContainer);
     ui.addChild(this.state.activityContainer);
@@ -1201,8 +1185,42 @@ export class KimiTUI {
   private mountFooter(): void {
     const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
     footerWrap.addChild(this.state.footer);
+    const dock = this.state.dockContainer;
+    if (dock !== undefined) {
+      // Dock sizing contract: the footer may shrink to 1 row under extreme
+      // height pressure, but never disappears (see createTUIState).
+      dock.addChild(footerWrap, { shrink: 1, minSize: 1 });
+      return;
+    }
     this.state.ui.addChild(footerWrap);
     this.state.ui.setPinnedBottomComponents([this.state.editorContainer, footerWrap]);
+  }
+
+  // Fullscreen exit: leave the alternate screen with the frame preserved,
+  // then replay the transcript through a main-screen renderer so native
+  // scrollback ends up with the same inline layout a regular session would
+  // have produced (pi's "transcript" exit form).
+  private stopUiForExit(): void {
+    const ui = this.state.ui;
+    if (!(ui instanceof TuiAltScreen)) {
+      ui.stop();
+      return;
+    }
+    ui.stop({ preserveScreen: true });
+    const main = new TuiMainScreen(ui.terminal);
+    main.addChild(this.state.transcriptContainer);
+    main.addChild(this.state.activityContainer);
+    main.addChild(this.state.todoPanelContainer);
+    main.addChild(this.state.queueContainer);
+    main.addChild(this.state.btwPanelContainer);
+    main.addChild(this.state.editorContainer);
+    const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+    footerWrap.addChild(this.state.footer);
+    main.addChild(footerWrap);
+    // First paint of a main-screen renderer writes every line sequentially,
+    // landing the whole transcript in native scrollback.
+    main.renderNow();
+    main.stop();
   }
 
   // =========================================================================
@@ -3780,12 +3798,12 @@ export class KimiTUI {
 
   // Mounts the full-screen approval preview viewer on top of the current
   // approval panel. Uses the same nested-takeover pattern as
-  // openTaskOutputViewer: we snapshot the root container's children, swap
-  // in the viewer, and restore on close. The approval panel instance is
+  // openTaskOutputViewer: beginScreenTakeover swaps the viewer in (root
+  // children in regular mode, layout root in fullscreen) and closing restores
+  // it. The approval panel instance is
   // kept around in `activeApprovalPanel` so its selection state survives.
   private openApprovalPreview(panel: ApprovalPanelComponent, block: ApprovalPreviewBlock): void {
     if (this.approvalPreview !== undefined) return;
-    const savedChildren = [...this.state.ui.children];
     const viewer = new ApprovalPreviewViewer(
       {
         block,
@@ -3795,21 +3813,17 @@ export class KimiTUI {
       },
       this.state.terminal,
     );
-    this.state.ui.clear();
-    this.state.ui.addChild(viewer);
+    const takeover = beginScreenTakeover(this.state.ui, viewer);
     this.state.ui.setFocus(viewer);
     this.state.ui.requestRender(true);
-    this.approvalPreview = { component: viewer, savedChildren, panel };
+    this.approvalPreview = { component: viewer, takeover, panel };
   }
 
   private closeApprovalPreview(): void {
     const preview = this.approvalPreview;
     if (preview === undefined) return;
     this.approvalPreview = undefined;
-    this.state.ui.clear();
-    for (const child of preview.savedChildren) {
-      this.state.ui.addChild(child);
-    }
+    endScreenTakeover(this.state.ui, preview.takeover);
     this.state.ui.setFocus(preview.panel);
     this.state.ui.requestRender(true);
   }

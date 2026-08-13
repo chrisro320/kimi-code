@@ -5,33 +5,20 @@ import { fileURLToPath } from "node:url";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
-import { ProcessTerminalCapabilities, type TerminalCapabilities } from "./terminal-capabilities.ts";
-import { type ProbeIO, type ProbeResult, probeCapabilities } from "./terminal-probe.ts";
 
 const cjsRequire = createRequire(import.meta.url);
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
-const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
-const APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
+const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0\x07";
+const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
-// Push-only form of the kitty query: arms the desired flag level so a following
-// `CSI ? u` (emitted by the capability probe) reports non-zero flags and the
-// negotiation handler enables kitty. Split out so the probe can own the single
-// `CSI ? u` + DA1 sentinel on the wire (a duplicate kitty query would desync the
-// probe's DA1 FIFO).
-const KITTY_KEYBOARD_PROTOCOL_PUSH = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u`;
+const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c`;
 
 export type KeyboardProtocolNegotiationSequence =
 	| { type: "kitty-flags"; flags: number }
-	| { type: "device-attributes" }
-	// Capability-probe replies (DECRPM private-mode report, OSC 11 background
-	// color) observed by the startup probe's stdin tap. They are never user
-	// input and must be consumed at this gate so they cannot leak into the
-	// editor (plan goal: 探测字节不漏进编辑器).
-	| { type: "decrpm" }
-	| { type: "osc11" };
+	| { type: "device-attributes" };
 
 export function parseKeyboardProtocolNegotiationSequence(
 	sequence: string,
@@ -43,56 +30,28 @@ export function parseKeyboardProtocolNegotiationSequence(
 	if (/^\x1b\[\?[\d;]*c$/.test(sequence)) {
 		return { type: "device-attributes" };
 	}
-	// DECRPM private-mode report: ESC [ ? <mode> ; <status> $ y
-	if (/^\x1b\[\?\d+;\d+\$y$/.test(sequence)) {
-		return { type: "decrpm" };
-	}
-	// OSC 11 background-color reply: ESC ] 11 ; <payload> (BEL | ST)
-	if (/^\x1b\]11;.*(?:\x07|\x1b\\)$/.test(sequence)) {
-		return { type: "osc11" };
-	}
 	return undefined;
 }
 
 function isKeyboardProtocolNegotiationSequencePrefix(sequence: string): boolean {
-	// CSI ? ... — kitty flags / DA1 / DECRPM partials. Allows a trailing `$`
-	// (DECRPM's intermediate byte) so a split `\x1b[?2026;2$` + `y` reassembles.
-	if (sequence === "\x1b[" || /^\x1b\[\?[\d;]*\$?$/.test(sequence)) return true;
-	// OSC 11 ... — background-color reply partial (terminated by BEL / ST).
-	if (/^\x1b\](?:1(?:1(?:;[^\x07]*)?)?)?$/.test(sequence)) return true;
-	return false;
+	return sequence === "\x1b[" || /^\x1b\[\?[\d;]*$/.test(sequence);
 }
 
 export function isAppleTerminalSession(): boolean {
 	return process.platform === "darwin" && process.env['TERM_PROGRAM'] === "Apple_Terminal";
 }
 
-export function normalizeAppleTerminalInput(data: string, isAppleTerminal: boolean, isShiftPressed: boolean): string {
-	if (isAppleTerminal && data === "\r" && isShiftPressed) return APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE;
+export function normalizeNativeShiftEnterInput(
+	data: string,
+	shouldDetectNativeShiftEnter: boolean,
+	isShiftPressed: boolean,
+): string {
+	if (shouldDetectNativeShiftEnter && data === "\r" && isShiftPressed) return NATIVE_SHIFT_ENTER_SEQUENCE;
 	return data;
 }
 
-let headlessOverride: boolean | undefined;
-
-/**
- * Override headless detection. `undefined` clears the override and falls back to
- * env/auto detection. Used by tests to force headless mode deterministically.
- */
-export function setTerminalHeadless(value: boolean | undefined): void {
-	headlessOverride = value;
-}
-
-/**
- * Whether the terminal must not paint: no raw mode, no probes, no SIGWINCH, no
- * teardown writes. Honors the explicit override first, then `PI_TUI_HEADLESS=1`,
- * then `NODE_ENV=test` (node --test / bun test default).
- */
-export function isTerminalHeadless(): boolean {
-	if (headlessOverride !== undefined) return headlessOverride;
-	// node --test / bun test default headless; PI_TUI_HEADLESS=1 forces it
-	if (process.env["PI_TUI_HEADLESS"] === "1") return true;
-	if (process.env["NODE_ENV"] === "test") return true;
-	return false;
+export function normalizeAppleTerminalInput(data: string, isAppleTerminal: boolean, isShiftPressed: boolean): string {
+	return normalizeNativeShiftEnterInput(data, isAppleTerminal, isShiftPressed);
 }
 
 /**
@@ -123,12 +82,6 @@ export interface Terminal {
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
 
-	/** Resolves with the startup probe result; undefined when probing is skipped (non-TTY). */
-	probeReady?: Promise<ProbeResult>;
-
-	/** Mutable, probe-backed terminal capabilities shared with the ledger engine. */
-	readonly terminalCapabilities?: TerminalCapabilities;
-
 	// Cursor positioning (relative to current position)
 	moveBy(lines: number): void; // Move cursor up (negative) or down (positive) by N lines
 
@@ -146,6 +99,25 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
+}
+
+const DEFAULT_ESCAPE_TIMEOUT_MS = 10;
+const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
+
+/**
+ * Resolve how long to wait for the rest of an escape sequence before
+ * dispatching a lone ESC as the Escape key. Legacy Alt+key input is ESC plus
+ * another byte, so high-latency transports need a longer reassembly window.
+ */
+export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+	const configured = Number(env['PI_TUI_ESC_TIMEOUT']);
+	if (Number.isFinite(configured) && configured > 0) {
+		return configured;
+	}
+	if (env['SSH_CONNECTION'] || env['SSH_TTY']) {
+		return DEFAULT_SSH_ESCAPE_TIMEOUT_MS;
+	}
+	return DEFAULT_ESCAPE_TIMEOUT_MS;
 }
 
 /**
@@ -178,17 +150,6 @@ export class ProcessTerminal implements Terminal {
 		return env;
 	})();
 
-	readonly #capabilities = new ProcessTerminalCapabilities();
-	/** Resolves with the current startup probe result; undefined when probing is skipped (non-TTY). */
-	probeReady: Promise<ProbeResult> | undefined;
-	private capabilityProbeController: AbortController | undefined;
-	private capabilityProbeGeneration = 0;
-
-	/** Mutable, probe-backed terminal capabilities shared with the ledger engine. */
-	get terminalCapabilities(): ProcessTerminalCapabilities {
-		return this.#capabilities;
-	}
-
 	get kittyProtocolActive(): boolean {
 		return this._kittyProtocolActive;
 	}
@@ -197,25 +158,9 @@ export class ProcessTerminal implements Terminal {
 		return this._modifyOtherKeysActive;
 	}
 
-	/**
-	 * Single stdout egress for every terminal write. No-ops in headless mode so
-	 * tests / piped runs never paint, even if a code path forgets to gate on TTY.
-	 */
-	#safeWrite(data: string): void {
-		if (isTerminalHeadless()) return;
-		process.stdout.write(data);
-	}
-
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
-
-		// Headless / non-TTY: no raw mode, no probes, no SIGWINCH, no teardown
-		// writes. Handlers are stashed so stop() can clear them, but we never
-		// touch the terminal and probeReady stays undefined.
-		if (isTerminalHeadless() || !process.stdout.isTTY) {
-			return;
-		}
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
@@ -226,7 +171,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.resume();
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
-		this.#safeWrite("\x1b[?2004h");
+		process.stdout.write("\x1b[?2004h");
 
 		// Set up resize handler immediately
 		process.stdout.on("resize", this.resizeHandler);
@@ -243,15 +188,9 @@ export class ProcessTerminal implements Terminal {
 		// since that resets console mode flags.
 		this.enableWindowsVTInput();
 
-		// Bring the stdin pipeline (StdinBuffer) live first, then arm kitty flags and
-		// run the capability probe. The probe taps stdin observe-only and emits the
-		// single kitty `CSI ? u` + DA1 sentinel; arming the flag level beforehand makes
-		// that probe report non-zero flags so the negotiation handler enables kitty.
-		// Headless / non-TTY early-returns above, so a TTY is guaranteed here.
+		// Query Kitty keyboard protocol and fall back to modifyOtherKeys when DA confirms no Kitty response.
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
-		this.setupKeyboardProtocolPipeline();
-		this.#safeWrite(KITTY_KEYBOARD_PROTOCOL_PUSH);
-		this.runCapabilityProbe();
+		this.queryAndEnableKittyProtocol();
 	}
 
 	/**
@@ -263,7 +202,7 @@ export class ProcessTerminal implements Terminal {
 	 * to handle the case where the response arrives split across multiple events.
 	 */
 	private setupStdinBuffer(): void {
-		this.stdinBuffer = new StdinBuffer({ timeout: 10 });
+		this.stdinBuffer = new StdinBuffer({ escapeTimeout: resolveEscapeTimeoutMs() });
 
 		// Forward individual sequences to the input handler
 		this.stdinBuffer.on("data", (sequence) => {
@@ -293,62 +232,24 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
-	 * Bring the stdin pipeline (StdinBuffer + data handler) live and arm the
-	 * keyboard-protocol negotiation buffer, without writing the kitty query. In
-	 * TTY mode the kitty query is emitted by the capability probe (its first probe
-	 * is `CSI ? u` + DA1), so this must not write a second one — a duplicate would
-	 * desync the probe's DA1 FIFO. Kept separate so start() can order the flag push,
-	 * the probe, and the headless fallback.
+	 * Query terminal for Kitty keyboard protocol support and enable it if available.
+	 *
+	 * Kitty's progressive enhancement detection requires requesting the desired
+	 * flags before querying them. The trailing DA query is a sentinel supported by
+	 * terminals that do not know Kitty keyboard protocol; receiving DA before a
+	 * Kitty response enables modifyOtherKeys fallback without a startup timeout.
+	 *
+	 * The requested flags are:
+	 * - 1 = disambiguate escape codes
+	 * - 2 = report event types (press/repeat/release)
+	 * - 4 = report alternate keys (shifted key, base layout key)
 	 */
-	private setupKeyboardProtocolPipeline(): void {
+	private queryAndEnableKittyProtocol(): void {
 		this.setupStdinBuffer();
 		process.stdin.on("data", this.stdinDataHandler!);
 		this.keyboardProtocolPushed = true;
 		this.clearKeyboardProtocolNegotiationBuffer();
-	}
-
-	/**
-	 * Run the startup capability probe (kitty / OSC 11 / DECRQM ?2026 ?2048 ?2031).
-	 *
-	 * The probe's first write (`CSI ? u` + DA1) doubles as the kitty keyboard query;
-	 * the caller arms the desired flag level first so the reply reports non-zero
-	 * flags and the negotiation handler enables kitty. Skipped when stdout is not a
-	 * TTY — headless environments leave {@link probeReady} undefined and keep the
-	 * static capability defaults. When it runs, the probe taps the stdin `data`
-	 * stream observe-only (Node delivers each chunk to every `data` listener, so the
-	 * StdinBuffer is undisturbed) and writes to stdout. On resolution the probed
-	 * values are applied to the shared {@link ProcessTerminalCapabilities} in place.
-	 */
-	private runCapabilityProbe(): void {
-		if (!process.stdout.isTTY) return;
-		this.capabilityProbeController?.abort();
-		const controller = new AbortController();
-		const generation = ++this.capabilityProbeGeneration;
-		this.capabilityProbeController = controller;
-		const io: ProbeIO = {
-			write: (data: string) => {
-				this.#safeWrite(data);
-			},
-			onReply: (cb: (data: string) => void) => {
-				const handler = (data: string) => {
-					cb(data);
-				};
-				process.stdin.on("data", handler);
-				return () => {
-					process.stdin.removeListener("data", handler);
-				};
-			},
-		};
-		this.probeReady = probeCapabilities(io, { signal: controller.signal }).then((result) => {
-			if (!controller.signal.aborted && generation === this.capabilityProbeGeneration) {
-				this.#capabilities.applyProbe(result);
-			}
-			return result;
-		}).finally(() => {
-			if (generation === this.capabilityProbeGeneration) {
-				this.capabilityProbeController = undefined;
-			}
-		});
+		process.stdout.write(KITTY_KEYBOARD_PROTOCOL_QUERY);
 	}
 
 	private handleKeyboardProtocolNegotiationSequence(
@@ -369,16 +270,9 @@ export class ProcessTerminal implements Terminal {
 			return true;
 		}
 
-		if (negotiationSequence.type === "device-attributes") {
-			if (!this._kittyProtocolActive) {
-				this.enableModifyOtherKeys();
-			}
-			return true;
+		if (!this._kittyProtocolActive) {
+			this.enableModifyOtherKeys();
 		}
-
-		// DECRPM / OSC 11 capability-probe replies: observed by the probe's
-		// stdin tap and never legitimate user input. Consume them here so they
-		// cannot leak into the editor.
 		return true;
 	}
 
@@ -441,24 +335,25 @@ export class ProcessTerminal implements Terminal {
 
 	private forwardInputSequence(sequence: string): void {
 		if (!this.inputHandler) return;
-		const isAppleTerminal = sequence === "\r" && isAppleTerminalSession();
-		const input = normalizeAppleTerminalInput(
+		const shouldDetectNativeShiftEnter =
+			sequence === "\r" && (isAppleTerminalSession() || process.platform === "win32");
+		const input = normalizeNativeShiftEnterInput(
 			sequence,
-			isAppleTerminal,
-			isAppleTerminal && isNativeModifierPressed("shift"),
+			shouldDetectNativeShiftEnter,
+			shouldDetectNativeShiftEnter && isNativeModifierPressed("shift"),
 		);
 		this.inputHandler(input);
 	}
 
 	private enableModifyOtherKeys(): void {
 		if (this._kittyProtocolActive || this._modifyOtherKeysActive) return;
-		this.#safeWrite("\x1b[>4;2m");
+		process.stdout.write("\x1b[>4;2m");
 		this._modifyOtherKeysActive = true;
 	}
 
 	private disableModifyOtherKeys(): void {
 		if (!this._modifyOtherKeysActive) return;
-		this.#safeWrite("\x1b[>4;0m");
+		process.stdout.write("\x1b[>4;0m");
 		this._modifyOtherKeysActive = false;
 	}
 
@@ -504,7 +399,7 @@ export class ProcessTerminal implements Terminal {
 		if (shouldDisableKittyProtocol) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
-			this.#safeWrite("\x1b[<u");
+			process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
@@ -537,23 +432,19 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
-		this.capabilityProbeGeneration++;
-		this.capabilityProbeController?.abort();
-		this.capabilityProbeController = undefined;
-		this.probeReady = undefined;
 		if (this.clearProgressInterval()) {
-			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
 		// Disable bracketed paste mode
-		this.#safeWrite("\x1b[?2004l");
+		process.stdout.write("\x1b[?2004l");
 
 		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (shouldDisableKittyProtocol) {
-			this.#safeWrite("\x1b[<u");
+			process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
@@ -566,31 +457,15 @@ export class ProcessTerminal implements Terminal {
 			this.stdinBuffer = undefined;
 		}
 
-		// Remove the stdin data handler. It is only registered on the TTY path, so
-		// in headless mode it is undefined and this is a safe no-op.
+		// Remove event handlers
 		if (this.stdinDataHandler) {
 			process.stdin.removeListener("data", this.stdinDataHandler);
 			this.stdinDataHandler = undefined;
 		}
-
-		// Handler references are part of stop()'s contract: clear them in every
-		// mode, even when the terminal itself was never touched.
 		this.inputHandler = undefined;
-		const resizeHandler = this.resizeHandler;
-		this.resizeHandler = undefined;
-
-		// Headless / non-TTY: start() was a no-op beyond stashing the handlers, so
-		// no resize listener was registered, stdin was never resumed, and raw mode
-		// was never enabled — `wasRaw` still holds its stale default. Skip the
-		// listener / stdin / raw-mode teardown so a TTY-based runner's raw mode is
-		// not clobbered. The sequence-based teardown above is safe to keep: it
-		// no-ops via #safeWrite when headless.
-		if (isTerminalHeadless() || !process.stdout.isTTY) {
-			return;
-		}
-
-		if (resizeHandler) {
-			process.stdout.removeListener("resize", resizeHandler);
+		if (this.resizeHandler) {
+			process.stdout.removeListener("resize", this.resizeHandler);
+			this.resizeHandler = undefined;
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -605,7 +480,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	write(data: string): void {
-		this.#safeWrite(data);
+		process.stdout.write(data);
 		if (this.writeLogPath) {
 			try {
 				fs.appendFileSync(this.writeLogPath, data, { encoding: "utf8" });
@@ -626,55 +501,52 @@ export class ProcessTerminal implements Terminal {
 	moveBy(lines: number): void {
 		if (lines > 0) {
 			// Move down
-			this.#safeWrite(`\x1b[${lines}B`);
+			process.stdout.write(`\x1b[${lines}B`);
 		} else if (lines < 0) {
 			// Move up
-			this.#safeWrite(`\x1b[${-lines}A`);
+			process.stdout.write(`\x1b[${-lines}A`);
 		}
 		// lines === 0: no movement
 	}
 
 	hideCursor(): void {
-		this.#safeWrite("\x1b[?25l");
+		process.stdout.write("\x1b[?25l");
 	}
 
 	showCursor(): void {
-		this.#safeWrite("\x1b[?25h");
+		process.stdout.write("\x1b[?25h");
 	}
 
 	clearLine(): void {
-		this.#safeWrite("\x1b[K");
+		process.stdout.write("\x1b[K");
 	}
 
 	clearFromCursor(): void {
-		this.#safeWrite("\x1b[J");
+		process.stdout.write("\x1b[J");
 	}
 
 	clearScreen(): void {
-		this.#safeWrite("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
+		process.stdout.write("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
 	}
 
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
-		this.#safeWrite(`\x1b]0;${title}\x07`);
+		process.stdout.write(`\x1b]0;${title}\x07`);
 	}
 
 	setProgress(active: boolean): void {
 		if (active) {
 			// OSC 9;4;3 - indeterminate progress
-			this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			// Skip the keepalive interval in headless mode: each tick no-ops via
-			// #safeWrite, but the timer itself would pin the event loop and can
-			// hang node --test.
-			if (!this.progressInterval && !isTerminalHeadless()) {
+			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+			if (!this.progressInterval) {
 				this.progressInterval = setInterval(() => {
-					this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 			}
 		} else {
 			this.clearProgressInterval();
 			// OSC 9;4;0 - clear progress
-			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 	}
 
