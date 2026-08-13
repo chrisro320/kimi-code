@@ -4445,6 +4445,159 @@ describe("Editor component", () => {
 			assert.strictEqual(submitted, pastedText);
 		});
 	});
+
+	describe("Mouse text selection", () => {
+		it("selects forward on a single line and reports the selected text", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			assert.ok(editor.beginSelectionAtComponentRow(1, 0));
+			assert.ok(editor.extendSelectionToComponentRow(1, 5));
+
+			assert.strictEqual(editor.getSelectedText(), "hello");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+		});
+
+		it("normalizes a backward drag to the same range", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 5);
+			editor.extendSelectionToComponentRow(1, 0);
+
+			assert.strictEqual(editor.getSelectedText(), "hello");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
+		});
+
+		it("selects across logical lines", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("ab\ncd");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			editor.extendSelectionToComponentRow(2, 2);
+
+			assert.strictEqual(editor.getSelectedText(), "ab\ncd");
+		});
+
+		it("maps drag columns through double-width graphemes", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("甲乙丙");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			// 甲 and 乙 occupy columns 0-3; a drag to column 4 selects both.
+			editor.extendSelectionToComponentRow(1, 4);
+
+			assert.strictEqual(editor.getSelectedText(), "甲乙");
+		});
+
+		it("selects across a soft-wrapped row boundary", () => {
+			const editor = new Editor(createTestTUI(12, 24), defaultEditorTheme);
+			editor.setText("hello world foo");
+			// Layout width 11 wraps to "hello" / "world foo" (startIndex 6).
+			editor.render(12);
+
+			editor.beginSelectionAtComponentRow(1, 2);
+			editor.extendSelectionToComponentRow(2, 5);
+
+			assert.strictEqual(editor.getSelectedText(), "llo world");
+		});
+
+		it("clamps a drag past the last text row to the end of the text", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hi");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			// Rows below the single text row (bottom border included) clamp.
+			editor.extendSelectionToComponentRow(5, 0);
+
+			assert.strictEqual(editor.getSelectedText(), "hi");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
+		});
+
+		it("refuses to start a selection on the border row", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hi");
+			editor.render(80);
+
+			assert.strictEqual(editor.beginSelectionAtComponentRow(0, 1), false);
+			assert.strictEqual(editor.getSelectedText(), "");
+		});
+
+		it("paints the selection in inverse video and suppresses the fake cursor", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			editor.extendSelectionToComponentRow(1, 5);
+
+			const lines = editor.render(80);
+			const textRow = lines[1] ?? "";
+			assert.ok(textRow.includes("\x1b[7mhello\x1b[27m"), `selection highlight missing: ${JSON.stringify(textRow)}`);
+			// The fake cursor would add a second inverse run terminated by SGR 0.
+			assert.ok(!textRow.includes("\x1b[0m"), `fake cursor leaked into selection paint: ${JSON.stringify(textRow)}`);
+			// The visible width is unchanged by the escape sequences.
+			assert.strictEqual(visibleWidth(stripVTControlCharacters(textRow)), 80);
+		});
+
+		it("keeps an empty press selection invisible", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 2);
+
+			assert.strictEqual(editor.getSelectedText(), "");
+			const lines = editor.render(80);
+			const textRow = lines[1] ?? "";
+			// No selection slice: the ordinary fake cursor still renders.
+			assert.ok(!textRow.includes("\x1b[27m"), `unexpected selection paint: ${JSON.stringify(textRow)}`);
+		});
+
+		it("drops the selection on the next keystroke", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			editor.extendSelectionToComponentRow(1, 5);
+			assert.strictEqual(editor.getSelectedText(), "hello");
+
+			editor.handleInput("\x1b[C"); // any key, not just edits
+			assert.strictEqual(editor.getSelectedText(), "");
+		});
+
+		it("drops the selection on a programmatic setText", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			editor.extendSelectionToComponentRow(1, 5);
+			assert.strictEqual(editor.getSelectedText(), "hello");
+
+			editor.setText("fresh");
+			assert.strictEqual(editor.getSelectedText(), "");
+		});
+
+		it("clearSelection keeps the cursor where the drag ended", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.render(80);
+
+			editor.beginSelectionAtComponentRow(1, 0);
+			editor.extendSelectionToComponentRow(1, 5);
+			editor.clearSelection();
+
+			assert.strictEqual(editor.getSelectedText(), "");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+		});
+	});
 });
 
 describe("wordWrapLine narrow width", () => {

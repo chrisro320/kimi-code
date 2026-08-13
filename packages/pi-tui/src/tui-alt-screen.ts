@@ -5,10 +5,12 @@ import {
 	getAltScreenSearchMatchKey,
 } from "./alt-screen-search.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
+import type { Editor } from "./components/editor.ts";
 import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
+	getComponentBox,
 	getScrollbarGeometry,
 	getScrollViewBox,
 	getScrollViewsAt,
@@ -140,11 +142,23 @@ interface SearchHighlightRange {
 	current: boolean;
 }
 
+/** Editor target for buffer-level mouse interaction (click-to-position, drag selection). */
+export interface TuiAltScreenMouseEditorTarget {
+	/** Component whose layout box bounds the editor's rows (its gutter container). */
+	container: Component;
+	/** Editor receiving translated press/drag/release events. */
+	editor: Editor;
+	/** Left inset of the editor's content inside the container (gutter columns). */
+	columnInset: number;
+}
+
 export interface TuiAltScreenOptions {
 	/** Number of logical lines moved for each mouse-wheel event. */
 	wheelScrollLines?: number;
 	/** Capture mouse events for viewport scrolling and application-owned text selection. */
 	mouse?: boolean;
+	/** Route mouse events landing on the editor's rows to the editor instead of the screen-level selection. */
+	mouseEditor?: TuiAltScreenMouseEditorTarget;
 	/** Style a non-current transcript search match. */
 	searchMatchStyle?: (text: string) => string;
 	/** Style the current transcript search match. */
@@ -192,6 +206,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
+	private mouseEditorTarget?: TuiAltScreenMouseEditorTarget;
+	private editorMouseSelecting = false;
 
 	constructor(
 		terminal: Terminal,
@@ -214,7 +230,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
+		this.mouseEditorTarget = options.mouseEditor;
 		this.addInputListener((data) => this.handleViewportInput(data));
+	}
+
+	/** Swap the editor mouse target after construction (the editor is built after the TUI). */
+	setMouseEditorTarget(target: TuiAltScreenMouseEditorTarget | undefined): void {
+		this.mouseEditorTarget = target;
+		if (!target) this.editorMouseSelecting = false;
 	}
 
 	get viewportTop(): number {
@@ -539,6 +562,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.stopScrollbarDrag();
 			this.pressedUrl = undefined;
 			this.selectionDragged = false;
+			this.editorMouseSelecting = false;
 			if (hadActiveSelection) {
 				this.selectionAnchor = undefined;
 				this.selectionFocus = undefined;
@@ -564,6 +588,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
+			if (!handled && this.handleEditorMouseEvent(mouseEvent)) return { consume: true };
 			if (!handled) this.handleSelectionMouseEvent(mouseEvent);
 			return { consume: true };
 		}
@@ -944,6 +969,59 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		this.selectionAutoScrollDirection = 0;
 		this.selectionDragPointer = undefined;
+	}
+
+	/**
+	 * Routes press/drag/release landing on the editor's layout box to the
+	 * editor's buffer-level mouse API: a press places the cursor and anchors a
+	 * selection, a drag extends it, and a release copies the selected text
+	 * through OSC 52. Screen-level transcript selection never sees these
+	 * events. A drag leaving the editor's rows freezes at the last position
+	 * until it re-enters.
+	 */
+	private handleEditorMouseEvent(event: SgrMouseEvent): boolean {
+		const target = this.mouseEditorTarget;
+		if (!target) return false;
+		if (event.release) {
+			if (!this.editorMouseSelecting) return false;
+			this.editorMouseSelecting = false;
+			const text = target.editor.getSelectedText();
+			if (text.length > 0) {
+				this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+				this.flash("Copied!");
+			}
+			return true;
+		}
+		if ((event.button & 3) !== 0) return false;
+		const box = this.currentLayout ? getComponentBox(this.currentLayout, target.container) : undefined;
+		const rect = box?.rect;
+		const inside =
+			rect !== undefined &&
+			event.x >= rect.x &&
+			event.x < rect.x + rect.width &&
+			event.y >= rect.y &&
+			event.y < rect.y + rect.height;
+		if ((event.button & 32) !== 0) {
+			if (!this.editorMouseSelecting) return false;
+			if (inside && rect) {
+				const moved = target.editor.extendSelectionToComponentRow(
+					event.y - rect.y,
+					event.x - rect.x - target.columnInset,
+				);
+				if (moved) this.requestRender();
+			}
+			return true;
+		}
+		this.editorMouseSelecting = false;
+		if (!inside || !rect) return false;
+		const began = target.editor.beginSelectionAtComponentRow(
+			event.y - rect.y,
+			event.x - rect.x - target.columnInset,
+		);
+		if (!began) return false;
+		this.editorMouseSelecting = true;
+		this.requestRender();
+		return true;
 	}
 
 	private handleSelectionMouseEvent(event: SgrMouseEvent): void {

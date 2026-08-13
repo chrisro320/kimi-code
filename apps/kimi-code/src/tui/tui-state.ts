@@ -92,6 +92,9 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const ui =
     fullscreen
       ? new TuiAltScreen(terminal, undefined, undefined, {
+          // Escape hatch: KIMI_TUI_NO_MOUSE=1 restores native terminal
+          // selection/link behavior by not claiming mouse capture at all.
+          mouse: process.env['KIMI_TUI_NO_MOUSE'] !== '1',
           // Mouse capture takes over the terminal's native link activation, so
           // route OSC 8 clicks through our own opener.
           openUrl,
@@ -123,6 +126,12 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const editor = new CustomEditor(ui, {
     disablePasteBurst: initialAppState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
   });
+  if (ui instanceof TuiAltScreen) {
+    // Buffer-level mouse selection inside the editor: clicks position the
+    // cursor, drags highlight text, and releasing copies to the clipboard.
+    // The gutter inset maps screen columns to editor component columns.
+    ui.setMouseEditorTarget({ container: editorContainer, editor, columnInset: CHROME_GUTTER });
+  }
   const footer = new FooterComponent({ ...initialAppState }, () => {
     ui.requestRender();
   });

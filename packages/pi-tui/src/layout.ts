@@ -397,6 +397,18 @@ export function getScrollViewBox(frame: LayoutFrame, scrollView: ScrollView): La
 	return visit(frame.root);
 }
 
+export function getComponentBox(frame: LayoutFrame, component: Component): LayoutBox | undefined {
+	const visit = (box: LayoutBox): LayoutBox | undefined => {
+		if (box.component === component) return box;
+		for (const child of box.children) {
+			const match = visit(child);
+			if (match) return match;
+		}
+		return undefined;
+	};
+	return visit(frame.root);
+}
+
 export function getScrollViewsAt(frame: LayoutFrame, x: number, y: number): ScrollView[] {
 	const result: Array<{ scrollView: ScrollView; depth: number }> = [];
 	const visit = (box: LayoutBox, depth: number): void => {

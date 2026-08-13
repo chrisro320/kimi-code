@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { findAltScreenSearchMatches } from "../src/alt-screen-search.ts";
+import { Editor } from "../src/components/editor.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Image } from "../src/components/image.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
@@ -15,6 +16,7 @@ import {
 	setCapabilities,
 } from "../src/terminal-image.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -1319,5 +1321,90 @@ describe("TuiAltScreen", () => {
 			assert.ok(restoreEvent.data.includes("sixth"));
 			assert.ok(restoreEvent.data.indexOf("first") < restoreEvent.data.indexOf("sixth"));
 		}
+	});
+
+	describe("editor mouse target", () => {
+		function editorLayout(terminal: RecordingTerminal, editorText: string) {
+			const tui = new TuiAltScreen(terminal);
+			const transcript = new ScrollView(new Text("transcript alpha\nbeta\ngamma\ndelta\nepsilon", 0, 0), {
+				follow: "end",
+				primary: true,
+			});
+			const editor = new Editor(tui, defaultEditorTheme);
+			editor.setText(editorText);
+			const editorContainer = new VStack([editor]);
+			tui.setLayoutRoot(
+				new VStack([
+					{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+					{ component: editorContainer, basis: "auto", minSize: 1 },
+				]),
+			);
+			tui.setMouseEditorTarget({ container: editorContainer, editor, columnInset: 0 });
+			return { tui, editor };
+		}
+
+		it("selects editor text with the mouse and copies it with OSC 52", async () => {
+			const terminal = new RecordingTerminal(20, 8);
+			const { tui, editor } = editorLayout(terminal, "hello world");
+			tui.start();
+			await terminal.waitForRender();
+
+			// Editor rows 5-7 (border/text/border); the text row is screen row 6.
+			terminal.sendInput("\x1b[<0;1;7M");
+			terminal.sendInput("\x1b[<32;6;7M");
+			terminal.sendInput("\x1b[<0;6;7m");
+			await terminal.waitForRender();
+
+			assert.strictEqual(editor.getSelectedText(), "hello");
+			const expectedClipboardSequence = `\x1b]52;c;${Buffer.from("hello").toString("base64")}\x07`;
+			assert.ok(
+				terminal.events.some(
+					(event) => event.type === "write" && event.data.includes(expectedClipboardSequence),
+				),
+			);
+			assert.ok(terminal.getViewport().some((line) => line.includes("Copied!")));
+			tui.stop();
+		});
+
+		it("places the cursor on a click without dragging", async () => {
+			const terminal = new RecordingTerminal(20, 8);
+			const { tui, editor } = editorLayout(terminal, "hello world");
+			tui.start();
+			await terminal.waitForRender();
+
+			terminal.sendInput("\x1b[<0;3;7M");
+			terminal.sendInput("\x1b[<0;3;7m");
+			await terminal.waitForRender();
+
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
+			assert.strictEqual(editor.getSelectedText(), "");
+			assert.ok(
+				!terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b]52;c;")),
+			);
+			tui.stop();
+		});
+
+		it("falls back to screen-level selection outside the editor box", async () => {
+			const terminal = new RecordingTerminal(20, 8);
+			const { tui, editor } = editorLayout(terminal, "hello world");
+			tui.start();
+			await terminal.waitForRender();
+
+			// Press inside the transcript (row 0) and drag along it.
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<32;10;1M");
+			terminal.sendInput("\x1b[<0;10;1m");
+			await terminal.waitForRender();
+
+			assert.strictEqual(editor.getSelectedText(), "");
+			// Drag ends on column 9 inclusive: the whole word "transcript".
+			const expectedClipboardSequence = `\x1b]52;c;${Buffer.from("transcript").toString("base64")}\x07`;
+			assert.ok(
+				terminal.events.some(
+					(event) => event.type === "write" && event.data.includes(expectedClipboardSequence),
+				),
+			);
+			tui.stop();
+		});
 	});
 });
