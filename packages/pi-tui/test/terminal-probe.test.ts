@@ -22,6 +22,10 @@ class FakeProbeIO implements ProbeIO {
 			cb(data);
 		}
 	}
+
+	get listenerCount(): number {
+		return this.listeners.size;
+	}
 }
 
 const DA1 = "\x1b[?1;2c";
@@ -161,6 +165,27 @@ describe("probeCapabilities", () => {
 		assert.strictEqual(result.syncOutput, true);
 		assert.strictEqual(result.inBandResize, true);
 		assert.strictEqual(result.appearancePush, true);
+	});
+
+	it("aborts promptly, unsubscribes, and ignores later replies", async () => {
+		const io = new FakeProbeIO();
+		const controller = new AbortController();
+		const promise = probeCapabilities(io, { timeoutMs: 10_000, signal: controller.signal });
+
+		assert.strictEqual(io.listenerCount, 1);
+		controller.abort();
+		assert.strictEqual(io.listenerCount, 0, "abort must synchronously release the stdin observer");
+		const result = await promise;
+		io.emit(KITTY);
+		io.emit(DECRPM_2026_SET);
+
+		assert.deepStrictEqual(result, {
+			kittyKeyboard: false,
+			syncOutput: undefined,
+			inBandResize: undefined,
+			appearancePush: undefined,
+			background: undefined,
+		});
 	});
 
 	it("maps DECRQM status to the three-way result", async () => {

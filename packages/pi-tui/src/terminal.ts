@@ -179,8 +179,10 @@ export class ProcessTerminal implements Terminal {
 	})();
 
 	readonly #capabilities = new ProcessTerminalCapabilities();
-	/** Resolves with the startup probe result; undefined when probing is skipped (non-TTY). */
+	/** Resolves with the current startup probe result; undefined when probing is skipped (non-TTY). */
 	probeReady: Promise<ProbeResult> | undefined;
+	private capabilityProbeController: AbortController | undefined;
+	private capabilityProbeGeneration = 0;
 
 	/** Mutable, probe-backed terminal capabilities shared with the ledger engine. */
 	get terminalCapabilities(): ProcessTerminalCapabilities {
@@ -319,6 +321,10 @@ export class ProcessTerminal implements Terminal {
 	 */
 	private runCapabilityProbe(): void {
 		if (!process.stdout.isTTY) return;
+		this.capabilityProbeController?.abort();
+		const controller = new AbortController();
+		const generation = ++this.capabilityProbeGeneration;
+		this.capabilityProbeController = controller;
 		const io: ProbeIO = {
 			write: (data: string) => {
 				this.#safeWrite(data);
@@ -333,9 +339,15 @@ export class ProcessTerminal implements Terminal {
 				};
 			},
 		};
-		this.probeReady = probeCapabilities(io).then((result) => {
-			this.#capabilities.applyProbe(result);
+		this.probeReady = probeCapabilities(io, { signal: controller.signal }).then((result) => {
+			if (!controller.signal.aborted && generation === this.capabilityProbeGeneration) {
+				this.#capabilities.applyProbe(result);
+			}
 			return result;
+		}).finally(() => {
+			if (generation === this.capabilityProbeGeneration) {
+				this.capabilityProbeController = undefined;
+			}
 		});
 	}
 
@@ -525,6 +537,10 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		this.capabilityProbeGeneration++;
+		this.capabilityProbeController?.abort();
+		this.capabilityProbeController = undefined;
+		this.probeReady = undefined;
 		if (this.clearProgressInterval()) {
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}

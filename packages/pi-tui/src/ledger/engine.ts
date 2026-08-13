@@ -1,7 +1,7 @@
 import type { Component } from "../tui.ts";
 import type { Terminal } from "../terminal.ts";
 import { type TerminalCapabilities, isMultiplexerSession, resizeRepaintsInPlace } from "../terminal-capabilities.ts";
-import { sliceByColumn, truncateToWidth, visibleWidth } from "../utils.ts";
+import { highlightByColumn, textByColumn, truncateToWidth, visibleWidth } from "../utils.ts";
 import { findCommittedPrefixResync } from "./audit.ts";
 import { getNativeScrollbackCommitSafeEnd, getNativeScrollbackLiveRegionStart, getNativeScrollbackSnapshotSafeEnd, getRenderStablePrefixRows, setNativeScrollbackCommittedRows } from "./seam.ts";
 import { coalesceAdjacentSgr } from "./sgr-coalesce.ts";
@@ -46,8 +46,17 @@ export class LedgerTuiEngine {
 	#previousFrameLength = 0;
 	#previousWidth = 0;
 	#previousHeight = 0;
+	// During overlay composition, expose the geometry of the frame being painted
+	// instead of the previously committed frame. Scrollbar overlays render before
+	// #commit(), so consulting only #previous* would make their thumb lag one
+	// append or resize behind the viewport they are being composited onto.
+	#composingScrollState: { offset: number; maxOffset: number } | null = null;
+	#selectionAnchor: { row: number; col: number } | null = null;
+	#selectionFocus: { row: number; col: number } | null = null;
 	#hardwareCursorRow = 0;
-	#showHardwareCursor = process.env["PI_HARDWARE_CURSOR"] !== "0";
+	#showHardwareCursor: boolean;
+	readonly #fullscreen: boolean;
+	#fullscreenActive = false;
 
 	// ---- seam (per-frame, set by compose) ----
 	#nativeScrollbackLiveRegionStart: number | undefined;
@@ -99,8 +108,12 @@ export class LedgerTuiEngine {
 		getChildren: () => Component[],
 		caps: TerminalCapabilities,
 		compositeOverlays?: (window: string[], width: number, height: number) => string[],
+		showHardwareCursor = false,
+		fullscreen = false,
 	) {
 		this.terminal = terminal;
+		this.#showHardwareCursor = showHardwareCursor;
+		this.#fullscreen = fullscreen;
 		this.getChildren = getChildren;
 		this.compositeOverlays = compositeOverlays ?? ((window) => window);
 		this.#caps = caps;
@@ -109,6 +122,14 @@ export class LedgerTuiEngine {
 			? `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`
 			: `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 		this.#paintEndSequence = this.#syncEnabled ? `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}` : ENABLE_AUTOWRAP;
+	}
+
+	public start(): void {
+		this.#stopped = false;
+		if (this.#fullscreen && !this.#fullscreenActive) {
+			this.terminal.write(ALT_SCREEN_ENTER);
+			this.#fullscreenActive = true;
+		}
 	}
 
 	/**
@@ -127,6 +148,17 @@ export class LedgerTuiEngine {
 
 	get fullRedraws(): number {
 		return this.#fullRedrawCount;
+	}
+
+	public setShowHardwareCursor(enabled: boolean): void {
+		if (this.#showHardwareCursor === enabled) return;
+		this.#showHardwareCursor = enabled;
+		// Cursor-bearing rows are normalized while being ingested. Force them
+		// through ingestion again so switching cursor mode cannot reuse a frame
+		// painted for the previous mode.
+		this.#composedFrame.length = 0;
+		this.#frameCursorMarkers.length = 0;
+		this.#preparedValidRows = 0;
 	}
 
 	// ---- cursor control (OMP: 3647-3671, 3120-3130) ----
@@ -164,6 +196,7 @@ export class LedgerTuiEngine {
 
 	#ingestFrameRow(line: string): void {
 		const CURSOR_MARKER = "\x1b_pi:c\x07";
+		const SOFTWARE_CURSOR_REVERSE = "\x1b[7m";
 		let markerIndex = line.indexOf(CURSOR_MARKER);
 		if (markerIndex === -1) {
 			this.#composedFrame.push(line);
@@ -173,9 +206,36 @@ export class LedgerTuiEngine {
 		let stripped = line;
 		while (markerIndex !== -1) {
 			stripped = stripped.slice(0, markerIndex) + stripped.slice(markerIndex + CURSOR_MARKER.length);
+			// Focusable inputs put a reverse-video software cursor immediately
+			// after the marker. When the real cursor is visible, keeping both is
+			// the double-cursor bug; remove only the opening reverse-video SGR so
+			// the component's existing reset sequence and text styling stay intact.
+			if (this.#showHardwareCursor && stripped.startsWith(SOFTWARE_CURSOR_REVERSE, markerIndex)) {
+				stripped = stripped.slice(0, markerIndex) + stripped.slice(markerIndex + SOFTWARE_CURSOR_REVERSE.length);
+			}
 			markerIndex = stripped.indexOf(CURSOR_MARKER, markerIndex);
 		}
 		this.#composedFrame.push(stripped);
+	}
+
+	#extractWindowCursor(window: string[]): { row: number; col: number } | null {
+		const CURSOR_MARKER = "\x1b_pi:c\x07";
+		const SOFTWARE_CURSOR_REVERSE = "\x1b[7m";
+		let cursor: { row: number; col: number } | null = null;
+		for (let row = window.length - 1; row >= 0; row--) {
+			let line = window[row] ?? "";
+			let markerIndex = line.indexOf(CURSOR_MARKER);
+			while (markerIndex !== -1) {
+				cursor ??= { row, col: visibleWidth(line.slice(0, markerIndex)) };
+				line = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
+				if (this.#showHardwareCursor && line.startsWith(SOFTWARE_CURSOR_REVERSE, markerIndex)) {
+					line = line.slice(0, markerIndex) + line.slice(markerIndex + SOFTWARE_CURSOR_REVERSE.length);
+				}
+				markerIndex = line.indexOf(CURSOR_MARKER, markerIndex);
+			}
+			window[row] = line;
+		}
+		return cursor;
 	}
 
 	#pruneFrameCursorMarkers(fromRow: number): void {
@@ -391,7 +451,9 @@ export class LedgerTuiEngine {
 		const { chunkTo, windowTop } = options;
 
 		let buffer = this.#paintBeginSequence;
-		if (options.clearScrollback) {
+		if (this.#fullscreen) {
+			buffer += "\x1b[2J\x1b[H";
+		} else if (options.clearScrollback) {
 			buffer += "\x1b[2J\x1b[H\x1b[3J";
 		} else if (this.#caps.supportsScreenToScrollback) {
 			buffer += "\x1b[2J\x1b[H\x1b[22J"; // kitty ED22: keep pre-existing shell screen
@@ -399,10 +461,12 @@ export class LedgerTuiEngine {
 			buffer += "\x1b[2J\x1b[H";
 		}
 		let wroteLine = false;
-		for (let i = 0; i < chunkTo; i++) {
-			if (wroteLine) buffer += "\r\n";
-			buffer += this.#terminalLine(frame[i] ?? "");
-			wroteLine = true;
+		if (!this.#fullscreen) {
+			for (let i = 0; i < chunkTo; i++) {
+				if (wroteLine) buffer += "\r\n";
+				buffer += this.#terminalLine(frame[i] ?? "");
+				wroteLine = true;
+			}
 		}
 		for (let screenRow = 0; screenRow < height; screenRow++) {
 			if (wroteLine) buffer += "\r\n";
@@ -413,7 +477,11 @@ export class LedgerTuiEngine {
 		const parkUp = height - contentRows;
 		if (parkUp > 0) buffer += `\x1b[${parkUp}A`;
 		const contentBottomRow = windowTop + contentRows - 1;
-		const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, contentBottomRow);
+		const cursorControl = this.#cursorControlSequence(
+			cursorPos,
+			Math.max(frame.length, (cursorPos?.row ?? -1) + 1),
+			contentBottomRow,
+		);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
@@ -479,7 +547,11 @@ export class LedgerTuiEngine {
 					}
 					cursorFromRow = windowTop + lastChanged;
 				}
-				const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, cursorFromRow);
+				const cursorControl = this.#cursorControlSequence(
+					cursorPos,
+					Math.max(frame.length, (cursorPos?.row ?? -1) + 1),
+					cursorFromRow,
+				);
 				buffer += cursorControl.seq;
 				buffer += this.#paintEndSequence;
 				this.terminal.write(buffer);
@@ -524,7 +596,11 @@ export class LedgerTuiEngine {
 				buffer += `\x1b[${lastChanged - contentBottomScreenRow}A`;
 				cursorFromRow = contentBottomRow;
 			}
-			const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, cursorFromRow);
+			const cursorControl = this.#cursorControlSequence(
+					cursorPos,
+					Math.max(frame.length, (cursorPos?.row ?? -1) + 1),
+					cursorFromRow,
+				);
 			buffer += cursorControl.seq;
 			buffer += this.#paintEndSequence;
 			this.terminal.write(buffer);
@@ -538,10 +614,12 @@ export class LedgerTuiEngine {
 		if (currentScreenRow > 0) buffer += `\x1b[${currentScreenRow}A`;
 		buffer += "\r";
 		let wroteLine = false;
-		for (let i = chunkFrom; i < chunkTo; i++) {
-			if (wroteLine) buffer += "\r\n";
-			buffer += this.#lineRewriteSequence(frame[i] ?? "", width);
-			wroteLine = true;
+		if (!this.#fullscreen) {
+			for (let i = chunkFrom; i < chunkTo; i++) {
+				if (wroteLine) buffer += "\r\n";
+				buffer += this.#lineRewriteSequence(frame[i] ?? "", width);
+				wroteLine = true;
+			}
 		}
 		for (let screenRow = 0; screenRow < height; screenRow++) {
 			if (wroteLine) buffer += "\r\n";
@@ -550,7 +628,11 @@ export class LedgerTuiEngine {
 		}
 		const parkUp = height - 1 - (contentBottomRow - windowTop);
 		if (parkUp > 0) buffer += `\x1b[${parkUp}A`;
-		const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, contentBottomRow);
+		const cursorControl = this.#cursorControlSequence(
+			cursorPos,
+			Math.max(frame.length, (cursorPos?.row ?? -1) + 1),
+			contentBottomRow,
+		);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
@@ -560,7 +642,11 @@ export class LedgerTuiEngine {
 	}
 
 	#writeCursorPosition(cursorPos: { row: number; col: number } | null, totalLines: number): void {
-		const cursorControl = this.#cursorControlSequence(cursorPos, totalLines, this.#hardwareCursorRow);
+		const cursorControl = this.#cursorControlSequence(
+			cursorPos,
+			Math.max(totalLines, (cursorPos?.row ?? -1) + 1),
+			this.#hardwareCursorRow,
+		);
 		if (cursorControl.seq.length > 0) this.terminal.write(cursorControl.seq);
 		this.#recordHardwareCursorUpdate(cursorControl);
 	}
@@ -674,35 +760,54 @@ export class LedgerTuiEngine {
 				this.#userScrollAnchor = null;
 			} else if (pinned !== windowTop) {
 				windowTop = pinned;
-				chunkTo = Math.min(chunkTo, windowTop);
+				if (!this.#fullscreen) chunkTo = Math.min(chunkTo, windowTop);
 			}
 		}
 
 		// 6. cursor marker + window slice (OMP: 2736-2758)
-		let cursorPos: { row: number; col: number } | null = null;
-		for (let i = cursorMarkers.length - 1; i >= 0; i--) {
-			const marker = cursorMarkers[i]!;
-			if (marker.row >= windowTop) {
-				cursorPos = marker;
-				break;
-			}
-		}
-		const frame = this.#prepareFrame(rawFrame, width);
-		const rawWindow: string[] = new Array(height);
 		// While scrolled back, the tail of the viewport keeps showing the pinned
 		// components' own rows so the input line stays put; the rest scrolls. The
 		// mapping is only split in this state, and this state always full-paints,
 		// so the differential paths never see a non-contiguous window.
 		const pinnedRows = this.#userScrollAnchor === null ? 0 : Math.min(this.#pinnedBottomRows(), Math.max(0, height - 1));
 		const scrollRows = height - pinnedRows;
-		for (let r = 0; r < height; r++) {
-			rawWindow[r] =
-				(r < scrollRows ? frame[windowTop + r] : frame[frameLength - pinnedRows + (r - scrollRows)]) ?? "";
+		const pinnedFrameStart = frameLength - pinnedRows;
+		let cursorPos: { row: number; col: number } | null = null;
+		for (let i = cursorMarkers.length - 1; i >= 0; i--) {
+			const marker = cursorMarkers[i]!;
+			if (pinnedRows > 0 && marker.row >= pinnedFrameStart) {
+				cursorPos = {
+					row: windowTop + scrollRows + (marker.row - pinnedFrameStart),
+					col: marker.col,
+				};
+				break;
+			}
+			if (marker.row >= windowTop && marker.row < windowTop + scrollRows) {
+				cursorPos = marker;
+				break;
+			}
 		}
-		const window = this.compositeOverlays(rawWindow, width, height);
+		const frame = this.#prepareFrame(rawFrame, width);
+		const rawWindow: string[] = new Array(height);
+		for (let r = 0; r < height; r++) {
+			const frameRow = r < scrollRows ? windowTop + r : frameLength - pinnedRows + (r - scrollRows);
+			rawWindow[r] = this.#highlightSelection(frame[frameRow] ?? "", frameRow);
+		}
+		this.#composingScrollState = {
+			offset: this.#userScrollAnchor === null ? 0 : Math.max(0, Math.max(0, frameLength - height) - windowTop),
+			maxOffset: Math.max(0, frameLength - height),
+		};
+		let window: string[];
+		try {
+			window = this.compositeOverlays(rawWindow, width, height);
+		} finally {
+			this.#composingScrollState = null;
+		}
+		const overlayCursor = this.#extractWindowCursor(window);
+		if (overlayCursor) cursorPos = { row: windowTop + overlayCursor.row, col: overlayCursor.col };
 
 		const intent: RenderIntent = fullPaint
-			? { kind: "fullPaint", clearScrollback: geometryRebuild ? !isMultiplexerSession() : false }
+			? { kind: "fullPaint", clearScrollback: !this.#fullscreen && geometryRebuild ? !isMultiplexerSession() : false }
 			: { kind: "update", chunkTo, windowTop };
 
 		// 7. emit + ledger advance (OMP: 2779-2822)
@@ -766,9 +871,14 @@ export class LedgerTuiEngine {
 	}
 
 	public scrollBy(delta: number): boolean {
+		return this.setScrollOffset(this.userScrollOffset + delta);
+	}
+
+	public setScrollOffset(offset: number): boolean {
 		const bottom = this.#bottomFollowRow();
+		const clampedOffset = Math.max(0, Math.min(bottom, Math.round(offset)));
+		const next = bottom - clampedOffset;
 		const from = this.#userScrollAnchor ?? bottom;
-		const next = Math.max(0, Math.min(bottom, from - delta));
 		if (next === from) return false;
 		// Landing back on the bottom resumes following instead of pinning there,
 		// so subsequent output scrolls in normally.
@@ -786,6 +896,94 @@ export class LedgerTuiEngine {
 		return Math.max(0, this.#bottomFollowRow() - this.#userScrollAnchor);
 	}
 
+	public get scrollState(): { offset: number; maxOffset: number } {
+		return this.#composingScrollState ?? { offset: this.userScrollOffset, maxOffset: this.#bottomFollowRow() };
+	}
+
+	#framePointForScreenPoint(
+		screenRow: number,
+		column: number,
+		windowTop = this.#windowTopRow,
+		keepInScrollableRegion = false,
+	): { row: number; col: number } | undefined {
+		if (screenRow < 0 || screenRow >= this.#previousHeight) return undefined;
+		const pinnedRows = this.#userScrollAnchor === null
+			? 0
+			: Math.min(this.#pinnedBottomRows(), Math.max(0, this.#previousHeight - 1));
+		const pinnedStart = this.#previousHeight - pinnedRows;
+		const mappedScreenRow = keepInScrollableRegion ? Math.min(screenRow, Math.max(0, pinnedStart - 1)) : screenRow;
+		const row = mappedScreenRow >= pinnedStart && pinnedRows > 0
+			? this.#previousFrameLength - pinnedRows + (mappedScreenRow - pinnedStart)
+			: windowTop + mappedScreenRow;
+		if (row < 0 || row >= this.#previousFrameLength) return undefined;
+		return { row, col: Math.max(0, Math.min(this.#previousWidth, column)) };
+	}
+
+	public beginSelection(screenRow: number, column: number): boolean {
+		const point = this.#framePointForScreenPoint(screenRow, column);
+		if (!point) return false;
+		this.#selectionAnchor = point;
+		this.#selectionFocus = point;
+		return true;
+	}
+
+	public updateSelection(screenRow: number, column: number): boolean {
+		if (!this.#selectionAnchor) return false;
+		const point = this.#framePointForScreenPoint(screenRow, column, this.#windowTopRow, true);
+		if (!point) return false;
+		if (this.#selectionFocus?.row === point.row && this.#selectionFocus.col === point.col) return false;
+		this.#selectionFocus = point;
+		return true;
+	}
+
+	public scrollAndUpdateSelection(delta: number, screenRow: number, column: number): boolean {
+		if (!this.#selectionAnchor) return false;
+		const scrolled = this.scrollBy(delta);
+		const nextWindowTop = this.#userScrollAnchor ?? this.#bottomFollowRow();
+		const point = this.#framePointForScreenPoint(screenRow, column, nextWindowTop, true);
+		if (!point) return scrolled;
+		const selectionChanged = this.#selectionFocus?.row !== point.row || this.#selectionFocus.col !== point.col;
+		if (selectionChanged) this.#selectionFocus = point;
+		return scrolled || selectionChanged;
+	}
+
+	public clearSelection(): boolean {
+		if (!this.#selectionAnchor && !this.#selectionFocus) return false;
+		this.#selectionAnchor = null;
+		this.#selectionFocus = null;
+		return true;
+	}
+
+	#orderedSelection(): readonly [{ row: number; col: number }, { row: number; col: number }] | undefined {
+		const anchor = this.#selectionAnchor;
+		const focus = this.#selectionFocus;
+		if (!anchor || !focus || (anchor.row === focus.row && anchor.col === focus.col)) return undefined;
+		return anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)
+			? [anchor, focus]
+			: [focus, anchor];
+	}
+
+	#highlightSelection(line: string, row: number): string {
+		const selection = this.#orderedSelection();
+		if (!selection || row < selection[0].row || row > selection[1].row) return line;
+		const start = row === selection[0].row ? selection[0].col : 0;
+		const end = row === selection[1].row ? selection[1].col : visibleWidth(line);
+		return highlightByColumn(line, start, Math.max(0, end - start));
+	}
+
+	public get selectedText(): string {
+		const selection = this.#orderedSelection();
+		if (!selection) return "";
+		const lines: string[] = [];
+		for (let row = selection[0].row; row <= selection[1].row; row++) {
+			const line = this.#preparedFrame[row] ?? "";
+			const start = row === selection[0].row ? selection[0].col : 0;
+			const end = row === selection[1].row ? selection[1].col : visibleWidth(line);
+			lines.push(textByColumn(line, start, Math.max(0, end - start)));
+		}
+		return lines.join("\n");
+	}
+
 	/**
 	 * Resolves a screen row to the component that painted it, plus the row's
 	 * offset inside that component. Components render rows without knowing where
@@ -796,7 +994,22 @@ export class LedgerTuiEngine {
 	 * frame has been composed yet.
 	 */
 	public hitTestScreenRow(screenRow: number): { component: Component; rowWithinComponent: number } | undefined {
-		if (screenRow < 0) return undefined;
+		if (screenRow < 0 || screenRow >= this.#previousHeight) return undefined;
+
+		if (this.#userScrollAnchor !== null) {
+			const pinnedRows = Math.min(this.#pinnedBottomRows(), Math.max(0, this.#previousHeight - 1));
+			const pinnedStart = this.#previousHeight - pinnedRows;
+			if (screenRow >= pinnedStart) {
+				const frameRow = this.#previousFrameLength - pinnedRows + (screenRow - pinnedStart);
+				for (const segment of this.#frameSegments) {
+					if (frameRow >= segment.start && frameRow < segment.start + segment.rowCount) {
+						return { component: segment.component, rowWithinComponent: frameRow - segment.start };
+					}
+				}
+				return undefined;
+			}
+		}
+
 		const frameRow = this.#windowTopRow + screenRow;
 		for (const segment of this.#frameSegments) {
 			if (frameRow >= segment.start && frameRow < segment.start + segment.rowCount) {
@@ -824,7 +1037,7 @@ export class LedgerTuiEngine {
 
 	// Called by the TUI's onResize (non-mux).
 	public beginResizeViewport(): void {
-		if (isMultiplexerSession()) return; // mux: no alt-screen
+		if (isMultiplexerSession() || this.#fullscreen) return;
 		if (!this.#resizeViewportActive) {
 			this.terminal.write(ALT_SCREEN_ENTER);
 			this.#resizeViewportActive = true;
@@ -857,6 +1070,7 @@ export class LedgerTuiEngine {
 		const rawWindow: string[] = new Array(height);
 		for (let r = 0; r < height; r++) rawWindow[r] = frame[start + r] ?? "";
 		const window = this.compositeOverlays(rawWindow, width, height);
+		this.#extractWindowCursor(window);
 		let buffer = this.#paintBeginSequence + "\x1b[H";
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
@@ -874,6 +1088,10 @@ export class LedgerTuiEngine {
 		}
 		if (this.#resizeViewportActive) {
 			this.#resizeViewportActive = false;
+			this.terminal.write(ALT_SCREEN_EXIT);
+		}
+		if (this.#fullscreenActive) {
+			this.#fullscreenActive = false;
 			this.terminal.write(ALT_SCREEN_EXIT);
 		}
 	}

@@ -1084,6 +1084,91 @@ export function sliceByColumn(line: string, startCol: number, length: number, st
 	return sliceWithWidth(line, startCol, length, strict).text;
 }
 
+/** Remove terminal escape sequences without splitting Unicode graphemes. */
+export function stripAnsi(line: string): string {
+	let plain = "";
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		plain += line[i];
+		i++;
+	}
+	return plain;
+}
+
+function clampColumnToGraphemeBoundary(line: string, column: number, direction: "start" | "end"): number {
+	const target = Math.max(0, column);
+	let currentCol = 0;
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			const nextCol = currentCol + graphemeWidth(segment);
+			if (target > currentCol && target < nextCol) return direction === "start" ? currentCol : nextCol;
+			currentCol = nextCol;
+		}
+		i = textEnd;
+	}
+	return Math.min(target, currentCol);
+}
+
+function preserveInverseAcrossSgr(text: string): string {
+	let result = "";
+	let i = 0;
+	while (i < text.length) {
+		const ansi = extractAnsiCode(text, i);
+		if (!ansi) {
+			result += text[i];
+			i++;
+			continue;
+		}
+		result += ansi.code;
+		if (ansi.code.endsWith("m")) {
+			const body = ansi.code.slice(2, -1);
+			const params = body === "" ? [0] : body.split(";").map((value) => Number.parseInt(value, 10));
+			let inverseEnabled = true;
+			for (const param of params) {
+				if (param === 0 || param === 27) inverseEnabled = false;
+				else if (param === 7) inverseEnabled = true;
+			}
+			if (!inverseEnabled) result += "\x1b[7m";
+		}
+		i += ansi.length;
+	}
+	return result;
+}
+
+/** Reverse-video a visible column range while preserving complete graphemes. */
+export function highlightByColumn(line: string, startCol: number, length: number): string {
+	if (length <= 0) return line;
+	const lineWidth = visibleWidth(line);
+	const start = clampColumnToGraphemeBoundary(line, Math.min(lineWidth, startCol), "start");
+	const end = clampColumnToGraphemeBoundary(line, Math.min(lineWidth, startCol + length), "end");
+	if (end <= start) return line;
+	const before = sliceByColumn(line, 0, start, true);
+	const selected = preserveInverseAcrossSgr(sliceByColumn(line, start, end - start, true));
+	const after = sliceByColumn(line, end, Math.max(0, lineWidth - end), true);
+	return `${before}\x1b[7m${selected}\x1b[27m${after}`;
+}
+
+export function textByColumn(line: string, startCol: number, length: number): string {
+	if (length <= 0) return "";
+	const lineWidth = visibleWidth(line);
+	const start = clampColumnToGraphemeBoundary(line, Math.min(lineWidth, startCol), "start");
+	const end = clampColumnToGraphemeBoundary(line, Math.min(lineWidth, startCol + length), "end");
+	return stripAnsi(sliceByColumn(line, start, Math.max(0, end - start), true));
+}
+
 /** Like sliceByColumn but also returns the actual visible width of the result. */
 export function sliceWithWidth(
 	line: string,

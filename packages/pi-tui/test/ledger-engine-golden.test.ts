@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { ProcessTerminalCapabilities } from "../src/terminal-capabilities.ts";
 import type { ProbeResult } from "../src/terminal-probe.ts";
-import { type Component, TUI } from "../src/tui.ts";
+import { type Component, CURSOR_MARKER, TUI } from "../src/tui.ts";
 import { LoggingVirtualTerminal } from "./virtual-terminal.ts";
 
 const SYNC_OUTPUT_BEGIN = "\x1b[?2026h";
@@ -77,6 +77,71 @@ async function withoutMultiplexer<T>(run: () => Promise<T>): Promise<T> {
 }
 
 describe("ledger engine golden", () => {
+	it("owns a fullscreen alternate-screen lifetime", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal, undefined, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = ["Hello", "World"];
+			tui.addChild(c);
+
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes("\x1b[?1049h"), "fullscreen start must enter the alternate screen");
+
+			terminal.clearWrites();
+			tui.stop();
+			assert.ok(terminal.getWrites().includes("\x1b[?1049l"), "fullscreen stop must leave the alternate screen");
+		});
+	});
+
+	it("repaints the viewport after restarting the same fullscreen instance", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 5);
+			const tui = new TUI(terminal, undefined, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = ["A", "B", "C"];
+			tui.addChild(c);
+
+			tui.start();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getViewport().slice(0, 3), c.lines);
+			tui.stop();
+
+			terminal.clearWrites();
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes("\x1b[?1049h"));
+			assert.deepStrictEqual(terminal.getViewport().slice(0, 3), c.lines);
+			tui.stop();
+		});
+	});
+
+	it("forces the ledger engine for fullscreen even when legacy is requested", async () => {
+		const previousEngine = process.env["PI_TUI_ENGINE"];
+		process.env["PI_TUI_ENGINE"] = "legacy";
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 4, 100);
+			const tui = new TUI(terminal, undefined, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = Array.from({ length: 10 }, (_, index) => `line-${index}`);
+			tui.addChild(c);
+
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes("\x1b[?1049h"), "fullscreen must not accept legacy fallback");
+			assert.strictEqual(terminal.getScrollbackLength(), 0, "fullscreen must not populate native scrollback");
+			assert.strictEqual(tui.scrollViewportBy(3), true, "managed scrolling must remain available");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportScrollState.offset, 3);
+			assert.strictEqual(terminal.getScrollbackLength(), 0, "scroll repaint must stay inside one viewport");
+			tui.stop();
+		} finally {
+			if (previousEngine === undefined) delete process.env["PI_TUI_ENGINE"];
+			else process.env["PI_TUI_ENGINE"] = previousEngine;
+		}
+	});
+
 	it("renders basic content", async () => {
 		await withLedger(async () => {
 			const terminal = new LoggingVirtualTerminal(40, 10);
@@ -89,6 +154,60 @@ describe("ledger engine golden", () => {
 			const v = terminal.getViewport();
 			assert.ok(v[0]?.includes("Hello"));
 			assert.ok(v[1]?.includes("World"));
+			tui.stop();
+		});
+	});
+
+	it("renders exactly one cursor in hardware and software modes", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal, false);
+			const c = new TestComponent();
+			c.lines = [`before${CURSOR_MARKER}\x1b[7mX\x1b[0m`];
+			tui.addChild(c);
+			tui.start();
+			await terminal.waitForRender();
+
+			assert.ok(!terminal.getWrites().includes("\x1b[?25h"), "software mode must keep the hardware cursor hidden");
+			assert.ok(terminal.getWrites().includes("\x1b[7m"), "software mode must retain the reverse-video cursor");
+
+			tui.setShowHardwareCursor(true);
+			terminal.clearWrites();
+			c.lines = [`after${CURSOR_MARKER}\x1b[7mY\x1b[0m`];
+			tui.requestRender();
+			await terminal.waitForRender();
+			const hardwarePaint = terminal.getWrites();
+			assert.ok(hardwarePaint.includes("\x1b[?25h"), "hardware mode must show the terminal cursor");
+			assert.ok(!hardwarePaint.includes("\x1b[7m"), "hardware mode must remove the reverse-video software cursor");
+			assert.ok(terminal.getViewport()[0]?.includes("afterY"), "removing the software cursor must preserve its text");
+			tui.stop();
+		});
+	});
+
+	it("gives a focused overlay sole ownership of the hardware cursor", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 8);
+			const tui = new TUI(terminal, true, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = ["base"];
+			tui.addChild(c);
+			const overlay: Component & { focused: boolean } = {
+				focused: false,
+				render: () => [`dialog:${CURSOR_MARKER}\x1b[7mX\x1b[0m`],
+				invalidate: () => {},
+			};
+			tui.showOverlay(overlay, { row: 3, col: 4, width: 12 });
+			assert.strictEqual(overlay.focused, true, "capturing overlay must own focus");
+
+			tui.start();
+			await terminal.waitForRender();
+
+			const paint = terminal.getWrites();
+			assert.ok(!paint.includes(CURSOR_MARKER), "overlay cursor marker must not reach the terminal");
+			assert.ok(!paint.includes("\x1b[7m"), "hardware mode must remove the overlay's software cursor");
+			assert.ok(paint.includes("\x1b[?25h"), "focused overlay must show the hardware cursor");
+			assert.deepStrictEqual(terminal.getCursorPosition(), { x: 11, y: 3 });
+			assert.ok(terminal.getViewport()[3]?.includes("dialog:X"));
 			tui.stop();
 		});
 	});
@@ -291,12 +410,12 @@ describe("ledger engine golden", () => {
 		await withLedger(async () => {
 			await withoutMultiplexer(async () => {
 				const terminal = new LoggingVirtualTerminal(40, 6);
-				const tui = new TUI(terminal);
+				const tui = new TUI(terminal, true);
 				const transcript = new TestComponent();
 				const editor = new TestComponent();
 				const footer = new TestComponent();
 				transcript.lines = Array.from({ length: 20 }, (_, i) => `line-${i}`);
-				editor.lines = ["> prompt"];
+				editor.lines = [`> prompt${CURSOR_MARKER}`];
 				footer.lines = ["status"];
 				tui.addChild(transcript);
 				tui.addChild(editor);
@@ -321,6 +440,29 @@ describe("ledger engine golden", () => {
 				assert.ok(
 					!viewport.slice(0, -2).some((row) => row.includes("prompt") || row.includes("status")),
 					"pinned content must not also appear in the scrolling region",
+				);
+				assert.deepStrictEqual(
+					tui.hitTestScreenRow(4),
+					{ component: editor, rowWithinComponent: 0 },
+					"the editor's pinned screen row must hit the editor, not the historical frame row",
+				);
+				assert.deepStrictEqual(
+					tui.hitTestScreenRow(5),
+					{ component: footer, rowWithinComponent: 0 },
+					"the footer's pinned screen row must hit the footer",
+				);
+				assert.deepStrictEqual(
+					terminal.getCursorPosition(),
+					{ x: 8, y: 4 },
+					"the hardware cursor must follow the editor's pinned screen row",
+				);
+
+				assert.strictEqual(tui.beginTextSelection(3, 0), true);
+				assert.strictEqual(tui.updateTextSelection(4, 4), true);
+				assert.strictEqual(
+					tui.selectedText,
+					"line",
+					"dragging into pinned editor rows must stop at the visible transcript edge",
 				);
 
 				tui.stop();
@@ -389,7 +531,18 @@ describe("ledger engine golden", () => {
 					terminal.getViewport().at(-1)?.includes("line-16"),
 					`three rows back should end at line-16, got ${JSON.stringify(terminal.getViewport())}`,
 				);
+				assert.deepStrictEqual(tui.viewportScrollState, { offset: 3, maxOffset: 15 });
+				assert.strictEqual(tui.setViewportScrollOffset(8), true, "thumb drag must set an absolute offset");
+				await terminal.waitForRender();
+				assert.deepStrictEqual(tui.viewportScrollState, { offset: 8, maxOffset: 15 });
+				assert.ok(terminal.getViewport().at(-1)?.includes("line-11"));
+				assert.strictEqual(tui.scrollViewportBy(-8), true, "the inverse wheel delta must return to bottom-following");
+				await terminal.waitForRender();
+				assert.strictEqual(tui.viewportScrollOffset, 0);
+				assert.ok(terminal.getViewport().at(-1)?.includes("line-19"), "inverse scrolling must return to the newest row");
 
+				assert.strictEqual(tui.scrollViewportBy(3), true);
+				await terminal.waitForRender();
 				// Clamped at the top of the frame: 20 rows of frame, 5 of screen.
 				assert.strictEqual(tui.scrollViewportBy(999), true);
 				await terminal.waitForRender();
@@ -406,6 +559,207 @@ describe("ledger engine golden", () => {
 		});
 	});
 
+	it("selects and highlights fullscreen frame text across ANSI, CJK, ZWJ and rows", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(30, 4);
+			const tui = new TUI(terminal, undefined, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = ["old", "\x1b[31m甲乙\x1b[0m A👩‍💻B", "second row", "tail"];
+			tui.addChild(c);
+			tui.start();
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.beginTextSelection(1, 2), true);
+			assert.strictEqual(tui.updateTextSelection(2, 6), true);
+			await terminal.waitForRender();
+			assert.strictEqual(tui.selectedText, "乙 A👩‍💻B\nsecond");
+			assert.ok(terminal.getWrites().includes("\x1b[7m"), "selection must be visibly highlighted");
+
+			assert.strictEqual(tui.clearTextSelection(), true);
+			assert.strictEqual(tui.selectedText, "");
+			tui.stop();
+		});
+	});
+
+	it("atomically extends a selection across multiple fullscreen viewports", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(30, 5);
+			const tui = new TUI(terminal, undefined, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = Array.from({ length: 30 }, (_, i) => `row-${String(i).padStart(2, "0")}`);
+			tui.addChild(c);
+			tui.start();
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.beginTextSelection(4, 6), true);
+			for (let i = 0; i < 12; i++) {
+				assert.strictEqual(tui.scrollAndUpdateTextSelection(1, 0, 0), true);
+			}
+			assert.strictEqual(tui.viewportScrollOffset, 12);
+			assert.ok(tui.selectedText.startsWith("row-13"));
+			assert.ok(tui.selectedText.endsWith("row-29"));
+			assert.strictEqual(tui.selectedText.split("\n").length, 17);
+			tui.stop();
+		});
+	});
+
+	it("repaints a scrolled fullscreen window without re-emitting frame history", async () => {
+		await withLedger(async () => {
+			await withoutMultiplexer(async () => {
+				const terminal = new LoggingVirtualTerminal(80, 40, 20_000);
+				const tui = new TUI(terminal, undefined, { fullscreen: true });
+				const c = new TestComponent();
+				c.lines = Array.from({ length: 2_000 }, (_, i) => `history-${i}`);
+				tui.addChild(c);
+				tui.start();
+				await terminal.waitForRender();
+
+				const scrollbackBefore = terminal.getScrollbackLength();
+				terminal.clearWrites();
+				assert.strictEqual(tui.scrollViewportBy(3), true);
+				await terminal.waitForRender();
+
+				const writes = terminal.getWrites();
+				assert.ok(!writes.includes("history-0"), "scroll repaint must not write rows above the visible window");
+				assert.ok(
+					writes.split("\n").length - 1 <= terminal.rows,
+					`scroll repaint wrote more than one viewport: ${String(writes.split("\n").length - 1)} line feeds`,
+				);
+				assert.strictEqual(
+					terminal.getScrollbackLength(),
+					scrollbackBefore,
+					"moving the app viewport must not grow terminal scrollback",
+				);
+				assert.ok(terminal.getViewport().at(-1)?.includes("history-1996"));
+
+				terminal.clearWrites();
+				assert.strictEqual(tui.resetViewportScroll(), true);
+				await terminal.waitForRender();
+				assert.ok(!terminal.getWrites().includes("history-0"), "jumping to bottom must not replay frame history");
+				assert.strictEqual(
+					terminal.getScrollbackLength(),
+					scrollbackBefore,
+					"jumping to bottom must not grow terminal scrollback",
+				);
+				assert.ok(terminal.getViewport().at(-1)?.includes("history-1999"));
+
+				tui.stop();
+			});
+		});
+	});
+
+	it("paints only the current fullscreen window after a batched append", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 5, 20_000);
+			const tui = new TUI(terminal, true, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = Array.from({ length: 20 }, (_, i) => `row-${i}`);
+			tui.addChild(c);
+			const overlay: Component = { render: () => ["S"], invalidate: () => {} };
+			tui.showOverlay(overlay, { anchor: "top-right", width: 1, nonCapturing: true });
+			tui.start();
+			await terminal.waitForRender();
+
+			terminal.clearWrites();
+			c.lines = [...c.lines, ...Array.from({ length: 80 }, (_, i) => `batch-${i}`)];
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const writes = terminal.getWrites();
+			assert.ok(!writes.includes("row-15"), "batched append must not replay the previous off-screen seam");
+			assert.ok(!writes.includes("batch-0"), "batched append must not replay newly committed off-screen rows");
+			assert.ok(writes.includes("batch-79"), "current viewport must include the newest row");
+			assert.ok(
+				writes.split("\n").length - 1 <= terminal.rows,
+				`batched append wrote more than one viewport: ${String(writes.split("\n").length - 1)} line feeds`,
+			);
+			assert.strictEqual(terminal.getScrollbackLength(), 0);
+			tui.stop();
+		});
+	});
+
+	it("keeps wheel and scrollbar offsets synchronized through 100 fullscreen updates", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(80, 24, 20_000);
+			const tui = new TUI(terminal, true, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = Array.from({ length: 1_000 }, (_, i) => `stress-${i}`);
+			tui.addChild(c);
+			tui.start();
+			await terminal.waitForRender();
+
+			const terminalHistory = terminal.getScrollbackLength();
+			for (let cycle = 0; cycle < 100; cycle++) {
+				terminal.clearWrites();
+				const offset = cycle % 2 === 0 ? 12 : 3;
+				assert.strictEqual(tui.setViewportScrollOffset(offset), true);
+				if (cycle % 10 === 0) c.lines.push(`stream-${cycle}`);
+				tui.requestRender();
+				await terminal.waitForRender();
+
+				const expectedOffset = offset + (cycle % 10 === 0 ? 1 : 0);
+				assert.strictEqual(
+					tui.viewportScrollState.offset,
+					expectedOffset,
+					"thumb state must track the anchored viewport, including newly streamed rows",
+				);
+				const writes = terminal.getWrites();
+				assert.ok(!writes.includes("stress-0"), `cycle ${cycle} replayed frame history above the viewport`);
+				assert.ok(
+					writes.split("\n").length - 1 <= terminal.rows,
+					`cycle ${cycle} wrote more than one viewport`,
+				);
+				assert.strictEqual(
+					terminal.getScrollbackLength(),
+					terminalHistory,
+					`cycle ${cycle} grew native scrollback`,
+				);
+			}
+
+			assert.strictEqual(tui.resetViewportScroll(), true);
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportScrollState.offset, 0);
+			assert.ok(terminal.getViewport().at(-1)?.includes("stream-90"));
+			tui.stop();
+			assert.ok(terminal.getWrites().includes("\x1b[?1049l"), "stress cleanup must leave fullscreen mode");
+		});
+	});
+
+	it("composites scrollbar overlays with the frame geometry being painted", async () => {
+		await withLedger(async () => {
+			const terminal = new LoggingVirtualTerminal(40, 5);
+			const tui = new TUI(terminal, true, { fullscreen: true });
+			const c = new TestComponent();
+			c.lines = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+			tui.addChild(c);
+			const observed: { offset: number; maxOffset: number }[] = [];
+			const overlay: Component = {
+				render: () => {
+					const state = tui.viewportScrollState;
+					observed.push(state);
+					return [String(state.maxOffset % 10)];
+				},
+				invalidate: () => {},
+			};
+			tui.showOverlay(overlay, { anchor: "top-right", width: 1, nonCapturing: true });
+			tui.start();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(observed.at(-1), { offset: 0, maxOffset: 15 });
+			assert.strictEqual(terminal.getViewport()[0]?.at(-1), "5");
+
+			c.lines.push("line-20");
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(observed.at(-1), { offset: 0, maxOffset: 16 }, "append overlay must see the new frame length");
+			assert.strictEqual(terminal.getViewport()[0]?.at(-1), "6", "painted overlay must match the appended frame");
+
+			terminal.resize(40, 6);
+			await terminal.waitForRender();
+			assert.deepStrictEqual(observed.at(-1), { offset: 0, maxOffset: 15 }, "resize overlay must see the new viewport height");
+			assert.strictEqual(terminal.getViewport()[0]?.at(-1), "5", "painted overlay must match the resized viewport");
+			tui.stop();
+		});
+	});
 
 	it("commits appended rows and repaints window on streaming append", async () => {
 		await withLedger(async () => {

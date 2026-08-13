@@ -291,11 +291,17 @@ export class Container implements Component {
 	}
 }
 
+export interface TUIOptions {
+	/** Own the terminal viewport in the alternate screen and keep scrollback virtual. */
+	fullscreen?: boolean;
+}
+
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
 export class TUI extends Container {
 	public terminal: Terminal;
+	private readonly fullscreen: boolean;
 	private previousLines: string[] = [];
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
@@ -317,18 +323,12 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private ledgerEngine: LedgerTuiEngine | undefined;
-	// Read at access time (not module load) so tests can toggle the engine at
-	// runtime via PI_TUI_ENGINE. The legacy-vs-ledger decision must follow the
-	// env var live, otherwise a helper that sets the env inside the test body
-	// would never actually activate the ledger engine.
-	//
-	// NOT defaulted on: the ledger engine's overlay compositing is broken
-	// (37 test failures across overlay rendering order/position/truncation
-	// when this was flipped to default on 2026-07-24 -- see
-	// .trellis/tasks/07-24-tui-render-fix-scroll-yank). Phase C Task 5/6/7
-	// were never finished either. Opt in for testing via PI_TUI_ENGINE=ledger.
-	private static get LEDGER_ENABLED(): boolean {
-		return process.env["PI_TUI_ENGINE"] !== "legacy";
+	// Fullscreen is a ledger-owned virtual surface and cannot fall back to the
+	// legacy renderer: managed scrolling, selection, and overlays all depend on
+	// its single absolute scroll state. Normal-screen callers may still opt into
+	// the legacy engine for compatibility.
+	private get ledgerEnabled(): boolean {
+		return this.fullscreen || process.env["PI_TUI_ENGINE"] !== "legacy";
 	}
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -341,16 +341,17 @@ export class TUI extends Container {
 	private overlayStack: OverlayStackEntry[] = [];
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
 
-	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
+	constructor(terminal: Terminal, showHardwareCursor?: boolean, options: TUIOptions = {}) {
 		super();
 		this.terminal = terminal;
+		this.fullscreen = options.fullscreen ?? false;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
 	}
 
 	get fullRedraws(): number {
-		return TUI.LEDGER_ENABLED && this.ledgerEngine ? this.ledgerEngine.fullRedraws : this.fullRedrawCount;
+		return this.ledgerEnabled && this.ledgerEngine ? this.ledgerEngine.fullRedraws : this.fullRedrawCount;
 	}
 
 	getShowHardwareCursor(): boolean {
@@ -360,6 +361,7 @@ export class TUI extends Container {
 	setShowHardwareCursor(enabled: boolean): void {
 		if (this.showHardwareCursor === enabled) return;
 		this.showHardwareCursor = enabled;
+		this.ledgerEngine?.setShowHardwareCursor(enabled);
 		if (!enabled) {
 			this.terminal.hideCursor();
 		}
@@ -658,6 +660,12 @@ export class TUI extends Container {
 				this.requestRender();
 			},
 		);
+		if (this.ledgerEnabled) {
+			this.getLedgerEngine().start();
+			// A restarted fullscreen session enters a fresh, empty alternate buffer;
+			// invalidate terminal-screen paint state while retaining virtual history.
+			if (this.fullscreen) this.getLedgerEngine().requestFullPaint(true);
+		}
 		this.attachProbeRefresh();
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -676,7 +684,7 @@ export class TUI extends Container {
 		const probeReady = this.terminal.probeReady;
 		if (!probeReady) return;
 		void probeReady.then(() => {
-			if (this.stopped) return;
+			if (this.stopped || this.terminal.probeReady !== probeReady) return;
 			this.ledgerEngine?.refreshSyncFraming();
 			this.requestRender();
 		}).catch(() => {});
@@ -726,12 +734,15 @@ export class TUI extends Container {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
 		}
+		this.renderRequested = false;
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
-		// Move cursor to the end of the content to prevent overwriting/artifacts on exit
-		if (TUI.LEDGER_ENABLED && this.ledgerEngine) {
-			this.ledgerEngine.parkCursorForExit();
+		// Normal-screen rendering parks after the content; fullscreen rendering
+		// restores the saved screen before making the terminal cursor visible.
+		if (this.ledgerEnabled && this.ledgerEngine) {
+			if (this.fullscreen) this.ledgerEngine.stop();
+			else this.ledgerEngine.parkCursorForExit();
 		} else if (this.previousLines.length > 0) {
 			const targetRow = this.previousLines.length; // Line after the last content
 			const lineDiff = targetRow - this.hardwareCursorRow;
@@ -744,7 +755,7 @@ export class TUI extends Container {
 		}
 
 		this.terminal.showCursor();
-		this.ledgerEngine?.stop();
+		if (!this.fullscreen) this.ledgerEngine?.stop();
 		this.terminal.stop();
 	}
 
@@ -754,10 +765,50 @@ export class TUI extends Container {
 	 * wheel event at the end of the scrollback costs no repaint.
 	 */
 	scrollViewportBy(delta: number): boolean {
-		if (!TUI.LEDGER_ENABLED) return false;
+		if (!this.ledgerEnabled) return false;
 		const changed = this.getLedgerEngine().scrollBy(delta);
 		if (changed) this.requestRender();
 		return changed;
+	}
+
+	setViewportScrollOffset(offset: number): boolean {
+		if (!this.ledgerEnabled) return false;
+		const changed = this.getLedgerEngine().setScrollOffset(offset);
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	beginTextSelection(screenRow: number, column: number): boolean {
+		if (!this.ledgerEnabled) return false;
+		const changed = this.getLedgerEngine().beginSelection(screenRow, column);
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	updateTextSelection(screenRow: number, column: number): boolean {
+		if (!this.ledgerEnabled) return false;
+		const changed = this.getLedgerEngine().updateSelection(screenRow, column);
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	scrollAndUpdateTextSelection(delta: number, screenRow: number, column: number): boolean {
+		if (!this.ledgerEnabled) return false;
+		const changed = this.getLedgerEngine().scrollAndUpdateSelection(delta, screenRow, column);
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	clearTextSelection(): boolean {
+		if (!this.ledgerEnabled) return false;
+		const changed = this.getLedgerEngine().clearSelection();
+		if (changed) this.requestRender();
+		return changed;
+	}
+
+	get selectedText(): string {
+		if (!this.ledgerEnabled) return "";
+		return this.getLedgerEngine().selectedText;
 	}
 
 	/**
@@ -765,7 +816,7 @@ export class TUI extends Container {
 	 * row's offset within that component. Used for mouse hit testing.
 	 */
 	hitTestScreenRow(screenRow: number): { component: Component; rowWithinComponent: number } | undefined {
-		if (!TUI.LEDGER_ENABLED) return undefined;
+		if (!this.ledgerEnabled) return undefined;
 		return this.getLedgerEngine().hitTestScreenRow(screenRow);
 	}
 
@@ -775,19 +826,23 @@ export class TUI extends Container {
 	 * the input line and status bar, which are unusable once out of view.
 	 */
 	setPinnedBottomComponents(components: readonly Component[]): void {
-		if (!TUI.LEDGER_ENABLED) return;
+		if (!this.ledgerEnabled) return;
 		this.getLedgerEngine().setPinnedBottomComponents(components);
 	}
 
 	/** Rows the viewport is currently scrolled back by; 0 means bottom-following. */
 	get viewportScrollOffset(): number {
-		if (!TUI.LEDGER_ENABLED) return 0;
-		return this.getLedgerEngine().userScrollOffset;
+		return this.viewportScrollState.offset;
+	}
+
+	get viewportScrollState(): { offset: number; maxOffset: number } {
+		if (!this.ledgerEnabled) return { offset: 0, maxOffset: 0 };
+		return this.getLedgerEngine().scrollState;
 	}
 
 	/** Resumes bottom-following after the user has scrolled back. */
 	resetViewportScroll(): boolean {
-		if (!TUI.LEDGER_ENABLED) return false;
+		if (!this.ledgerEnabled) return false;
 		const changed = this.getLedgerEngine().resetScroll();
 		if (changed) this.requestRender();
 		return changed;
@@ -795,13 +850,13 @@ export class TUI extends Container {
 
 	/** Resynchronize ledger rendering after a caller writes directly to the terminal. */
 	notifyExternalOutput(): void {
-		if (TUI.LEDGER_ENABLED) this.getLedgerEngine().requestFullPaint(false);
+		if (this.ledgerEnabled) this.getLedgerEngine().requestFullPaint(false);
 		this.requestRender();
 	}
 
 	requestRender(force = false): void {
 		if (force) {
-			if (TUI.LEDGER_ENABLED) {
+			if (this.ledgerEnabled) {
 				this.getLedgerEngine().requestFullPaint(true);
 			}
 			this.previousLines = [];
@@ -1752,6 +1807,8 @@ export class TUI extends Container {
 				() => this.children,
 				this.resolveTerminalCapabilities(),
 				(window, width, height) => this.compositeOverlaysOntoWindow(window, width, height),
+				this.showHardwareCursor,
+				this.fullscreen,
 			);
 		}
 		return this.ledgerEngine;
@@ -1769,7 +1826,7 @@ export class TUI extends Container {
 	}
 
 	private doRender(): void {
-		if (TUI.LEDGER_ENABLED) {
+		if (this.ledgerEnabled) {
 			this.getLedgerEngine().doRender();
 		} else {
 			this.doRenderLegacy();

@@ -87,7 +87,10 @@ const OSC11_PATTERN =
  *   one deviation from OMP (which has no ceiling): it guarantees the promise
  *   resolves even on a terminal that ignores `CSI c` itself.
  */
-export async function probeCapabilities(io: ProbeIO, opts?: { timeoutMs?: number }): Promise<ProbeResult> {
+export async function probeCapabilities(
+	io: ProbeIO,
+	opts?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<ProbeResult> {
 	const timeoutMs = opts?.timeoutMs ?? 300;
 
 	const keyboard = createDeferred<boolean>();
@@ -99,6 +102,18 @@ export async function probeCapabilities(io: ProbeIO, opts?: { timeoutMs?: number
 	const fifo: Da1SentinelOwner[] = [];
 	let replyBuffer = "";
 	const timers: ReturnType<typeof setTimeout>[] = [];
+	let off: (() => void) | undefined;
+
+	const cancel = (): void => {
+		off?.();
+		for (const timer of timers) clearTimeout(timer);
+		keyboard.resolve(false);
+		background.resolve(undefined);
+		mode2026.resolve(undefined);
+		mode2048.resolve(undefined);
+		mode2031.resolve(undefined);
+	};
+	const signal = opts?.signal;
 
 	const resolveMode = (mode: number, value: boolean | undefined): void => {
 		if (mode === 2026) mode2026.resolve(value);
@@ -241,9 +256,12 @@ export async function probeCapabilities(io: ProbeIO, opts?: { timeoutMs?: number
 	};
 
 	// Subscribe BEFORE writing so a fast terminal cannot race the listener.
-	const off = io.onReply(onChunk);
+	off = io.onReply(onChunk);
+	signal?.addEventListener("abort", cancel, { once: true });
+	if (signal?.aborted) cancel();
 	try {
 		const send = (owner: Da1SentinelOwner, data: string, onTimeout: () => void): void => {
+			if (signal?.aborted) return;
 			fifo.push(owner);
 			io.write(data);
 			timers.push(setTimeout(onTimeout, timeoutMs));
@@ -263,7 +281,8 @@ export async function probeCapabilities(io: ProbeIO, opts?: { timeoutMs?: number
 		]);
 		return { kittyKeyboard, syncOutput, inBandResize, appearancePush, background: bg };
 	} finally {
-		off();
+		off?.();
+		signal?.removeEventListener("abort", cancel);
 		for (const timer of timers) clearTimeout(timer);
 	}
 }

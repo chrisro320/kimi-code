@@ -109,9 +109,10 @@ export {
 	type OverlayUnfocusOptions,
 	type SizeValue,
 	TUI,
+	type TUIOptions,
 } from "./tui.ts";
 // Utilities
-export { sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
+export { highlightByColumn, sliceByColumn, stripAnsi, textByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
 // Ledger scrollback seam types
 export type {
 	NativeScrollbackCommittedRows,

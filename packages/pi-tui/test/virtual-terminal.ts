@@ -15,7 +15,7 @@ export class VirtualTerminal implements Terminal {
 	private _columns: number;
 	private _rows: number;
 
-	constructor(columns = 80, rows = 24) {
+	constructor(columns = 80, rows = 24, scrollback = 1000) {
 		this._columns = columns;
 		this._rows = rows;
 
@@ -23,6 +23,7 @@ export class VirtualTerminal implements Terminal {
 		this.xterm = new XtermTerminal({
 			cols: columns,
 			rows: rows,
+			scrollback,
 			// Disable all interactive features for testing
 			disableStdin: true,
 			allowProposedApi: true,
@@ -147,6 +148,11 @@ export class VirtualTerminal implements Terminal {
 	 */
 	getScrollPosition(): number {
 		return this.xterm.buffer.active.viewportY;
+	}
+
+	/** Number of rows above the active viewport in the current screen buffer. */
+	getScrollbackLength(): number {
+		return this.xterm.buffer.active.baseY;
 	}
 
 	/**
