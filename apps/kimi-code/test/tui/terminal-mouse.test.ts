@@ -103,7 +103,13 @@ describe('terminal mouse tracking', () => {
 describe('viewport scroll controls', () => {
   function createState() {
     const listeners: Array<(data: string) => { consume: true } | undefined> = [];
-    const placeCursorAtComponentRow = vi.fn(() => true);
+    const beginSelectionAtComponentRow = vi.fn(() => true);
+    const extendSelectionToComponentRow = vi.fn(() => true);
+    let editorSelectedText = '';
+    const setEditorSelectedText = (text: string) => {
+      editorSelectedText = text;
+    };
+    const getSelectedText = vi.fn(() => editorSelectedText);
     const requestRender = vi.fn();
     const jumpToBottom = { id: 'jump-to-bottom' };
     const editorContainer = { id: 'editor-container' };
@@ -137,7 +143,7 @@ describe('viewport scroll controls', () => {
       terminal: { write: vi.fn(), columns: 80, rows: 10 },
       jumpToBottom,
       editorContainer,
-      editor: { placeCursorAtComponentRow },
+      editor: { beginSelectionAtComponentRow, extendSelectionToComponentRow, getSelectedText },
       ui: {
         addInputListener: vi.fn((listener) => {
           listeners.push(listener);
@@ -174,7 +180,10 @@ describe('viewport scroll controls', () => {
       scrollAndUpdateTextSelection,
       clearTextSelection,
       setSelectedText,
-      placeCursorAtComponentRow,
+      beginSelectionAtComponentRow,
+      extendSelectionToComponentRow,
+      getSelectedText,
+      setEditorSelectedText,
       requestRender,
       jumpToBottom,
       editorContainer,
@@ -224,8 +233,8 @@ describe('viewport scroll controls', () => {
     expect(resetViewportScroll).toHaveBeenCalledOnce();
   });
 
-  it('routes a left click inside the editor to a cursor placement', () => {
-    const { state, listeners, placeCursorAtComponentRow, requestRender, editorContainer, setHit } = createState();
+  it('routes a left click inside the editor to a cursor placement with a selection anchor', () => {
+    const { state, listeners, beginSelectionAtComponentRow, requestRender, editorContainer, setHit } = createState();
     installViewportScrollControls(state);
     const mouseListener = listeners[0];
 
@@ -233,8 +242,53 @@ describe('viewport scroll controls', () => {
     // Row 7, column 9 in the terminal's 1-based reporting.
     mouseListener?.('\u001B[<0;9;7M');
     // Column loses the 1-based offset and the gutter inset (CHROME_GUTTER = 1).
-    expect(placeCursorAtComponentRow).toHaveBeenCalledWith(2, 7);
+    expect(beginSelectionAtComponentRow).toHaveBeenCalledWith(2, 7);
     expect(requestRender).toHaveBeenCalledOnce();
+  });
+
+  it('extends an editor selection on drag and copies the selected text on release', () => {
+    const {
+      state,
+      listeners,
+      beginSelectionAtComponentRow,
+      extendSelectionToComponentRow,
+      getSelectedText,
+      setEditorSelectedText,
+      beginTextSelection,
+      editorContainer,
+      setHit,
+    } = createState();
+    const copyText = vi.fn();
+    installViewportScrollControls(state, { copyText });
+    const mouseListener = listeners[0];
+
+    setHit({ component: editorContainer, rowWithinComponent: 1 });
+    setEditorSelectedText('十分');
+    // Press, drag two columns right, release — all inside the editor's rows.
+    mouseListener?.('\u001B[<0;9;7M');
+    mouseListener?.('\u001B[<32;11;7M');
+    mouseListener?.('\u001B[<0;11;7m');
+
+    expect(beginSelectionAtComponentRow).toHaveBeenCalledWith(1, 7);
+    expect(extendSelectionToComponentRow).toHaveBeenCalledWith(1, 9);
+    expect(getSelectedText).toHaveBeenCalled();
+    expect(copyText).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledWith('十分');
+    // The transcript frame selection must stay out of editor drags.
+    expect(beginTextSelection).not.toHaveBeenCalled();
+  });
+
+  it('does not copy when an editor drag ends with an empty selection', () => {
+    const { state, listeners, editorContainer, setHit } = createState();
+    const copyText = vi.fn();
+    installViewportScrollControls(state, { copyText });
+    const mouseListener = listeners[0];
+
+    setHit({ component: editorContainer, rowWithinComponent: 1 });
+    mouseListener?.('\u001B[<0;9;7M');
+    mouseListener?.('\u001B[<0;9;7m');
+
+    expect(copyText).not.toHaveBeenCalled();
   });
 
   it('selects transcript text directly and copies it on release', () => {
@@ -244,7 +298,7 @@ describe('viewport scroll controls', () => {
       beginTextSelection,
       updateTextSelection,
       setSelectedText,
-      placeCursorAtComponentRow,
+      beginSelectionAtComponentRow,
       setHit,
     } = createState();
     const copyText = vi.fn();
@@ -262,7 +316,7 @@ describe('viewport scroll controls', () => {
     expect(updateTextSelection).toHaveBeenNthCalledWith(2, 7, 12);
     expect(copyText).toHaveBeenCalledOnce();
     expect(copyText).toHaveBeenCalledWith('甲乙\nsecond');
-    expect(placeCursorAtComponentRow).not.toHaveBeenCalled();
+    expect(beginSelectionAtComponentRow).not.toHaveBeenCalled();
   });
 
   it('atomically auto-scrolls across multiple viewports while held at an edge', () => {
@@ -299,14 +353,14 @@ describe('viewport scroll controls', () => {
   });
 
   it('ignores non-left buttons inside the editor', () => {
-    const { state, listeners, beginTextSelection, placeCursorAtComponentRow, setHit } = createState();
+    const { state, listeners, beginTextSelection, beginSelectionAtComponentRow, setHit } = createState();
     installViewportScrollControls(state);
     const mouseListener = listeners[0];
 
     setHit({ component: state.editorContainer, rowWithinComponent: 1 });
     mouseListener?.('\u001B[<2;9;7M');
 
-    expect(placeCursorAtComponentRow).not.toHaveBeenCalled();
+    expect(beginSelectionAtComponentRow).not.toHaveBeenCalled();
     expect(beginTextSelection).not.toHaveBeenCalled();
   });
 

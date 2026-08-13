@@ -137,6 +137,7 @@ export function installViewportScrollControls(
 ): () => void {
   let scrollbarDragOffset: number | undefined;
   let selecting = false;
+  let editorSelecting = false;
   let selectionAutoscrollTimer: ReturnType<typeof setInterval> | undefined;
   let selectionEdge: { delta: number; screenRow: number; column: number } | undefined;
   const copyText = options.copyText ?? copyTextToClipboard;
@@ -186,6 +187,14 @@ export function installViewportScrollControls(
     }
     if (event.kind === 'release') {
       scrollbarDragOffset = undefined;
+      if (editorSelecting) {
+        editorSelecting = false;
+        // The editor keeps the highlight painted so the user can see what
+        // landed on the clipboard; the next keystroke or click clears it.
+        const text = state.editor.getSelectedText();
+        if (text.length > 0) void Promise.resolve(copyText(text)).catch(() => {});
+        return;
+      }
       if (selecting) {
         const screenRow = Math.max(0, Math.min(state.terminal.rows - 1, event.row - 1));
         const screenColumn = Math.max(0, event.column - 1);
@@ -207,6 +216,18 @@ export function installViewportScrollControls(
     if (event.kind === 'move') {
       if (scrollbarDragOffset !== undefined && event.button === 'left') dragScrollbar(event.row);
       else if (selecting && event.button === 'left') updateSelection(event.row, event.column);
+      else if (editorSelecting && event.button === 'left') {
+        // A drag that leaves the editor's rows freezes at the last position
+        // until it re-enters; the editor clamps border-row overshoot itself.
+        const moveHit = state.ui.hitTestScreenRow(event.row - 1);
+        if (moveHit?.component === state.editorContainer) {
+          const extended = state.editor.extendSelectionToComponentRow(
+            moveHit.rowWithinComponent,
+            event.column - 1 - CHROME_GUTTER,
+          );
+          if (extended) state.ui.requestRender();
+        }
+      }
       return;
     }
     if (event.button !== 'left') return;
@@ -235,8 +256,12 @@ export function installViewportScrollControls(
     const hit = state.ui.hitTestScreenRow(event.row - 1);
     if (hit?.component === state.editorContainer) {
       // The editor sits inside a gutter container, so the click column has to
-      // lose the left inset before the editor can resolve it.
-      const placed = state.editor.placeCursorAtComponentRow(hit.rowWithinComponent, event.column - 1 - CHROME_GUTTER);
+      // lose the left inset before the editor can resolve it. The press both
+      // places the cursor and anchors a mouse selection that a following drag
+      // extends; without this the captured mouse would leave the input box
+      // with no way to select text at all.
+      const placed = state.editor.beginSelectionAtComponentRow(hit.rowWithinComponent, event.column - 1 - CHROME_GUTTER);
+      editorSelecting = placed;
       if (placed) state.ui.requestRender();
       return;
     }
@@ -252,6 +277,7 @@ export function installViewportScrollControls(
 
   return () => {
     selecting = false;
+    editorSelecting = false;
     stopSelectionAutoscroll();
     disposeKeys();
     disposeMouse();
