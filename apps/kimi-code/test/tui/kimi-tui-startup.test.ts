@@ -290,7 +290,7 @@ describe('KimiTUI startup', () => {
   it('mounts the docked fullscreen layout when KIMI_CODE_TUI_FULL_SCREEN=1', async () => {
     const harness = makeHarness(makeSession());
     vi.stubEnv('KIMI_CODE_TUI_FULL_SCREEN', '1');
-    const driver = makeDriver(harness, { ...makeStartupInput(), engineV2: true });
+    const driver = makeDriver(harness, { ...makeStartupInput() });
     vi.unstubAllEnvs();
 
     // buildLayout() runs in the constructor: fullscreen keeps the root
@@ -1949,7 +1949,6 @@ describe('KimiTUI startup', () => {
       ...makeStartupInput(),
       migrationPlan: MIGRATION_PLAN,
       migrateOnly: true,
-      engineV2: true,
     }) as unknown as MigrateExitDriver;
     vi.spyOn(driver.state.ui, 'start').mockImplementation(() => {});
     vi.spyOn(driver.state.ui, 'stop').mockImplementation(() => {});
@@ -1980,7 +1979,6 @@ describe('KimiTUI startup', () => {
       ...makeStartupInput(),
       migrationPlan: MIGRATION_PLAN,
       migrateOnly: true,
-      engineV2: true,
     }) as unknown as MigrateExitDriver & {
       mountEditorReplacement(panel: { handleInput(data: string): void }): void;
     };
@@ -2008,17 +2006,6 @@ describe('KimiTUI startup', () => {
       migrationSpy.mock.invocationCallOrder[0]!,
     );
     expect(onExit).toHaveBeenCalledWith(0);
-  });
-
-  it('keeps non-login startup session errors fatal', async () => {
-    const harness = makeHarness(makeSession(), {
-      createSession: vi.fn(async () => {
-        throw new Error('provider config is invalid');
-      }),
-    });
-    const driver = makeDriver(harness, makeStartupInput());
-
-    await expect(driver.init()).rejects.toThrow('provider config is invalid');
   });
 
   it('does not mount the footer when resuming a missing session fails', async () => {

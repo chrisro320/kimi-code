@@ -1265,7 +1265,7 @@ describe('Agent tool execution contract', () => {
     );
   });
 
-  it('falls back to the binding thinking when the routing entry sets only a model', async () => {
+  it('falls back to natural thinking when the routing entry sets only a model', async () => {
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     ctx = createTestAgent(
       sessionService(IAgentLifecycleService, lifecycle),
@@ -1275,7 +1275,10 @@ describe('Agent tool execution contract', () => {
       secondaryModelFlags(),
       {
         initialConfig: {
-          secondaryModel: { model: 'provider/secondary', defaultEffort: 'low' },
+          secondaryModel: {
+            defaultModel: 'provider/secondary',
+            models: { 'provider/secondary': 'secondary pool entry' },
+          },
           models: {
             'provider/routed': {
               provider: 'test-provider',
@@ -1286,7 +1289,8 @@ describe('Agent tool execution contract', () => {
           subagent: {
             routing: {
               // No thinkingEffort here: D-B5R-5 per-field override — the
-              // route wins the model, the binding keeps its thinking.
+              // route wins the model. Pool bindings carry no thinking level
+              // (upstream pool semantics), so thinking resolves naturally.
               coder: { backend: 'kimi', model: 'provider/routed' },
             },
           },
@@ -1304,7 +1308,7 @@ describe('Agent tool execution contract', () => {
       expect.objectContaining({
         binding: expect.objectContaining({
           model: 'provider/routed',
-          thinking: 'low',
+          thinking: undefined,
         }),
       }),
     );
@@ -1312,9 +1316,16 @@ describe('Agent tool execution contract', () => {
 
   it('binds the pointed entry directly with natural thinking when the recipe has no patch', async () => {
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
-    const context = createAgentToolContext(lifecycle, secondaryModelFlags(), {
-      initialConfig: { secondaryModel: { model: 'provider/secondary' } },
-    });
+    const context = createAgentToolContext(
+      lifecycle,
+      secondaryModelFlags(),
+      // The default catalog stub only resolves mock/fast/smart; the legacy
+      // `model` key below points at provider/secondary, so widen the stub.
+      modelProviderServices(modelCatalogResolving('mock-model', 'provider/fast', 'provider/smart', 'provider/secondary')),
+      {
+        initialConfig: { secondaryModel: { model: 'provider/secondary' } },
+      },
+    );
 
     await executeAgentTool(context, {
       prompt: 'Investigate',

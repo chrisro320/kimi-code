@@ -307,6 +307,7 @@ describe('EditorKeyboardController external editor lifecycle', () => {
         externalEditorRunning: false,
         activeDialog: null,
         appState: { editorCommand: 'test-editor', streamingPhase: 'idle', isCompacting: false },
+        terminalState: { progressActive: false },
         footer: { setTransientHint: vi.fn() },
         ui: {
           setFocus: vi.fn(() => order.push('focus')),
@@ -320,6 +321,7 @@ describe('EditorKeyboardController external editor lifecycle', () => {
       }),
       suspendTerminalUi: vi.fn(() => order.push('suspend')),
       resumeTerminalUi: vi.fn(() => order.push('resume')),
+      updateActivityPane: vi.fn(),
       track: vi.fn(),
       showError: vi.fn(),
     } as unknown as EditorKeyboardHost;

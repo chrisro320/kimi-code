@@ -258,6 +258,10 @@ describe("VS Code replay from a public Node SDK resume state", () => {
                   description: "inspect workspace",
                   subagent_type: "coder",
                   run_in_background: false,
+                  // Fork enforcement: an editing-capable dispatch is rejected
+                  // without a scope (resolveEditingDispatchScope), so the
+                  // fake provider must declare one for the child to run.
+                  dispatch: { scope: ["*"] },
                 }),
               },
             }],
