@@ -108,7 +108,6 @@
 import { z } from 'zod';
 
 import { Error2, ErrorCodes, isError2 } from '#/errors';
-import type { AgentModelPreference } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import {
   camelToSnake,
   cloneRecord,
@@ -344,8 +343,6 @@ export type SubagentIsolationMode = 'strict' | 'best-effort';
 export function resolveSubagentIsolationMode(config: IConfigService): SubagentIsolationMode {
   return config.get<SubagentConfig | undefined>(SUBAGENT_SECTION)?.isolation ?? 'best-effort';
 }
-
-export type SubagentModelChoice = AgentModelPreference;
 
 export const PRIMARY_SUBAGENT_MODEL_CHOICE = 'primary';
 

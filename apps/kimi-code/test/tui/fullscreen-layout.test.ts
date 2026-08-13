@@ -30,6 +30,7 @@ function fakeInitialAppState(): AppState {
     additionalDirs: [],
     sessionId: 'sess-1',
     permissionMode: 'manual',
+    dispatchMode: 'auto',
     planMode: false,
     inputMode: 'prompt',
     swarmMode: false,

@@ -2415,6 +2415,7 @@ describe('AgentGoalService background task waiting', () => {
     await loopService.hooks.onWillBeginStep.run({
       turnId: turn.id,
       step: 1,
+      firstStepOfTurn: true,
       signal: turn.signal,
     });
     return turn;

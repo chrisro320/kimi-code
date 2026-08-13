@@ -50,7 +50,6 @@ import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAg
 import { ISessionSubagentService, type AgentRunHandle } from '#/session/subagent/subagent';
 import {
   resolveSubagentIsolationMode,
-  subagentDisplayModel,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { SUBAGENT_WORKTREE_ISOLATION_FLAG_ID } from '#/session/subagent/flag';
@@ -69,6 +68,7 @@ import { isEditingCapableCatalogProfile } from '#/agent/dispatch/profile';
 import { resolveEditingDispatchScope } from '#/agent/dispatch/scope';
 import { IFlagService } from '#/app/flag/flag';
 import { IGitService } from '#/app/git/git';
+import { IConfigService } from '#/app/config/config';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
 import {
@@ -353,7 +353,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         // `final.model`, not `binding.model`: a [subagent.routing.<profile>]
         // route overrides the binding, and the label has to name the model the
         // subagent actually runs on.
-        model: subagentDisplayModel(this.config, final.model),
+        model: final.model,
       });
       const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
         cwd: worktree?.cwd ?? callerCwd,

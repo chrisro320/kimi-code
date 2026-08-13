@@ -10,13 +10,13 @@
  * under TaskList/TaskOutput/TaskStop when `run_in_background=true` or after
  * detach), and terminal text formatting.
  *
- * Spawn bindings use the explicit tool `model` choice first, then the target
- * profile's symbolic model preference, before `resolveSubagentBinding` falls
- * back to the configured `[secondary_model.models]` pool default or the
- * caller's model; with `[secondary_model].force` set the `model` parameter is
- * not advertised and every spawn binds `default_model`. The pool is gated
- * behind the `secondary-model` experiment (via `IFlagService`): while it is
- * off the `model` parameter is stripped and every spawn inherits the caller's
+ * Spawn bindings use the explicit tool `model` choice first, before
+ * `resolveSubagentBinding` falls back to the configured
+ * `[secondary_model.models]` pool default or the caller's model; with
+ * `[secondary_model].force` set the `model` parameter is not advertised and
+ * every spawn binds `default_model`. The pool is gated behind the
+ * `secondary-model` experiment (via `IFlagService`): while it is off the
+ * `model` parameter is stripped and every spawn inherits the caller's
  * model. Configured profile routing (`[subagent.routing.<profile>]` or a
  * `[[subagent.pools.<profile>]]` route pool, resolved via
  * `ISessionSubagentRoutingService`) wins over all of these; a pool slot is
@@ -382,7 +382,7 @@ export class SubagentTool implements ISubagentTool {
           this.config,
           this.flags,
           { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-          args.model ?? profile.modelPreference,
+          args.model,
         );
         const final =
           spawnRoute === undefined
@@ -428,7 +428,7 @@ export class SubagentTool implements ISubagentTool {
         // `final.model`, not `binding.model`: a [subagent.routing.<profile>]
         // route overrides the binding, and the label has to name the model the
         // subagent actually runs on.
-        displayModel = subagentDisplayModel(this.config, final.model);
+        displayModel = final.model;
         promptText = await applyProfilePromptPrefix(profile, args.prompt, {
           cwd: this.workspace.workDir,
           runner: this.processRunner,

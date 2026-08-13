@@ -1193,7 +1193,6 @@ export class KimiTUI {
       return;
     }
     this.state.ui.addChild(footerWrap);
-    this.state.ui.setPinnedBottomComponents([this.state.editorContainer, footerWrap]);
   }
 
   // Fullscreen exit: leave the alternate screen with the frame preserved,

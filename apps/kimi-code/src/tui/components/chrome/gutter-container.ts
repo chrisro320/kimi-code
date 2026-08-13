@@ -43,10 +43,6 @@ export class GutterContainer extends Container {
     super.invalidate();
   }
 
-  protected onChildRendered(_child: Component, _startRow: number, _lineCount: number): void {
-    // no-op by default; subclasses (TranscriptContainer) override to observe layout
-  }
-
   override render(width: number): string[] {
     const inner = Math.max(1, width - this.leftPad - this.rightPad);
     const lead = ' '.repeat(this.leftPad);
@@ -64,7 +60,6 @@ export class GutterContainer extends Container {
     let allReused = cacheValid;
 
     let i = 0;
-    let rowOffset = 0;
     for (const child of this.children) {
       const lines = child.render(inner);
       childRefs.push(child);
@@ -78,8 +73,6 @@ export class GutterContainer extends Container {
         // renderer's prompt navigation, so the gutter goes after them.
         prefixed.push(lines.map((line) => prefixPreservingOsc133Zone(line, lead)));
       }
-      this.onChildRendered(child, rowOffset, lines.length);
-      rowOffset += lines.length;
       i++;
     }
 

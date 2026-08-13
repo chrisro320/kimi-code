@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
+import type { CollectionView } from '#/_base/di/collection';
 import type { ILogService } from '#/_base/log/log';
 import type { RunnableToolExecution } from '#/tool/toolContract';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
@@ -21,6 +22,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { AgentToolContribution } from '#/agent/toolRegistry/toolContribution';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { ISessionSubagentRoutingService } from '#/session/subagent/routingService';
@@ -127,6 +129,7 @@ function makeTool(deps: {
     deps.git as IGitService,
     {} as IHostFileSystem,
     {} as IHostProcessService,
+    { items: [], records: [] } as unknown as CollectionView<AgentToolContribution>,
   );
 }
 
