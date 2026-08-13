@@ -163,6 +163,7 @@ import { formatBashOutputForDisplay } from './utils/shell-output';
 import { thinkingEffortFromConfig } from './utils/thinking-config';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
+import { installViewportScrollControls } from './utils/terminal-mouse';
 import { notifyTerminalOnce } from './utils/terminal-notification';
 import { installTerminalThemeTracking } from './utils/terminal-theme';
 import { detectTmuxKeyboardWarning } from './utils/tmux-keyboard';
@@ -398,6 +399,7 @@ export class KimiTUI {
   deferUserMessages = false;
   aborted = false;
   private terminalFocusTrackingDispose: (() => void) | undefined;
+  private terminalMouseTrackingDispose: (() => void) | undefined;
   private terminalThemeTrackingDispose: (() => void) | undefined;
   private clipboardImageHintController: ClipboardImageHintController | undefined;
   private uninstallRainbowDance: () => void;
@@ -775,6 +777,7 @@ export class KimiTUI {
     this.state.ui.start();
     this.startClipboardImageHintController();
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
+    this.terminalMouseTrackingDispose = installViewportScrollControls(this.state);
     this.refreshTerminalThemeTracking();
   }
 
@@ -1126,6 +1129,8 @@ export class KimiTUI {
     this.clipboardImageHintController = undefined;
     this.terminalFocusTrackingDispose?.();
     this.terminalFocusTrackingDispose = undefined;
+    this.terminalMouseTrackingDispose?.();
+    this.terminalMouseTrackingDispose = undefined;
   }
 
   private buildLayout(): void {

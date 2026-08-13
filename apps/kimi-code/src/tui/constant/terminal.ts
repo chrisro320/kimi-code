@@ -17,6 +17,18 @@ export const TERMINAL_FOCUS_OUT = `${ESC}[O`;
 export const ENABLE_TERMINAL_FOCUS_REPORTING = `${ESC}[?1004h`;
 export const DISABLE_TERMINAL_FOCUS_REPORTING = `${ESC}[?1004l`;
 
+// SGR mouse reporting. 1000 asks for button press/release only (no motion, so
+// dragging still belongs to the terminal); 1006 switches the reports to the SGR
+// encoding, which is not limited to coordinate 223 the way the legacy encoding
+// is. Enable order is mode-then-encoding; disable order is the reverse, so a
+// report already in flight is still decodable when the encoding is withdrawn.
+export const ENABLE_TERMINAL_MOUSE_REPORTING = `${ESC}[?1000h${ESC}[?1006h`;
+export const DISABLE_TERMINAL_MOUSE_REPORTING = `${ESC}[?1006l${ESC}[?1000l`;
+
+// `ESC [ < button ; column ; row (M|m)` — `M` is a press, `m` a release.
+// Wheel reports only ever arrive as `M`.
+export const SGR_MOUSE_REPORT = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
 // Standard OSC 11 background-color query. The response regex intentionally
 // allows a missing leading ESC because terminals can echo replies alongside
 // other raw input, but it requires an OSC terminator so fragmented color
