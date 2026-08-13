@@ -103,6 +103,9 @@ export function decodeTerminalMouseEvent(data: string): TerminalMouseEvent | und
  */
 export const WHEEL_SCROLL_ROWS = 3;
 
+/** Shown in the footer while the viewport is scrolled back. */
+export const JUMP_TO_BOTTOM_HINT = 'Jump to bottom (ctrl+End) ↓';
+
 /**
  * Wires the wheel to the TUI's own viewport scrolling and `ctrl+end` to jumping
  * back to the bottom.
@@ -115,20 +118,36 @@ export const WHEEL_SCROLL_ROWS = 3;
  * back, surfaced in the UI whenever `userScrollOffset > 0`.
  */
 export function installViewportScrollControls(state: TUIState): () => void {
+  // Tracked so the hint is only cleared when this is the one that set it, and an
+  // unrelated hint (the Ctrl+C exit prompt, say) is not wiped out.
+  let hintShown = false;
+  const syncJumpHint = (): void => {
+    const scrolledBack = state.ui.viewportScrollOffset > 0;
+    if (scrolledBack === hintShown) return;
+    state.footer.setTransientHint(scrolledBack ? JUMP_TO_BOTTOM_HINT : null);
+    hintShown = scrolledBack;
+  };
+
   const disposeMouse = installTerminalMouseTracking(state, (event) => {
     if (event.kind !== 'wheel') return;
     state.ui.scrollViewportBy(event.direction === 'up' ? WHEEL_SCROLL_ROWS : -WHEEL_SCROLL_ROWS);
+    syncJumpHint();
   });
 
   const disposeKeys = state.ui.addInputListener((data) => {
     if (!matchesKey(data, Key.ctrl(Key.end))) return undefined;
     state.ui.resetViewportScroll();
+    syncJumpHint();
     return { consume: true };
   });
 
   return () => {
     disposeKeys();
     disposeMouse();
+    if (hintShown) {
+      state.footer.setTransientHint(null);
+      hintShown = false;
+    }
   };
 }
 

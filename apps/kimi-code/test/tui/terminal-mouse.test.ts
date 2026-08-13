@@ -4,6 +4,7 @@ import type { TUIState } from '#/tui/tui-state';
 import {
   DISABLE_TERMINAL_MOUSE_REPORTING,
   ENABLE_TERMINAL_MOUSE_REPORTING,
+  JUMP_TO_BOTTOM_HINT,
   type TerminalMouseEvent,
   WHEEL_SCROLL_ROWS,
   decodeTerminalMouseEvent,
@@ -94,10 +95,17 @@ describe('terminal mouse tracking', () => {
 describe('viewport scroll controls', () => {
   function createState() {
     const listeners: Array<(data: string) => { consume: true } | undefined> = [];
-    const scrollViewportBy = vi.fn();
-    const resetViewportScroll = vi.fn();
+    const setTransientHint = vi.fn();
+    let offset = 0;
+    const scrollViewportBy = vi.fn((delta: number) => {
+      offset = Math.max(0, offset + delta);
+    });
+    const resetViewportScroll = vi.fn(() => {
+      offset = 0;
+    });
     const state = {
       terminal: { write: vi.fn() },
+      footer: { setTransientHint },
       ui: {
         addInputListener: vi.fn((listener) => {
           listeners.push(listener);
@@ -105,9 +113,12 @@ describe('viewport scroll controls', () => {
         }),
         scrollViewportBy,
         resetViewportScroll,
+        get viewportScrollOffset() {
+          return offset;
+        },
       },
     } as unknown as TUIState;
-    return { state, listeners, scrollViewportBy, resetViewportScroll };
+    return { state, listeners, scrollViewportBy, resetViewportScroll, setTransientHint };
   }
 
   it('scrolls the viewport on wheel events', () => {
@@ -135,5 +146,26 @@ describe('viewport scroll controls', () => {
     // scrolled up, the way Claude Code behaves.
     expect(keyListener?.('a')).toBeUndefined();
     expect(resetViewportScroll).toHaveBeenCalledOnce();
+  });
+
+  it('shows the jump-to-bottom hint only while scrolled back', () => {
+    const { state, listeners, setTransientHint } = createState();
+    const dispose = installViewportScrollControls(state);
+    const [mouseListener, keyListener] = listeners;
+
+    // Scrolling back raises the hint exactly once.
+    mouseListener?.('\x1b[<64;1;1M');
+    expect(setTransientHint).toHaveBeenCalledWith(JUMP_TO_BOTTOM_HINT);
+    mouseListener?.('\x1b[<64;1;1M');
+    expect(setTransientHint).toHaveBeenCalledOnce();
+
+    // Returning to the bottom clears it.
+    keyListener?.('\x1b[1;5F');
+    expect(setTransientHint).toHaveBeenLastCalledWith(null);
+
+    // Already at the bottom: nothing further to clear.
+    setTransientHint.mockClear();
+    dispose();
+    expect(setTransientHint).not.toHaveBeenCalled();
   });
 });

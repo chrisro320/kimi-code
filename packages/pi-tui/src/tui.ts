@@ -760,6 +760,12 @@ export class TUI extends Container {
 		return changed;
 	}
 
+	/** Rows the viewport is currently scrolled back by; 0 means bottom-following. */
+	get viewportScrollOffset(): number {
+		if (!TUI.LEDGER_ENABLED) return 0;
+		return this.getLedgerEngine().userScrollOffset;
+	}
+
 	/** Resumes bottom-following after the user has scrolled back. */
 	resetViewportScroll(): boolean {
 		if (!TUI.LEDGER_ENABLED) return false;
