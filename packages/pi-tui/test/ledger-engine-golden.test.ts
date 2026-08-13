@@ -284,6 +284,51 @@ describe("ledger engine golden", () => {
 	});
 
 	/**
+	 * An input line that scrolls out of view is unusable, so pinned components
+	 * keep showing their own rows while everything above them scrolls.
+	 */
+	it("keeps pinned components at the bottom while scrolled back", async () => {
+		await withLedger(async () => {
+			await withoutMultiplexer(async () => {
+				const terminal = new LoggingVirtualTerminal(40, 6);
+				const tui = new TUI(terminal);
+				const transcript = new TestComponent();
+				const editor = new TestComponent();
+				const footer = new TestComponent();
+				transcript.lines = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+				editor.lines = ["> prompt"];
+				footer.lines = ["status"];
+				tui.addChild(transcript);
+				tui.addChild(editor);
+				tui.addChild(footer);
+				tui.setPinnedBottomComponents([editor, footer]);
+				tui.start();
+				await terminal.waitForRender();
+
+				assert.deepStrictEqual(terminal.getViewport().slice(-2), ["> prompt", "status"], "before scrolling");
+
+				tui.scrollViewportBy(6);
+				await terminal.waitForRender();
+
+				const viewport = terminal.getViewport();
+				assert.deepStrictEqual(
+					viewport.slice(-2),
+					["> prompt", "status"],
+					`pinned rows must survive scrolling, got ${JSON.stringify(viewport)}`,
+				);
+				// The rows above them show history, not the frame tail.
+				assert.ok(viewport[0]?.includes("line-"), "the scrolling region must show transcript rows");
+				assert.ok(
+					!viewport.slice(0, -2).some((row) => row.includes("prompt") || row.includes("status")),
+					"pinned content must not also appear in the scrolling region",
+				);
+
+				tui.stop();
+			});
+		});
+	});
+
+	/**
 	 * Mouse hit testing. Components render rows without knowing where they land,
 	 * so the frame segments are the only record of which component owns which
 	 * row. The mapping has to follow the scroll offset, or a click while scrolled

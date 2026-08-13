@@ -1158,6 +1158,9 @@ export class KimiTUI {
     const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
     footerWrap.addChild(this.state.footer);
     this.state.ui.addChild(footerWrap);
+    // Both are the last children, so scrolling back would carry them out of
+    // view. Pinning keeps the input line and status bar where they can be used.
+    this.state.ui.setPinnedBottomComponents([this.state.editorContainer, footerWrap]);
   }
 
   // =========================================================================

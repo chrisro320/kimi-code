@@ -769,6 +769,16 @@ export class TUI extends Container {
 		return this.getLedgerEngine().hitTestScreenRow(screenRow);
 	}
 
+	/**
+	 * Pins components to the bottom of the viewport: while the user scrolls back,
+	 * these keep showing their own rows instead of scrolling away. Intended for
+	 * the input line and status bar, which are unusable once out of view.
+	 */
+	setPinnedBottomComponents(components: readonly Component[]): void {
+		if (!TUI.LEDGER_ENABLED) return;
+		this.getLedgerEngine().setPinnedBottomComponents(components);
+	}
+
 	/** Rows the viewport is currently scrolled back by; 0 means bottom-following. */
 	get viewportScrollOffset(): number {
 		if (!TUI.LEDGER_ENABLED) return 0;

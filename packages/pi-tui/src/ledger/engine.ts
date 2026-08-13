@@ -38,6 +38,10 @@ export class LedgerTuiEngine {
 	// output grows the frame, so a relative offset would slide the view downward
 	// on every token and the content the user is reading would drift away.
 	#userScrollAnchor: number | null = null;
+	// Components pinned to the bottom of the viewport: they keep showing their
+	// own last rows while the rest of the frame scrolls. An input line that
+	// scrolls out of view is unusable, so the editor and footer live here.
+	#pinnedBottomComponents: ReadonlySet<Component> = new Set();
 	#previousWindow: string[] = [];
 	#previousFrameLength = 0;
 	#previousWidth = 0;
@@ -624,7 +628,8 @@ export class LedgerTuiEngine {
 		const firstPaint = !this.#hasEverRendered;
 		const replaceRequested = this.#clearScrollbackOnNextRender;
 		const geometryRebuild = geometryChanged && !resizeRepaintsInPlace();
-		const fullPaint = firstPaint || replaceRequested || this.#fullPaintOnNextRender || geometryRebuild;
+		const fullPaint =
+			firstPaint || replaceRequested || this.#fullPaintOnNextRender || geometryRebuild || this.#userScrollAnchor !== null;
 		let windowTop: number;
 		let chunkTo: number;
 		let committedPrefixResliced = false;
@@ -684,7 +689,16 @@ export class LedgerTuiEngine {
 		}
 		const frame = this.#prepareFrame(rawFrame, width);
 		const rawWindow: string[] = new Array(height);
-		for (let r = 0; r < height; r++) rawWindow[r] = frame[windowTop + r] ?? "";
+		// While scrolled back, the tail of the viewport keeps showing the pinned
+		// components' own rows so the input line stays put; the rest scrolls. The
+		// mapping is only split in this state, and this state always full-paints,
+		// so the differential paths never see a non-contiguous window.
+		const pinnedRows = this.#userScrollAnchor === null ? 0 : Math.min(this.#pinnedBottomRows(), Math.max(0, height - 1));
+		const scrollRows = height - pinnedRows;
+		for (let r = 0; r < height; r++) {
+			rawWindow[r] =
+				(r < scrollRows ? frame[windowTop + r] : frame[frameLength - pinnedRows + (r - scrollRows)]) ?? "";
+		}
 		const window = this.compositeOverlays(rawWindow, width, height);
 
 		const intent: RenderIntent = fullPaint
@@ -731,6 +745,26 @@ export class LedgerTuiEngine {
 	 * of the frame or below the bottom-follow position. Returns true when the
 	 * offset actually changed, so the caller can skip a repaint on a no-op.
 	 */
+	public setPinnedBottomComponents(components: readonly Component[]): void {
+		this.#pinnedBottomComponents = new Set(components);
+	}
+
+	/**
+	 * Rows owned by pinned components, counted only while they form an unbroken
+	 * run at the end of the frame. A pinned component with unpinned rows below it
+	 * would need two scroll regions, which this does not attempt.
+	 */
+	#pinnedBottomRows(): number {
+		if (this.#pinnedBottomComponents.size === 0) return 0;
+		let rows = 0;
+		for (let i = this.#frameSegments.length - 1; i >= 0; i--) {
+			const segment = this.#frameSegments[i];
+			if (!segment || !this.#pinnedBottomComponents.has(segment.component)) break;
+			rows += segment.rowCount;
+		}
+		return rows;
+	}
+
 	public scrollBy(delta: number): boolean {
 		const bottom = this.#bottomFollowRow();
 		const from = this.#userScrollAnchor ?? bottom;
