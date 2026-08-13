@@ -20,7 +20,7 @@ vi.mock('#/utils/clipboard/clipboard-native', () => ({
 const clipboardMock = clipboard as unknown as { setText: ReturnType<typeof vi.fn> };
 const spawnMock = vi.mocked(spawn);
 
-function mockClipboardCommandFailure(stderr = 'missing'): void {
+function mockClipboardCommandResult(code: number, stderr = ''): void {
   spawnMock.mockImplementation(() => {
     const child = new EventEmitter() as EventEmitter & {
       stdin: PassThrough;
@@ -32,10 +32,14 @@ function mockClipboardCommandFailure(stderr = 'missing'): void {
     child.kill = vi.fn();
     queueMicrotask(() => {
       child.stderr.end(stderr);
-      child.emit('close', 1);
+      child.emit('close', code);
     });
     return child as unknown as ReturnType<typeof spawn>;
   });
+}
+
+function mockClipboardCommandFailure(stderr = 'missing'): void {
+  mockClipboardCommandResult(1, stderr);
 }
 
 const originalIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
@@ -72,7 +76,18 @@ beforeEach(() => {
 });
 
 describe('copyTextToClipboard', () => {
-  it('copies text with the native clipboard when available', async () => {
+  it('uses the contained command path on Linux instead of the noisy native binding', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    clipboardMock.setText.mockResolvedValue(undefined);
+    mockClipboardCommandResult(0);
+
+    await expect(copyTextToClipboard('cd "/tmp/proj-b"')).resolves.toBe('native');
+    expect(clipboardMock.setText).not.toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalledWith('wl-copy', [], { stdio: ['pipe', 'ignore', 'pipe'] });
+  });
+
+  it('copies text with the native clipboard outside Linux when available', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     clipboardMock.setText.mockResolvedValue(undefined);
 
     await expect(copyTextToClipboard('cd "/tmp/proj-b"')).resolves.toBe('native');
@@ -80,6 +95,7 @@ describe('copyTextToClipboard', () => {
   });
 
   it('keeps native clipboard method context when copying text', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     clipboardMock.setText.mockImplementation(function (this: unknown, text: string): void {
       expect(this).toBe(clipboardMock);
       expect(text).toBe('cd "/tmp/proj-b"');
@@ -126,6 +142,7 @@ describe('OSC 52 fallback in copyTextToClipboard', () => {
   });
 
   it('does not write escape sequences when stdout is not a terminal', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     stubStdoutTTY(false);
     clipboardMock.setText = vi.fn().mockResolvedValue(undefined);
     const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);

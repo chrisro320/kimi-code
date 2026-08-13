@@ -76,7 +76,11 @@ export async function copyTextToClipboard(text: string): Promise<ClipboardCopyMe
   const osc52Emitted = writeClipboardOSC52(text);
 
   const clipboardModule = clipboard;
-  if (clipboardModule?.setText !== undefined) {
+  // The native binding shells out to xclip on Linux. When another selection is
+  // still owned, xclip writes a diagnostic directly to the inherited terminal,
+  // bypassing the fullscreen ledger and corrupting its cursor position. Use our
+  // piped command path instead, where stdout/stderr are contained.
+  if (process.platform !== 'linux' && clipboardModule?.setText !== undefined) {
     try {
       await clipboardModule.setText(text);
       return 'native';
