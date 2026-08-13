@@ -6,7 +6,9 @@ import {
 
 import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
+import { JumpToBottomComponent } from './components/chrome/jump-to-bottom';
 import type { MoonLoader, SpinnerStyle } from './components/chrome/moon-loader';
+import { ViewportScrollbarComponent } from './components/chrome/viewport-scrollbar';
 import { TodoPanelComponent } from './components/chrome/todo-panel';
 import { TranscriptContainer } from './components/chrome/transcript-container';
 import type { SessionRow } from './components/dialogs/session-picker';
@@ -35,6 +37,8 @@ export interface TUIState {
   todoPanel: TodoPanelComponent;
   queueContainer: Container;
   btwPanelContainer: Container;
+  jumpToBottom: JumpToBottomComponent;
+  viewportScrollbar: ViewportScrollbarComponent;
   editorContainer: Container;
   footer: FooterComponent;
   editor: CustomEditor;
@@ -72,7 +76,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const theme = currentTheme;
 
   const terminal = new ProcessTerminal();
-  const ui = new TUI(terminal);
+  const ui = new TUI(terminal, true, { fullscreen: true });
 
   const transcriptContainer = new TranscriptContainer(CHROME_GUTTER, CHROME_GUTTER);
   const activityContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
@@ -80,6 +84,11 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const todoPanel = new TodoPanelComponent();
   const queueContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const btwPanelContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+  const jumpToBottom = new JumpToBottomComponent(() => ui.viewportScrollOffset > 0);
+  const viewportScrollbar = new ViewportScrollbarComponent(
+    () => ui.viewportScrollState,
+    () => terminal.rows,
+  );
   const editorContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const editor = new CustomEditor(ui, {
     disablePasteBurst: initialAppState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
@@ -97,6 +106,8 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     todoPanel,
     queueContainer,
     btwPanelContainer,
+    jumpToBottom,
+    viewportScrollbar,
     editorContainer,
     editor,
     footer,

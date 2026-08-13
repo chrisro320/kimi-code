@@ -351,4 +351,23 @@ describe('KimiTUI signal handlers', () => {
     expect(process.stdout.listenerCount('error')).toBe(beforeStdout);
     expect(process.stderr.listenerCount('error')).toBe(beforeStderr);
   });
+
+  it('start() releases terminal ownership when initialization fails after the trust prompt', async () => {
+    const { tui } = makeDriver();
+    const driver = tui as unknown as {
+      maybeRunWorkspaceTrustPrompt(): Promise<boolean>;
+      initMainTui(): Promise<boolean>;
+      disposeTerminalTracking(): void;
+      state: { ui: { stop(): void } };
+    };
+    vi.spyOn(driver, 'maybeRunWorkspaceTrustPrompt').mockResolvedValue(true);
+    vi.spyOn(driver, 'initMainTui').mockRejectedValue(new Error('resume boom'));
+    const disposeTerminalTracking = vi.spyOn(driver, 'disposeTerminalTracking').mockImplementation(() => {});
+    const uiStop = vi.spyOn(driver.state.ui, 'stop').mockImplementation(() => {});
+
+    await expect(tui.start()).rejects.toThrow('resume boom');
+
+    expect(disposeTerminalTracking).toHaveBeenCalledOnce();
+    expect(uiStop).toHaveBeenCalledOnce();
+  });
 });

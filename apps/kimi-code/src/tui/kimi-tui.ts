@@ -26,6 +26,7 @@ import {
   type Component,
   type Focusable,
   getCapabilities,
+  type OverlayHandle,
   Spacer,
 } from '@moonshot-ai/pi-tui';
 import { resolve } from 'pathe';
@@ -57,6 +58,7 @@ import { CacheHintController } from './controllers/cache-hint-controller';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { GutterContainer } from './components/chrome/gutter-container';
+import { JUMP_TO_BOTTOM_WIDTH } from './components/chrome/jump-to-bottom';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
 import { WelcomeComponent } from './components/chrome/welcome';
 import { pickRandomWorkingTip } from './components/chrome/working-tips';
@@ -163,7 +165,7 @@ import { formatBashOutputForDisplay } from './utils/shell-output';
 import { thinkingEffortFromConfig } from './utils/thinking-config';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
-import { installViewportScrollControls } from './utils/terminal-mouse';
+import { installViewportScrollControls, isManagedMouseEnabled } from './utils/terminal-mouse';
 import { notifyTerminalOnce } from './utils/terminal-notification';
 import { installTerminalThemeTracking } from './utils/terminal-theme';
 import { detectTmuxKeyboardWarning } from './utils/tmux-keyboard';
@@ -400,6 +402,8 @@ export class KimiTUI {
   aborted = false;
   private terminalFocusTrackingDispose: (() => void) | undefined;
   private terminalMouseTrackingDispose: (() => void) | undefined;
+  private viewportScrollbarOverlay: OverlayHandle | undefined;
+  private jumpToBottomOverlay: OverlayHandle | undefined;
   private terminalThemeTrackingDispose: (() => void) | undefined;
   private clipboardImageHintController: ClipboardImageHintController | undefined;
   private uninstallRainbowDance: () => void;
@@ -644,13 +648,21 @@ export class KimiTUI {
     // Route engine listener errors into the managed status for the whole TUI
     // lifetime; restored in stop() / on startup failure below.
     this.installUnexpectedErrorHandler();
-    // Outer try rolls back signal listeners on startup failure.
+    let eventLoopStarted = false;
+    const stopStartedEventLoop = (): void => {
+      if (!eventLoopStarted) return;
+      eventLoopStarted = false;
+      this.disposeTerminalTracking();
+      this.state.ui.stop();
+    };
+    // Outer try rolls back terminal ownership and signal listeners on startup failure.
     try {
       // The workspace trust gate must run before anything else in startup —
       // including the migration branch: a workspace that needs migration is
       // not implicitly trusted, and later startup steps spawn child processes.
       startupTrace('trustPrompt:begin');
       const trustPromptStartedLoop = await this.maybeRunWorkspaceTrustPrompt();
+      eventLoopStarted = trustPromptStartedLoop;
       startupTrace('trustPrompt:end');
 
       if (this.migrationPlan !== null) {
@@ -658,13 +670,15 @@ export class KimiTUI {
         // When the trust prompt already started it, starting it again would
         // re-run pi-tui's terminal.start() — stacking a second Kitty
         // keyboard-protocol push and duplicate stdin listeners.
-        if (!trustPromptStartedLoop) this.startEventLoop();
+        if (!trustPromptStartedLoop) {
+          eventLoopStarted = true;
+          this.startEventLoop();
+        }
         try {
           const migrationResult = await this.runMigrationScreen(this.migrationPlan);
           if (this.migrateOnly) {
             const failed = migrationResult.decision === 'now' && migrationResult.migrated === false;
-            this.disposeTerminalTracking();
-            this.state.ui.stop();
+            stopStartedEventLoop();
             this.restoreUnexpectedErrorHandler();
             await this.onExit?.(failed ? 1 : 0);
             return;
@@ -673,8 +687,7 @@ export class KimiTUI {
           this.startBackgroundFdAutocomplete();
           await this.finishStartup(shouldReplayHistory);
         } catch (error) {
-          this.disposeTerminalTracking();
-          this.state.ui.stop();
+          stopStartedEventLoop();
           throw error;
         }
         return;
@@ -689,7 +702,10 @@ export class KimiTUI {
       // again would re-run pi-tui's terminal.start() — stacking a second
       // Kitty keyboard-protocol push (leaking CSI-u mode past exit) and
       // duplicate stdin listeners.
-      if (!trustPromptStartedLoop) this.startEventLoop();
+      if (!trustPromptStartedLoop) {
+        eventLoopStarted = true;
+        this.startEventLoop();
+      }
       startupTrace('eventLoop:started');
       try {
         this.startBackgroundFdAutocomplete();
@@ -697,11 +713,11 @@ export class KimiTUI {
         await this.finishStartup(shouldReplayHistory);
         startupTrace('finishStartup:end');
       } catch (error) {
-        this.disposeTerminalTracking();
-        this.state.ui.stop();
+        stopStartedEventLoop();
         throw error;
       }
     } catch (error) {
+      stopStartedEventLoop();
       this.unregisterSignalHandlers();
       this.restoreUnexpectedErrorHandler();
       throw error;
@@ -775,11 +791,25 @@ export class KimiTUI {
     // event loop (e.g. a future TUI reconnect) can't stack duplicate listeners.
     this.disposeTerminalTracking();
     this.state.ui.start();
+    this.installTerminalTracking();
+  }
+
+  private installTerminalTracking(): void {
     this.startClipboardImageHintController();
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
-    // Escape hatch: mouse reporting changes what the terminal does with the
-    // wheel and with clicks, so it needs to be switchable off without a rebuild.
-    if (process.env['KIMI_TUI_NO_MOUSE'] !== '1') {
+    if (isManagedMouseEnabled()) {
+      this.viewportScrollbarOverlay = this.state.ui.showOverlay(this.state.viewportScrollbar, {
+        anchor: 'top-right',
+        width: 1,
+        maxHeight: '100%',
+        nonCapturing: true,
+      });
+      this.jumpToBottomOverlay = this.state.ui.showOverlay(this.state.jumpToBottom, {
+        anchor: 'bottom-center',
+        width: JUMP_TO_BOTTOM_WIDTH,
+        offsetY: -3,
+        nonCapturing: true,
+      });
       this.terminalMouseTrackingDispose = installViewportScrollControls(this.state);
     }
     this.refreshTerminalThemeTracking();
@@ -1127,6 +1157,16 @@ export class KimiTUI {
     process.exit(exitCode);
   }
 
+  suspendTerminalUi(): void {
+    this.disposeTerminalTracking();
+    this.state.ui.stop();
+  }
+
+  resumeTerminalUi(): void {
+    this.state.ui.start();
+    this.installTerminalTracking();
+  }
+
   private disposeTerminalTracking(): void {
     this.stopTerminalThemeTracking();
     this.clipboardImageHintController?.stop();
@@ -1135,6 +1175,10 @@ export class KimiTUI {
     this.terminalFocusTrackingDispose = undefined;
     this.terminalMouseTrackingDispose?.();
     this.terminalMouseTrackingDispose = undefined;
+    this.viewportScrollbarOverlay?.hide();
+    this.viewportScrollbarOverlay = undefined;
+    this.jumpToBottomOverlay?.hide();
+    this.jumpToBottomOverlay = undefined;
   }
 
   private buildLayout(): void {
@@ -1158,8 +1202,6 @@ export class KimiTUI {
     const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
     footerWrap.addChild(this.state.footer);
     this.state.ui.addChild(footerWrap);
-    // Both are the last children, so scrolling back would carry them out of
-    // view. Pinning keeps the input line and status bar where they can be used.
     this.state.ui.setPinnedBottomComponents([this.state.editorContainer, footerWrap]);
   }
 

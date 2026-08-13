@@ -6,6 +6,12 @@ import {
   type EditorKeyboardHost,
 } from '#/tui/controllers/editor-keyboard';
 import type { ImageAttachmentStore } from '#/tui/utils/image-attachment-store';
+import { editInExternalEditor } from '#/utils/process/external-editor';
+
+vi.mock('#/utils/process/external-editor', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('#/utils/process/external-editor')>();
+  return { ...actual, editInExternalEditor: vi.fn() };
+});
 
 interface Harness {
   readonly host: EditorKeyboardHost;
@@ -283,6 +289,62 @@ describe('EditorKeyboardController shell history recall', () => {
     restore('prompt');
 
     expect(editor['setInputMode'] as unknown as Mock).toHaveBeenCalledWith('prompt');
+  });
+});
+
+describe('EditorKeyboardController external editor lifecycle', () => {
+  it('reinstalls terminal UI ownership after external editor success or failure', async () => {
+    const order: string[] = [];
+    const editor: Record<string, unknown> = {
+      setHistoryFilter: vi.fn(),
+      getExpandedText: vi.fn(() => 'seed'),
+      getText: vi.fn(() => 'seed'),
+      setText: vi.fn(),
+    };
+    const host = {
+      state: {
+        editor,
+        externalEditorRunning: false,
+        activeDialog: null,
+        appState: { editorCommand: 'test-editor', streamingPhase: 'idle', isCompacting: false },
+        footer: { setTransientHint: vi.fn() },
+        ui: {
+          setFocus: vi.fn(() => order.push('focus')),
+          requestRender: vi.fn(() => order.push('render')),
+        },
+      },
+      session: { cancel: vi.fn(async () => {}) },
+      btwPanelController: { cancelRunning: vi.fn(), closeOrCancel: vi.fn() },
+      setExternalEditorRunning: vi.fn((running: boolean) => {
+        host.state.externalEditorRunning = running;
+      }),
+      suspendTerminalUi: vi.fn(() => order.push('suspend')),
+      resumeTerminalUi: vi.fn(() => order.push('resume')),
+      track: vi.fn(),
+      showError: vi.fn(),
+    } as unknown as EditorKeyboardHost;
+    vi.mocked(editInExternalEditor).mockImplementationOnce(async () => {
+      order.push('external');
+      return 'edited\n';
+    });
+    new EditorKeyboardController(host, undefined as unknown as ImageAttachmentStore).install();
+    const openExternalEditor = editor['onOpenExternalEditor'] as () => void;
+
+    openExternalEditor();
+    await vi.waitFor(() => expect(host.setExternalEditorRunning).toHaveBeenLastCalledWith(false));
+
+    expect(order).toEqual(['suspend', 'external', 'resume', 'focus', 'render']);
+    expect(editor['setText']).toHaveBeenCalledWith('edited');
+
+    order.length = 0;
+    vi.mocked(editInExternalEditor).mockRejectedValueOnce(new Error('editor crashed'));
+    openExternalEditor();
+    await vi.waitFor(() =>
+      expect(host.showError).toHaveBeenCalledWith('External editor failed: editor crashed'),
+    );
+
+    expect(order).toEqual(['suspend', 'resume', 'focus', 'render']);
+    expect(host.setExternalEditorRunning).toHaveBeenLastCalledWith(false);
   });
 });
 

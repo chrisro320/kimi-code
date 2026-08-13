@@ -1,4 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { clipboard } from '#/utils/clipboard/clipboard-native';
@@ -6,7 +8,7 @@ import { buildClipboardOSC52 } from '#/utils/clipboard/clipboard-osc52';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 
 vi.mock('node:child_process', () => ({
-  spawnSync: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock('#/utils/clipboard/clipboard-native', () => ({
@@ -16,7 +18,25 @@ vi.mock('#/utils/clipboard/clipboard-native', () => ({
 }));
 
 const clipboardMock = clipboard as unknown as { setText: ReturnType<typeof vi.fn> };
-const spawnSyncMock = vi.mocked(spawnSync);
+const spawnMock = vi.mocked(spawn);
+
+function mockClipboardCommandFailure(stderr = 'missing'): void {
+  spawnMock.mockImplementation(() => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdin = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    queueMicrotask(() => {
+      child.stderr.end(stderr);
+      child.emit('close', 1);
+    });
+    return child as unknown as ReturnType<typeof spawn>;
+  });
+}
 
 const originalIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
 
@@ -46,7 +66,7 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  spawnSyncMock.mockImplementation(() => {
+  spawnMock.mockImplementation(() => {
     throw new Error('platform clipboard fallback should not run');
   });
 });
@@ -71,7 +91,7 @@ describe('copyTextToClipboard', () => {
   it('throws an Error when all platform clipboard commands fail', async () => {
     stubStdoutTTY(false);
     clipboardMock.setText = undefined as unknown as ReturnType<typeof vi.fn>;
-    spawnSyncMock.mockReturnValue({ status: 1, stderr: 'missing' } as ReturnType<typeof spawnSync>);
+    mockClipboardCommandFailure();
 
     await expect(copyTextToClipboard('cd "/tmp/proj-b"')).rejects.toBeInstanceOf(Error);
     await expect(copyTextToClipboard('cd "/tmp/proj-b"')).rejects.toThrow(
@@ -96,7 +116,7 @@ describe('OSC 52 fallback in copyTextToClipboard', () => {
   it('resolves via OSC 52 when native clipboards fail on a terminal', async () => {
     stubStdoutTTY(true);
     clipboardMock.setText = undefined as unknown as ReturnType<typeof vi.fn>;
-    spawnSyncMock.mockReturnValue({ status: 1, stderr: 'missing' } as ReturnType<typeof spawnSync>);
+    mockClipboardCommandFailure();
     const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await expect(copyTextToClipboard('hello world')).resolves.toBe('osc52');
