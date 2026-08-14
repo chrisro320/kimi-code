@@ -968,8 +968,12 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             break;
           case 'response.created':
           case 'response.in_progress': {
-            const responseObject = requireObjectField(chunk, 'response', type);
-            const respId = readStringField(responseObject, 'id');
+            // The `response` envelope only carries the optional `response.id`;
+            // gateways that omit it still produce a usable stream, so stay
+            // lenient instead of failing the whole request.
+            const responseObject = readObjectField(chunk, 'response');
+            const respId =
+              responseObject === undefined ? undefined : readStringField(responseObject, 'id');
             if (respId !== undefined) {
               this._id = respId;
             }
@@ -1051,16 +1055,21 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             break;
           case 'response.completed':
           case 'response.incomplete': {
-            const responseObject = requireObjectField(chunk, 'response', type);
-            const respId = readStringField(responseObject, 'id');
-            if (respId !== undefined) {
-              this._id = respId;
+            // Everything here — id, usage, finish reason — is optional metadata.
+            // A gateway that omits the envelope still delivered the content, so
+            // stay lenient rather than failing an otherwise complete stream.
+            const responseObject = readObjectField(chunk, 'response');
+            if (responseObject !== undefined) {
+              const respId = readStringField(responseObject, 'id');
+              if (respId !== undefined) {
+                this._id = respId;
+              }
+              const usage = readObjectField(responseObject, 'usage');
+              if (usage !== undefined) {
+                this._extractUsage(usage);
+              }
+              this._captureFinishReasonFromResponse(responseObject);
             }
-            const usage = readObjectField(responseObject, 'usage');
-            if (usage !== undefined) {
-              this._extractUsage(usage);
-            }
-            this._captureFinishReasonFromResponse(responseObject);
             break;
           }
           case 'error': {
@@ -1074,7 +1083,14 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             );
           }
           case 'response.failed': {
-            const responseObject = requireObjectField(chunk, 'response', type);
+            // The event itself is the failure signal; a missing envelope only
+            // costs the error details, so still throw instead of decoding out.
+            const responseObject = readObjectField(chunk, 'response');
+            if (responseObject === undefined) {
+              throw new ChatProviderError(
+                'OpenAI Responses response.failed: Unknown error (no response in event)',
+              );
+            }
             const error = readResponsesFailedResponseError(responseObject);
             if (error !== undefined) {
               throw errorFromOpenAIResponsesEvent(
