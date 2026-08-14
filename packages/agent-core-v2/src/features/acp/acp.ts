@@ -34,6 +34,11 @@ export interface IAcpService {
 
   isActive(): boolean;
   status(): AcpStatus;
+  /** Disk-derived status: loads and validates the sidecar instead of returning
+   *  the in-memory snapshot, which holds constructor defaults between a restart
+   *  and the first turn. An in-memory runtime degradation still wins over a
+   *  healthy disk read; a corrupt sidecar degrades the live status. */
+  statusSnapshot(): Promise<AcpStatus>;
   statusReport(): Promise<AcpMutationResult>;
   compress(input: {
     readonly ranges: readonly {

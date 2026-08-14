@@ -587,6 +587,64 @@ describe('AcpService', () => {
     expect(result.message).toContain('health: healthy');
   });
 
+  it('reports durable sidecar state on a fresh service before any transform', async () => {
+    const store = createStore();
+    const first = createService('main', store);
+    owned.push(first.disposables);
+    const messages = bigMessages(10);
+    first.env.history = messages;
+    await transform(first.requester.manager(), messages);
+    await first.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+
+    const restarted = createService('main', store);
+    owned.push(restarted.disposables);
+    // In-memory status starts empty; only the durable snapshot reflects the fold.
+    expect(restarted.service.status()).toMatchObject({ refs: 0, blocks: 0 });
+
+    const snapshot = await restarted.service.statusSnapshot();
+    expect(snapshot).toMatchObject({
+      health: 'healthy',
+      refs: 10,
+      blocks: 1,
+      activeBlocks: 1,
+    });
+  });
+
+  it('reports degraded when the persisted compression state is corrupt', async () => {
+    const store = createStore();
+    const first = createService('main', store);
+    owned.push(first.disposables);
+    const messages = [textMessage('safe')];
+    first.env.history = messages;
+    await transform(first.requester.manager(), messages);
+    const key = `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`;
+    const valid = store.values.get(key) as AcpSidecar;
+    store.values.set(key, { ...valid, compressionState: { garbage: true } });
+
+    const restarted = createService('main', store);
+    owned.push(restarted.disposables);
+    const snapshot = await restarted.service.statusSnapshot();
+
+    expect(snapshot.health).toBe('degraded');
+    expect(snapshot.reason).toContain('corrupt');
+    expect(restarted.service.status().health).toBe('degraded');
+  });
+
+  it('reports degraded when the persisted sidecar schema is incompatible', async () => {
+    const store = createStore();
+    const key = `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`;
+    store.values.set(key, { schemaVersion: 999 });
+
+    const restarted = createService('main', store);
+    owned.push(restarted.disposables);
+    const snapshot = await restarted.service.statusSnapshot();
+
+    expect(snapshot.health).toBe('degraded');
+    expect(snapshot.reason).toContain('schema is invalid or incompatible');
+  });
+
   it('fails tools closed when the compression state is corrupt', async () => {
     const setup = createService('corrupt-tools');
     owned.push(setup.disposables);

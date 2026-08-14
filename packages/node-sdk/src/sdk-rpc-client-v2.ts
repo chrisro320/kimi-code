@@ -1612,7 +1612,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async acpStatus(input: SessionIdRpcInput): Promise<AcpStatusInfo> {
     const agent = await this.agentScope(input.sessionId);
-    const status = agent.accessor.get(IAcpService).status();
+    const status = await agent.accessor.get(IAcpService).statusSnapshot();
     const active = agent.accessor.get(IAgentLLMRequesterService).getActiveContextManager();
     return { enabled: active?.id === ACP_MANAGER_ID, ...status };
   }

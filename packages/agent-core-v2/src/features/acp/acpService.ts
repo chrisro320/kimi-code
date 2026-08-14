@@ -649,6 +649,39 @@ export class AcpService extends Service implements IAcpService {
     return this.currentStatus;
   }
 
+  statusSnapshot(): Promise<AcpStatus> {
+    return this.serialize(async () => {
+      this.lifetime.signal.throwIfAborted();
+      let loaded: AcpSidecar;
+      try {
+        loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+      } catch (error) {
+        const reason = errorMessage(error);
+        this.degrade(reason, this.currentStatus.refs);
+        return this.currentStatus;
+      }
+      const blocks = isCompressionState(loaded.compressionState)
+        ? loaded.compressionState.blocks
+        : [];
+      const corrupt = loaded.compressionState !== null && !isCompressionState(loaded.compressionState);
+      if (corrupt) {
+        this.degrade('ACP sidecar compression state is corrupt', loaded.refs.length);
+        return this.currentStatus;
+      }
+      const current = this.currentStatus;
+      return {
+        managerId: ACP_MANAGER_ID,
+        managerVersion: ACP_MANAGER_VERSION,
+        health: current.health,
+        refs: loaded.refs.length,
+        blocks: blocks.length,
+        activeBlocks: blocks.filter((block) => block.active).length,
+        contextUsage: current.contextUsage,
+        ...(current.reason === undefined ? {} : { reason: current.reason }),
+      };
+    });
+  }
+
   reset(): Promise<void> {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
