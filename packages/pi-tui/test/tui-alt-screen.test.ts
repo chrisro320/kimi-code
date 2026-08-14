@@ -1450,4 +1450,36 @@ describe("TuiAltScreen", () => {
 			tui.stop();
 		});
 	});
+
+	describe("full redraw", () => {
+		it("repaints without clearing the screen first", async () => {
+			// A full redraw used to emit ESC[2J before repainting every row. On a
+			// terminal that ignores synchronized output (DECSET 2026) the clear is
+			// visible on its own, so switching panes flashed an empty screen. Every
+			// row is rewritten with ESC[2K anyway, which makes the clear redundant.
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			tui.addChild(new Text(Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n"), 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+
+			terminal.events.length = 0;
+			terminal.resize(20, 5);
+			await terminal.waitForRender();
+
+			const writes = terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event as { data: string }).data)
+				.join("");
+			assert.ok(writes.length > 0, "resize should repaint");
+			assert.ok(!writes.includes("\x1b[2J"), "full redraw must not clear the whole screen");
+
+			// The repaint must still land the same content a from-scratch render would.
+			assert.deepStrictEqual(
+				terminal.getViewport().map((line) => line.trimEnd()),
+				["line 8", "line 9", "line 10", "line 11", "line 12"],
+			);
+			tui.stop();
+		});
+	});
 });

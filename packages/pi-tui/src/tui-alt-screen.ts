@@ -1411,11 +1411,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
+			// No ED2 here. The row loop below rewrites every row of the viewport
+			// with its own EL2, so clearing the screen first changes nothing about
+			// the final frame — but on a terminal that ignores DECSET 2026 the
+			// clear presents on its own, and the viewport flashes empty before the
+			// repaint lands. Switching panes resizes the terminal, which is what
+			// made the flash so easy to hit.
 			const clearImages =
 				this.imageProtocol === "kitty" && hadUploadedKittyImages
 					? deleteAllKittyPlacements()
 					: this.deleteKittyImages();
-			buffer += `${clearImages}\x1b[2J`;
+			buffer += clearImages;
 		} else if (imagesNeedRedraw) {
 			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
 			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
