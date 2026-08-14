@@ -329,11 +329,11 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     input: readonly Message[],
     result: TransformResult,
   ): TransformResult {
-    const before = compactionCarriersOf(input);
-    const after = compactionCarriersOf(result.messages);
+    const before = compactionCarrierEnvelopesOf(input);
+    const after = compactionCarrierEnvelopesOf(result.messages);
     const intact =
       before.length === after.length &&
-      before.every((carrier, index) => carriersEqual(carrier, after[index]!));
+      before.every((envelope, index) => carrierEnvelopesEqual(envelope, after[index]!));
     if (intact) return result;
     this.log.warn(
       'context manager transform dropped, rewrote, or reordered compaction carriers; falling back to the original messages',
@@ -1122,15 +1122,46 @@ function checkpointReplayMessage(checkpoint: CompactionCheckpoint): Message {
   };
 }
 
-function compactionCarriersOf(messages: readonly Message[]): CheckpointReplayPart[] {
-  const carriers: CheckpointReplayPart[] = [];
-  for (const message of messages) {
-    for (const part of message.content) {
+interface CompactionCarrierEnvelope {
+  readonly messageIndex: number;
+  readonly contentIndex: number;
+  readonly message: Message;
+  readonly carrier: CheckpointReplayPart;
+}
+
+function compactionCarrierEnvelopesOf(messages: readonly Message[]): CompactionCarrierEnvelope[] {
+  const carriers: CompactionCarrierEnvelope[] = [];
+  for (const [messageIndex, message] of messages.entries()) {
+    for (const [contentIndex, part] of message.content.entries()) {
       const candidate = part as unknown as CheckpointReplayPart;
-      if (candidate.type === 'compaction') carriers.push(candidate);
+      if (candidate.type === 'compaction') {
+        carriers.push({ messageIndex, contentIndex, message, carrier: candidate });
+      }
     }
   }
   return carriers;
+}
+
+function carrierEnvelopesEqual(
+  a: CompactionCarrierEnvelope,
+  b: CompactionCarrierEnvelope,
+): boolean {
+  return (
+    a.messageIndex === b.messageIndex &&
+    a.contentIndex === b.contentIndex &&
+    a.message.role === b.message.role &&
+    a.message.name === b.message.name &&
+    a.message.toolCallId === b.message.toolCallId &&
+    a.message.partial === b.message.partial &&
+    deepEqual(a.message.tools, b.message.tools) &&
+    deepEqual(a.message.toolCalls, b.message.toolCalls) &&
+    a.message.content.length === b.message.content.length &&
+    a.message.content.every((part, index) =>
+      index === a.contentIndex
+        ? carriersEqual(a.carrier, b.carrier)
+        : deepEqual(part, b.message.content[index]),
+    )
+  );
 }
 
 function carriersEqual(a: CheckpointReplayPart, b: CheckpointReplayPart): boolean {
@@ -1143,6 +1174,27 @@ function carriersEqual(a: CheckpointReplayPart, b: CheckpointReplayPart): boolea
     a.lineage.model === b.lineage.model &&
     a.lineage.baseUrl === b.lineage.baseUrl &&
     replayTokensEqual(a.replayInputTokens, b.replayInputTokens)
+  );
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((value, index) => deepEqual(value, b[index]))
+    );
+  }
+  const aRecord = a as Record<string, unknown>;
+  const bRecord = b as Record<string, unknown>;
+  const aKeys = Object.keys(aRecord).sort();
+  const bKeys = Object.keys(bRecord).sort();
+  return (
+    aKeys.length === bKeys.length &&
+    aKeys.every((key, index) => key === bKeys[index] && deepEqual(aRecord[key], bRecord[key]))
   );
 }
 

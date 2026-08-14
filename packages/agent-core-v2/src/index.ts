@@ -290,6 +290,9 @@ export * from '#/app/flag/flagService';
 
 export * from '#/agent/activityView/activityView';
 import '#/agent/activityView/activityViewService';
+export * from '#/features/acp/acp';
+export * from '#/features/acp/acpService';
+import '#/features/acp/acpFeature';
 import '#/features/plan/profile/plan';
 export * from '#/features/plan/tools/enter-plan-mode/enter-plan-mode';
 import '#/features/plan/tools/enter-plan-mode/enterPlanModeTool';
