@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -23,9 +23,9 @@ import { ISessionTodoService } from '#/session/todo/sessionTodo';
 
 interface StoreHarness {
   readonly values: Map<string, unknown>;
-  readonly get: ReturnType<typeof vi.fn>;
-  readonly set: ReturnType<typeof vi.fn>;
-  readonly delete: ReturnType<typeof vi.fn>;
+  readonly get: Mock<(scope: string, key: string) => Promise<unknown>>;
+  readonly set: Mock<(scope: string, key: string, value: unknown) => Promise<void>>;
+  readonly delete: Mock<(scope: string, key: string) => Promise<void>>;
   readonly service: IAtomicDocumentStore;
 }
 

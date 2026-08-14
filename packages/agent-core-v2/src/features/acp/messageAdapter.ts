@@ -14,7 +14,6 @@ import {
   isToolDeclarationOnlyMessage,
   type ContentPart,
   type Message,
-  type ThinkPart,
   type ToolCall,
 } from '#/kosong/contract/message';
 

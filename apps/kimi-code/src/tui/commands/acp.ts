@@ -1,5 +1,3 @@
-import type { Session } from '@moonshot-ai/kimi-code-sdk';
-
 import { ChoicePickerComponent } from '../components/dialogs/choice-picker';
 import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
 import type { SlashCommandHost } from './dispatch';
