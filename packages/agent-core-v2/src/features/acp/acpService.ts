@@ -3,6 +3,35 @@
  *
  * Sidecar I/O is lazy: merely constructing or registering the service does not
  * touch storage, so an unconfigured manager remains a zero-cost native path.
+ *
+ * Compaction takeover (`onWillCompact`): while the manager is active the
+ * delegate summarizes from the LAST TRANSFORMED VIEW (`lastView`), not the raw
+ * history — on the overflow path the raw history is what overflowed, while the
+ * view is already compressed by the kernel. The view is valid only when the
+ * live context is element-identical to the view's source snapshot; otherwise
+ * (no turn since enable, a PreCompact hook appended) the delegate declines to
+ * the built-in round, as it does for degraded health or an empty history. The
+ * ACP-owned summarizer request goes through
+ * `startInternal({ manager: undefined, transform: 'bypass' })` with
+ * `tools: []` and the manual instruction rendered into the ACP-owned
+ * `compaction-instruction.md` template; there is no shrink-retry loop (the
+ * view is already bounded by kernel truncation), so a truncated or empty
+ * response fails the round. A context-overflow rejection from the summarizer
+ * itself declines the round instead (`handled: false`): nothing durable has
+ * changed at that point and the built-in path owns overflow shrink-retry.
+ * Before the durable mutation the delegate
+ * re-checks the prefix race (element-identical prefix; an appended tail must
+ * be real user input) and throws an abort-shaped error on mismatch. Durable
+ * order: sidecar first — `compressionState` resets to a fresh kernel state
+ * keeping cumulative `stats`, while `refs`/`nextRef` survive so refs are never
+ * reused — then `context.applyCompaction` folds the entire snapshot
+ * (`compactedCount = live.length`, built-in parity) with the session todo list
+ * appended to the summary like the built-in. A failed sidecar save throws
+ * before the fold; a failed fold after the save leaves a clean fresh kernel
+ * state over the unfolded context. `requestOverheadTokens` is omitted (the
+ * built-in recomputes it from profile/tool services; the omission only
+ * slightly under-estimates `tokensAfter`). Post-takeover the cached view is
+ * dropped and the next transform starts from the fold summary.
  */
 
 import {
@@ -27,12 +56,26 @@ import {
 } from 'acp-kernel';
 
 import { Service } from '#/_base/di/service';
+import { renderPrompt } from '#/_base/utils/render-prompt';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { IAgentLLMRequesterService, type ContextManager } from '#/agent/llmRequester/llmRequester';
+import {
+  buildCompactionSummaryText,
+  isRealUserInput,
+} from '#/agent/contextMemory/compactionHandoff';
+import {
+  IAgentLLMRequesterService,
+  type AgentLLMRequestFinish,
+  type CompactDelegation,
+  type ContextManager,
+} from '#/agent/llmRequester/llmRequester';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import type { Message } from '#/kosong/contract/message';
+import { unwrapErrorCause } from '#/errors';
+import { APIContextOverflowError } from '#/kosong/contract/errors';
+import { createUserMessage, type Message } from '#/kosong/contract/message';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { ISessionTodoService } from '#/session/todo/sessionTodo';
+import { renderTodoList } from '#/session/todo/todoItem';
 
 import {
   ACP_MANAGER_ID,
@@ -42,6 +85,7 @@ import {
   type IAcpService,
 } from './acp';
 import { peelTag, projectAcpMessages, rebuildAcpMessages, type CoreProjection } from './messageAdapter';
+import acpCompactionInstructionTemplate from './compaction-instruction.md?raw';
 import {
   acpCompressionStatesEqual,
   ensureStableRefs,
@@ -72,10 +116,16 @@ export class AcpService extends Service implements IAcpService {
    * would let a cited range fold content the summary never covered. The
    * snapshot must come from the live context, not the transform input: the
    * requester hands managers a structuredClone, so input entries never
-   * reference-match live entries.
+   * reference-match live entries. `compacted` is the transform OUTPUT (the
+   * compressed, kernel-bounded form of `view`); the compaction takeover
+   * summarizes from it, never from the raw view.
    */
   private lastView:
-    | { readonly source: readonly Message[]; readonly view: readonly Message[] }
+    | {
+        readonly source: readonly Message[];
+        readonly view: readonly Message[];
+        readonly compacted: readonly Message[];
+      }
     | undefined;
   private currentStatus: AcpStatus = {
     managerId: ACP_MANAGER_ID,
@@ -92,6 +142,7 @@ export class AcpService extends Service implements IAcpService {
     @IAgentLLMRequesterService private readonly requester: IAgentLLMRequesterService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
     @IAgentContextMemoryService context: IAgentContextMemoryService,
+    @ISessionTodoService private readonly todo: ISessionTodoService,
   ) {
     super();
     this.sidecarScope = agentContext.scope('acp');
@@ -159,28 +210,130 @@ export class AcpService extends Service implements IAcpService {
               activeBlocks: turn.state.blocks.filter((block) => block.active).length,
               contextUsage: maxContextTokens > 0 ? usedContextTokens / maxContextTokens : undefined,
             };
-            this.lastView = { source: this.context.get(), view: messages };
-            if (tagOnly) {
-              const nudge = renderTurnNudge(turn);
-              if (nudge === undefined) {
-                return { messages, accounting: 'raw-equivalent' as const };
-              }
-              // Appending at the tail keeps every existing provider prefix intact.
-              return {
-                messages: [...messages, nudge],
-                accounting: 'transformed' as const,
-              };
-            }
             const nudge = renderTurnNudge(turn);
-            if (nudge === undefined) {
-              return { messages: rebuilt.messages, accounting: 'transformed' as const };
+            const base = tagOnly ? messages : rebuilt.messages;
+            // Appending at the tail keeps every existing provider prefix intact.
+            const outgoing = nudge === undefined ? base : [...base, nudge];
+            this.lastView = { source: this.context.get(), view: messages, compacted: outgoing };
+            if (tagOnly && nudge === undefined) {
+              return { messages: outgoing, accounting: 'raw-equivalent' as const };
             }
-            return { messages: [...rebuilt.messages, nudge], accounting: 'transformed' as const };
+            return { messages: outgoing, accounting: 'transformed' as const };
           } catch (error) {
             if (linked.aborted) throw linked.reason;
             this.degrade(errorMessage(error), durableRefs);
             return { messages, accounting: 'raw-equivalent' as const };
           }
+        }),
+      onWillCompact: ({ task, input, signal }) =>
+        this.serialize(async (): Promise<CompactDelegation> => {
+          const linked = AbortSignal.any([signal, this.lifetime.signal]);
+          linked.throwIfAborted();
+          if (this.currentStatus.health !== 'healthy') return { handled: false };
+          const live = this.context.get();
+          if (live.length === 0) return { handled: false };
+          const cached = this.lastView;
+          if (
+            cached === undefined ||
+            cached.source.length !== live.length ||
+            !extendsSnapshot(live, cached.source)
+          ) {
+            return { handled: false };
+          }
+
+          // Re-checked after every await: a prefix rewrite (undo/edit) between
+          // checks would fold messages the summary never covered.
+          const assertFoldSafe = (): void => {
+            if (historySafeToCompact(this.context.get(), live)) return;
+            const error = new Error(
+              'ACP compaction cancelled: the live history changed while summarizing.',
+            );
+            error.name = 'AbortError';
+            throw error;
+          };
+
+          const customInstruction = input.instruction?.trim() ?? '';
+          const instruction = renderPrompt(acpCompactionInstructionTemplate, {
+            custom_instruction_block:
+              customInstruction.length > 0
+                ? `\nOptional user instruction:\n${customInstruction}\n`
+                : '',
+          }).trimEnd();
+          const request = this.requester.startInternal(
+            { manager: undefined, transform: 'bypass' },
+            {
+              messages: [...cached.compacted, createUserMessage(instruction)],
+              tools: [],
+              source: {
+                type: 'operation',
+                turnId: task.originTurnId,
+                requestKind: 'acp_compaction',
+              },
+            },
+            undefined,
+            linked,
+          );
+          let finish: AgentLLMRequestFinish;
+          try {
+            finish = await request.result;
+          } catch (error) {
+            if (linked.aborted) throw linked.reason;
+            // The summarizer itself overflowed: nothing durable has changed
+            // yet, so decline to the built-in round, which has shrink-retry.
+            if (unwrapErrorCause(error) instanceof APIContextOverflowError) {
+              return { handled: false };
+            }
+            throw error;
+          }
+          linked.throwIfAborted();
+          if (finish.providerFinishReason === 'truncated') {
+            throw new Error('ACP compaction response was truncated before producing a complete summary.');
+          }
+          const summary = finish.message.content
+            .filter((part) => part.type === 'text')
+            .map((part) => part.text)
+            .join('')
+            .trim();
+          if (summary.length === 0) {
+            throw new Error('ACP compaction response did not contain a non-empty summary.');
+          }
+          assertFoldSafe();
+
+          const loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+          linked.throwIfAborted();
+          const fresh = createInitialState();
+          const nextState: CompressionState = isCompressionState(loaded.compressionState)
+            ? { ...fresh, stats: loaded.compressionState.stats }
+            : fresh;
+          assertFoldSafe();
+          await saveAcpSidecar(this.documents, this.sidecarScope, {
+            ...loaded,
+            compressionState: nextState,
+          });
+          // The kernel state is reset from here on: drop the cached view and
+          // status immediately so no path (abort, fold failure) leaves the
+          // stale compressed view eligible against the fresh sidecar.
+          this.lastView = undefined;
+          this.currentStatus = {
+            managerId: ACP_MANAGER_ID,
+            managerVersion: ACP_MANAGER_VERSION,
+            health: 'healthy',
+            refs: loaded.refs.length,
+            blocks: 0,
+            activeBlocks: 0,
+          };
+          linked.throwIfAborted();
+          assertFoldSafe();
+
+          const fullSummary = this.appendTodoList(summary);
+          const result = this.context.applyCompaction({
+            summary: fullSummary,
+            contextSummary: buildCompactionSummaryText(fullSummary),
+            compactedCount: live.length,
+            tokensBefore: task.tokenCount,
+            summaryOutputTokens: finish.usage.output,
+          });
+          return { handled: true, result };
         }),
     };
     this._register(requester.registerContextManager(manager));
@@ -265,6 +418,11 @@ export class AcpService extends Service implements IAcpService {
         }
         const nextSidecar = { ...view.sidecar, compressionState: state };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
+        // The cached transform output no longer matches this state: the new
+        // block folds content the cached view still shows. Invalidate right
+        // after the save — before the abort check — so an abort cannot exit
+        // with the stale view still eligible for the next transform/takeover.
+        this.lastView = undefined;
         linked.throwIfAborted();
         this.currentStatus = {
           managerId: ACP_MANAGER_ID,
@@ -350,6 +508,11 @@ export class AcpService extends Service implements IAcpService {
         linked.throwIfAborted();
         const nextSidecar = { ...view.sidecar, compressionState: next };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
+        // The cached transform output still hides what this restore just made
+        // visible again; invalidate right after the save — before the abort
+        // check — so an abort cannot leave a view that omits the restored
+        // content eligible for a takeover.
+        this.lastView = undefined;
         linked.throwIfAborted();
         this.currentStatus = {
           managerId: ACP_MANAGER_ID,
@@ -478,6 +641,7 @@ export class AcpService extends Service implements IAcpService {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
       await resetAcpSidecar(this.documents, this.sidecarScope);
+      this.lastView = undefined;
       this.lifetime.signal.throwIfAborted();
       this.currentStatus = {
         managerId: ACP_MANAGER_ID,
@@ -487,7 +651,6 @@ export class AcpService extends Service implements IAcpService {
         blocks: 0,
         activeBlocks: 0,
       };
-      this.lastView = undefined;
     });
   }
 
@@ -511,6 +674,14 @@ export class AcpService extends Service implements IAcpService {
       contextUsage: this.currentStatus.contextUsage,
       reason,
     };
+  }
+
+  private appendTodoList(summary: string): string {
+    const todos = this.todo.getTodos();
+    if (todos.length === 0) {
+      return summary;
+    }
+    return `${summary.trim()}\n\n${renderTodoList(todos, '## TODO List')}`;
   }
 }
 
@@ -688,6 +859,21 @@ function extendsSnapshot(current: readonly Message[], snapshot: readonly Message
     if (current[index] !== snapshot[index]) return false;
   }
   return true;
+}
+
+/**
+ * Prefix-race guard ahead of the fold, mirroring the built-in compaction's:
+ * the live history must still extend the snapshot the summary was built from,
+ * and anything appended mid-round must be real user input (the fold shape
+ * keeps such a tail alive).
+ */
+function historySafeToCompact(
+  current: readonly Message[],
+  original: readonly Message[],
+): boolean {
+  if (current.length < original.length) return false;
+  if (!original.every((message, index) => message === current[index])) return false;
+  return current.slice(original.length).every(isRealUserInput);
 }
 
 /**

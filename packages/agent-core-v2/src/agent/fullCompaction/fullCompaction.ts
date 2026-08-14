@@ -16,6 +16,8 @@ export interface FullCompactionTask {
   readonly promise: Promise<CompactionResult>;
   readonly trigger: CompactionSource;
   readonly tokenCount: number;
+  /** Turn that originated an auto/overflow round; undefined for manual. */
+  readonly originTurnId?: number;
   readonly traceId?: string;
 }
 

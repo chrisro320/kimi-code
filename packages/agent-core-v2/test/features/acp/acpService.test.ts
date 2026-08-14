@@ -17,6 +17,7 @@ import { AcpService } from '#/features/acp/acpService';
 import { ACP_SIDECAR_KEY, type AcpSidecar } from '#/features/acp/sidecar';
 import type { ContentPart, Message } from '#/kosong/contract/message';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { ISessionTodoService } from '#/session/todo/sessionTodo';
 
 interface StoreHarness {
   readonly values: Map<string, unknown>;
@@ -171,6 +172,10 @@ function createService(agentId = 'main', store = createStore()) {
     _serviceBrand: undefined,
     project,
   } as unknown as IAgentContextProjectorService);
+  ix.set(ISessionTodoService, {
+    _serviceBrand: undefined,
+    getTodos: () => [],
+  } as unknown as ISessionTodoService);
   ix.set(IAcpService, new SyncDescriptor(AcpService));
   const service = ix.get(IAcpService);
   return { disposables, requester, service, store, env, project };
