@@ -228,8 +228,8 @@ describe('ToolCallComponent', () => {
       const collapsed = strip(component.render(100).join('\n'));
       expect(collapsed).toContain('Running a command');
       expect(collapsed).toContain('echo step1');
-      expect(collapsed).toContain('echo step10');
-      expect(collapsed).not.toContain('echo step11');
+      expect(collapsed).toContain('echo step3');
+      expect(collapsed).not.toContain('echo step4');
 
       component.setExpanded(true);
 
@@ -256,8 +256,8 @@ describe('ToolCallComponent', () => {
       const out = strip(component.render(100).join('\n'));
       expect(out).toContain('Ran a command');
       expect(out).toContain('$ echo step1');
-      expect(out).toContain('echo step10');
-      expect(out).not.toContain('echo step11');
+      expect(out).toContain('echo step3');
+      expect(out).not.toContain('echo step4');
       expect(out).toContain('done');
       expect(out.split('$ echo step1').length - 1).toBe(1);
 
@@ -1621,13 +1621,13 @@ describe('ToolCallComponent', () => {
 
     const out = strip(component.render(100).join('\n'));
     expect(out).toContain('Using Write');
-    // Streaming preview caps at COMMAND_PREVIEW_LINES (10) and shows the tail.
+    // Streaming preview caps at COMMAND_PREVIEW_LINES (3) and shows the tail.
     expect(out).not.toContain('line1');
-    expect(out).not.toContain('line20');
-    expect(out).toContain('line21');
+    expect(out).not.toContain('line27');
+    expect(out).toContain('line28');
     expect(out).toContain('line30');
     // Line numbers should reflect actual file positions.
-    expect(out).toContain('  21');
+    expect(out).toContain('  28');
     expect(out).toContain('  30');
     expect(out).not.toContain('ctrl+o to expand');
   });
@@ -1719,8 +1719,8 @@ describe('ToolCallComponent', () => {
     );
     const out = strip(component.render(100).join('\n'));
     expect(out).toContain('line1');
-    expect(out).toContain('line10');
-    expect(out).not.toContain('line11');
+    expect(out).toContain('line3');
+    expect(out).not.toContain('line4');
     expect(out).not.toContain('line25');
     expect(out).toContain('ctrl+o to expand');
   });
@@ -1738,7 +1738,7 @@ describe('ToolCallComponent', () => {
       },
       undefined,
     );
-    expect(strip(component.render(100).join('\n'))).toContain('line25');
+    expect(strip(component.render(100).join('\n'))).toContain('line28');
 
     component.setResult({
       tool_call_id: 'call_write_snap',
@@ -1894,7 +1894,7 @@ describe('ToolCallComponent', () => {
 
     const collapsed = strip(component.render(100).join('\n'));
     expect(collapsed).toContain('line1');
-    expect(collapsed).toContain('line10');
+    expect(collapsed).toContain('line3');
     expect(collapsed).not.toContain('line25');
     expect(collapsed).toContain('ctrl+o to expand');
 

@@ -81,6 +81,7 @@ import {
   type SlashAutocompleteCommand,
 } from './components/editor/file-mention-provider';
 import { AssistantMessageComponent } from './components/messages/assistant-message';
+import { HookResultComponent } from './components/messages/hook-result';
 import { BackgroundAgentStatusComponent } from './components/messages/background-agent-status';
 import { CronMessageComponent } from './components/messages/cron-message';
 import { buildGoalMarker } from './components/messages/goal-markers';
@@ -2575,6 +2576,11 @@ export class KimiTUI {
       case 'assistant': {
         if (entry.content.trimStart().startsWith('✓ Goal complete')) {
           return new GoalCompletionMessageComponent(entry.content);
+        }
+        if (entry.hookResultData !== undefined) {
+          const hook = new HookResultComponent(entry.hookResultData);
+          if (this.state.toolOutputExpanded) hook.setExpanded(true);
+          return hook;
         }
         const component = new AssistantMessageComponent();
         component.updateContent(entry.content);

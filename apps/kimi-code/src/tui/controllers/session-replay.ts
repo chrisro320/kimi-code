@@ -23,6 +23,7 @@ import { formatBackgroundAgentTranscript } from '../utils/background-agent-statu
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
 import { modelDisplayName } from '../components/dialogs/model-selector';
 import { buildGoalCompletionMessage } from '../utils/goal-completion';
+import { formatHookResultBody } from '../utils/hook-result-format';
 import { formatBashOutputForDisplay } from '../utils/shell-output';
 import { markTranscriptComponent } from '../utils/transcript-component-metadata';
 import {
@@ -33,6 +34,7 @@ import {
   countActiveBackgroundTasks,
   createReplayRenderContext,
   formatHookResultMessageForTranscript,
+  hookResultBlocksForTranscript,
   isTerminalBackgroundTask,
   limitReplayRecordsByTurn,
   REPLAY_TURN_LIMIT,
@@ -526,18 +528,22 @@ export class SessionReplayRenderer {
   private renderHookResult(context: ReplayRenderContext, message: ContextMessage): void {
     if (message.origin?.kind !== 'hook_result') return;
     this.flushAssistant(context);
-    this.host.appendTranscriptEntry(
-      replayEntry(
+    const text = contentPartsToText(message.content);
+    const blocked = message.origin.blocked === true;
+    this.host.appendTranscriptEntry({
+      ...replayEntry(
         context,
         'assistant',
-        formatHookResultMessageForTranscript(
-          contentPartsToText(message.content),
-          message.origin.event,
-          message.origin.blocked === true,
-        ),
+        formatHookResultMessageForTranscript(text, message.origin.event, blocked),
         'markdown',
       ),
-    );
+      hookResultData: {
+        blocks: hookResultBlocksForTranscript(text, message.origin.event).map(
+          ({ event, body }) => ({ event, body: formatHookResultBody(body) }),
+        ),
+        blocked,
+      },
+    });
   }
 
   private renderCronJob(context: ReplayRenderContext, message: ContextMessage): void {

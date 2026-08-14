@@ -19,7 +19,13 @@ export const CHROME_GUTTER = 1;
 // Shared preview caps used by thinking, tool results, and shell snippets.
 export const RESULT_PREVIEW_LINES = 3;
 export const THINKING_PREVIEW_LINES = 2;
-export const COMMAND_PREVIEW_LINES = 10;
+export const COMMAND_PREVIEW_LINES = 3;
+
+// Hook-result and cron cards carry model-facing text (policy blocks, keepalive
+// prompts) that is noise to the reader, so their body collapses entirely and
+// only the header survives. Collapsing a body that already fits in one line
+// would save nothing, hence the `> cap + 1` guard at the call sites.
+export const CARD_BODY_PREVIEW_LINES = 0;
 
 // Cap on the step-retry detail line under the waiting spinner, so huge
 // provider error bodies (occasionally whole HTML error pages) can't flood

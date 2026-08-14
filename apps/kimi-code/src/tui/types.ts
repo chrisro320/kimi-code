@@ -252,6 +252,23 @@ export interface PluginCommandTranscriptData {
   readonly trigger: 'user-slash';
 }
 
+export interface HookResultBlock {
+  readonly event: string;
+  readonly body: string;
+}
+
+/**
+ * Render-only side channel for hook-result cards. The entry keeps kind
+ * 'assistant' and the original markdown in `content` so /copy, markdown
+ * export, and session search stay unchanged; only the transcript component
+ * reads this. Replay can fold several hook payloads into one card, hence the
+ * block list.
+ */
+export interface HookResultTranscriptData {
+  readonly blocks: readonly HookResultBlock[];
+  readonly blocked: boolean;
+}
+
 export interface TranscriptEntry {
   id: string;
   kind: TranscriptEntryKind;
@@ -274,6 +291,7 @@ export interface TranscriptEntry {
   compactionData?: CompactionTranscriptData;
   cronData?: CronTranscriptData;
   goalData?: GoalTranscriptData;
+  hookResultData?: HookResultTranscriptData;
   imageAttachmentIds?: readonly number[];
   skillActivationId?: string;
   skillName?: string;

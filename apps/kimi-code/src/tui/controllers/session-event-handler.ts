@@ -60,7 +60,7 @@ import {
   type UpcomingGoal,
 } from '../goal-queue-store';
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
-import { formatHookResultMarkdown } from '../utils/hook-result-format';
+import { formatHookResultBody, formatHookResultMarkdown } from '../utils/hook-result-format';
 import { McpOAuthAuthorizationUrlOpener } from '../utils/mcp-oauth';
 import {
   formatMcpStartupStatusSummary,
@@ -599,6 +599,10 @@ export class SessionEventHandler {
       turnId: String(event.turnId),
       renderMode: 'markdown',
       content: formatHookResultMarkdown(event),
+      hookResultData: {
+        blocks: [{ event: event.hookEvent, body: formatHookResultBody(event.content) }],
+        blocked: event.blocked === true,
+      },
     });
     this.host.patchLivePane({
       mode: 'idle',
