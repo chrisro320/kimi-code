@@ -159,10 +159,9 @@ describe('ToolCallComponent', () => {
 
     const collapsed = strip(component.render(100).join('\n'));
     expect(collapsed).toContain('line1');
-    expect(collapsed).toContain('line2');
-    expect(collapsed).toContain('line3');
+    expect(collapsed).not.toContain('line2');
     expect(collapsed).not.toContain('line4');
-    expect(collapsed).toContain('... (2 more lines, ctrl+o to expand)');
+    expect(collapsed).toContain('... (4 more lines, ctrl+o to expand)');
 
     component.setExpanded(true);
 
@@ -187,8 +186,10 @@ describe('ToolCallComponent', () => {
 
     const out = strip(component.render(100).join('\n'));
     expect(out).toContain('Running a command');
-    expect(out).toContain('line1');
+    // Live output tails: the newest row stays, older rows collapse into the
+    // leading hint.
     expect(out).toContain('line2');
+    expect(out).toContain('... (1 earlier lines)');
   });
 
   it('clears live Bash output when the final result arrives', () => {
@@ -228,8 +229,8 @@ describe('ToolCallComponent', () => {
       const collapsed = strip(component.render(100).join('\n'));
       expect(collapsed).toContain('Running a command');
       expect(collapsed).toContain('echo step1');
-      expect(collapsed).toContain('echo step3');
-      expect(collapsed).not.toContain('echo step4');
+      expect(collapsed).not.toContain('echo step2');
+      expect(collapsed).toContain('... (14 more lines, ctrl+o to expand)');
 
       component.setExpanded(true);
 
@@ -256,8 +257,8 @@ describe('ToolCallComponent', () => {
       const out = strip(component.render(100).join('\n'));
       expect(out).toContain('Ran a command');
       expect(out).toContain('$ echo step1');
-      expect(out).toContain('echo step3');
-      expect(out).not.toContain('echo step4');
+      expect(out).not.toContain('echo step2');
+      expect(out).toContain('... (14 more lines, ctrl+o to expand)');
       expect(out).toContain('done');
       expect(out.split('$ echo step1').length - 1).toBe(1);
 
@@ -279,7 +280,7 @@ describe('ToolCallComponent', () => {
       const out = strip(component.render(100).join('\n'));
       expect(out).toContain('Ran a command');
       expect(out).toContain('$ mkdir -p a/b/c');
-      expect(out).toContain('echo done');
+      expect(out).toContain('... (1 more lines, ctrl+o to expand)');
     });
   });
 

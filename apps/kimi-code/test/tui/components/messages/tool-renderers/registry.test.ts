@@ -62,17 +62,16 @@ describe('tool-result registry', () => {
     const renderer = pickResultRenderer('SomethingUnknown');
     const out = strip(joinRender(renderer(call('SomethingUnknown'), result('a\nb\nc\nd\ne'), ctx)));
     expect(out).toContain('a');
-    expect(out).toContain('b');
-    expect(out).toContain('c');
+    expect(out).not.toContain('\nb');
     expect(out).not.toContain('\nd');
-    expect(out).toContain('... (2 more lines, ctrl+o to expand)');
+    expect(out).toContain('... (4 more lines, ctrl+o to expand)');
   });
 
   it('uses truncated renderer for Bash to preserve raw output UX', () => {
     const renderer = pickResultRenderer('Bash');
     const out = strip(joinRender(renderer(call('Bash'), result('one\ntwo\nthree\nfour'), ctx)));
     expect(out).toContain('one');
-    expect(out).toContain('... (1 more lines, ctrl+o to expand)');
+    expect(out).toContain('... (3 more lines, ctrl+o to expand)');
   });
 
   it('Read renders no body when collapsed (header chip carries the count)', () => {

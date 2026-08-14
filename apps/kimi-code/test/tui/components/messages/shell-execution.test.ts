@@ -33,9 +33,9 @@ describe('ShellExecutionComponent', () => {
 
     const collapsedOutput = collapsed.render(100).map(strip).join('\n');
     expect(collapsedOutput).toContain('line1');
-    expect(collapsedOutput).toContain('line3');
+    expect(collapsedOutput).not.toContain('line3');
     expect(collapsedOutput).not.toContain('line4');
-    expect(collapsedOutput).toContain('... (2 more lines, ctrl+o to expand)');
+    expect(collapsedOutput).toContain('... (4 more lines, ctrl+o to expand)');
 
     const expanded = new ShellExecutionComponent({
       result: {
@@ -65,6 +65,51 @@ describe('ShellExecutionComponent', () => {
     expect(output).toContain('step20');
   });
 
+  it('caps a long single-line command by wrapped rows, not newlines', () => {
+    // `a && b && c` chains are one logical line but wrap to many rows; counting
+    // newlines let them escape the cap entirely.
+    const command =
+      'export PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH"; cd /home/chris/orca/projects/kimi-agent && pnpm run build:native:sea && ./dist-native/bin/linux-x64/kimi --version && sha256sum "$TARGET"';
+    const component = new ShellExecutionComponent({
+      command,
+      showCommand: true,
+      commandPreviewLines: 3,
+    });
+
+    const output = component.render(60).map(strip).join('\n');
+    expect(output).toContain('$ export');
+    expect(output).toContain('ctrl+o to expand');
+    expect(output).not.toContain('sha256sum');
+  });
+
+  it('drops the command cap hint once expanded', () => {
+    const command =
+      'export PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH"; cd /home/chris/orca/projects/kimi-agent && pnpm run build:native:sea && ./dist-native/bin/linux-x64/kimi --version && sha256sum "$TARGET"';
+    const component = new ShellExecutionComponent({
+      command,
+      showCommand: true,
+      commandPreviewLines: undefined,
+    });
+
+    const output = component.render(60).map(strip).join('\n');
+    expect(output).toContain('sha256sum');
+    expect(output).not.toContain('ctrl+o to expand');
+  });
+
+  it('tells the user how many command rows were hidden', () => {
+    const command = Array.from({ length: 9 }, (_, i) => `echo step${String(i + 1)}`).join('\n');
+    const component = new ShellExecutionComponent({
+      command,
+      showCommand: true,
+      commandPreviewLines: 3,
+    });
+
+    const output = component.render(100).map(strip).join('\n');
+    expect(output).toContain('echo step3');
+    expect(output).not.toContain('echo step4');
+    expect(output).toContain('... (6 more lines, ctrl+o to expand)');
+  });
+
   it('does not count trailing empty lines toward the preview cap', () => {
     const component = new ShellExecutionComponent({
       result: {
@@ -86,6 +131,8 @@ describe('ShellExecutionComponent', () => {
         output: 'a\n\nb\n\n\n', // 1 internal empty line + 2 trailing empty lines
         is_error: false,
       },
+      // Explicit cap: this asserts the trimming rule, not the collapse cap.
+      resultPreviewLines: 3,
     });
 
     const output = component.render(100).map(strip).join('\n');

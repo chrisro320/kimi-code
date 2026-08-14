@@ -1,5 +1,5 @@
 import type { Component } from '@moonshot-ai/pi-tui';
-import { Container, Text } from '@moonshot-ai/pi-tui';
+import { Container, Text, truncateToWidth } from '@moonshot-ai/pi-tui';
 
 import { currentTheme } from '#/tui/theme';
 import type { ToolCallBlockData, ToolResultBlockData } from '#/tui/types';
@@ -7,6 +7,59 @@ import type { ToolCallBlockData, ToolResultBlockData } from '#/tui/types';
 import type { ResultRenderer } from './tool-renderers/types';
 import { PREVIEW_LINES } from './tool-renderers/types';
 import { TruncatedOutputComponent } from './tool-renderers/truncated';
+
+// `  $ ` — two cells of block indent plus the two-cell prompt. The command
+// body renders at this indent so wrapped rows line up under the first one.
+const COMMAND_INDENT = 4;
+
+/**
+ * Wrap-aware command preview.
+ *
+ * The cap counts *rendered* rows rather than `\n`s: a one-line `a && b && c`
+ * chain wraps to many rows and would otherwise escape the cap entirely, which
+ * is how long deploy one-liners kept filling the transcript. The first row's
+ * indent is swapped for the `$ ` prompt after wrapping, so the prompt stays
+ * column-aligned with the continuation rows.
+ */
+class CommandPreviewComponent implements Component {
+  private readonly textComponent: Text;
+  private readonly maxLines: number | undefined;
+
+  constructor(command: string, maxLines: number | undefined) {
+    // Distinguish the command (input) from the result (output): the `$` prompt
+    // uses the dedicated shell-mode hue, the command body uses `textDim`, and
+    // the result below is one step dimmer in `textMuted` so the two stay
+    // separable without a connecting glyph.
+    this.textComponent = new Text(currentTheme.dim(command), COMMAND_INDENT, 0);
+    this.maxLines = maxLines;
+  }
+
+  invalidate(): void {
+    this.textComponent.invalidate();
+  }
+
+  render(width: number): string[] {
+    const allLines = this.textComponent.render(width);
+    const cap = this.maxLines;
+    const capped = cap !== undefined && allLines.length > cap;
+    const shown = capped ? allLines.slice(0, cap) : allLines;
+
+    const lines = shown.map((line, i) =>
+      i === 0 ? `  ${currentTheme.fg('shellMode', '$ ')}${line.slice(COMMAND_INDENT)}` : line,
+    );
+
+    if (capped) {
+      const remaining = allLines.length - cap;
+      const hint = `... (${String(remaining)} more lines, ctrl+o to expand)`;
+      const indentWidth = Math.min(COMMAND_INDENT, Math.max(0, width));
+      lines.push(
+        ' '.repeat(indentWidth) +
+          currentTheme.dim(truncateToWidth(hint, Math.max(0, width - indentWidth), '…')),
+      );
+    }
+    return lines;
+  }
+}
 
 export interface ShellExecutionOptions {
   readonly command?: string;
@@ -45,19 +98,7 @@ export class ShellExecutionComponent extends Container {
 
   private addCommandPreview(command: string, previewLines: number | undefined): void {
     if (command.length === 0) return;
-    const allLines = command.split('\n');
-    const lines = previewLines === undefined ? allLines : allLines.slice(0, previewLines);
-    for (const [i, line] of lines.entries()) {
-      // Distinguish the command (input) from the result (output): the `$`
-      // prompt uses the dedicated shell-mode hue, the command body uses
-      // `textDim`, and the result below is rendered one step dimmer in
-      // `textMuted` so the two stay separable without a connecting glyph.
-      const text =
-        i === 0
-          ? currentTheme.fg('shellMode', '$ ') + currentTheme.dim(line)
-          : `  ${currentTheme.dim(line)}`;
-      this.addChild(new Text(text, 2, 0));
-    }
+    this.addChild(new CommandPreviewComponent(command, previewLines));
   }
 
   private addResultPreview(

@@ -17,9 +17,17 @@ export const OSC133_ZONE_FINAL = '\x1b]133;C\x07';
 export const CHROME_GUTTER = 1;
 
 // Shared preview caps used by thinking, tool results, and shell snippets.
-export const RESULT_PREVIEW_LINES = 3;
+// All of these count *rendered* rows, not `\n`s — a single long line that
+// wraps must collapse like a multi-line block does, or `a && b && c` deploy
+// one-liners escape the cap entirely.
+export const RESULT_PREVIEW_LINES = 1;
 export const THINKING_PREVIEW_LINES = 2;
-export const COMMAND_PREVIEW_LINES = 3;
+// The shell command itself. Deploy one-liners are mostly `cd` + chained `&&`
+// noise, so one row plus the expand hint is the whole budget.
+export const COMMAND_PREVIEW_LINES = 1;
+// Write content and Edit diffs. Kept wider than the command cap: when a file
+// is being changed, seeing what changed is the point of the card.
+export const DIFF_PREVIEW_LINES = 3;
 
 // Hook-result and cron cards carry model-facing text (policy blocks, keepalive
 // prompts) that is noise to the reader, so their body collapses entirely and
