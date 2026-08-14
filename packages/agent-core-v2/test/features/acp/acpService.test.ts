@@ -1043,6 +1043,152 @@ describe('AcpService', () => {
     expect(setup.project).toHaveBeenCalledOnce();
   });
 
+  it('does not bind a stale view when a clear lands while a second transform waits in the queue', async () => {
+    const store = createStore();
+    const setup = createService('main', store);
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    let releaseLoad: (value: unknown) => void = () => undefined;
+    store.get.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = resolve;
+        }),
+    );
+
+    // The first transform parks on its sidecar load; the second queues behind
+    // it. A clear landing while the second waits must not let it bind the
+    // pre-clear view once it dequeues.
+    const first = transform(setup.requester.manager(), messages);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = transform(setup.requester.manager(), messages);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setup.env.history = [];
+    releaseLoad(undefined);
+    await first;
+    const outcome = await second;
+    expect(outcome.accounting).toBe('raw-equivalent');
+
+    const result = await setup.service.search({ query: 'MARKER-7' });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('No ACP context matches');
+    expect(setup.project).toHaveBeenCalledOnce();
+    expect(setup.project).toHaveBeenCalledWith([]);
+  });
+
+  it('rebuilds the tool view when the live context is appended mid-transform', async () => {
+    const store = createStore();
+    const setup = createService('main', store);
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    let releaseLoad: (value: unknown) => void = () => undefined;
+    store.get.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = resolve;
+        }),
+    );
+
+    // An append landing mid-transform (not a clear) diverges the live context
+    // from the pre-transform snapshot; the final binding check must drop the
+    // cached view so the next tool view rebuilds and sees the appended tail.
+    const appended = textMessage(`tail marker ${'x'.repeat(3000)}`);
+    const pending = transform(setup.requester.manager(), messages);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setup.env.history = [...messages, appended];
+    releaseLoad(
+      store.values.get(`sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`),
+    );
+    await pending;
+
+    const result = await setup.service.search({ query: 'tail marker' });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('tail marker');
+    expect(setup.project).toHaveBeenCalledOnce();
+    expect(setup.project).toHaveBeenCalledWith([...messages, appended]);
+  });
+
+  it('invalidates the cached view and fails tools closed when the provider reports no context limit', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+
+    // The zero-limit turn degrades; the degrade must drop the previous turn's
+    // view so tools rebuild against the appended history, and tools must fail
+    // closed instead of running the kernel with a garbage config.
+    const appended = textMessage(`appended marker ${'x'.repeat(3000)}`);
+    setup.env.history = [...messages, appended];
+    await transform(setup.requester.manager(), setup.env.history, new AbortController().signal, {
+      usedContextTokens: 10,
+      maxContextTokens: 0,
+    });
+    expect(setup.service.status()).toMatchObject({ health: 'degraded' });
+
+    const found = await setup.service.search({ query: 'appended marker' });
+
+    expect(found.ok).toBe(true);
+    expect(found.message).toContain('appended marker');
+    expect(setup.project).toHaveBeenCalledOnce();
+    expect(setup.project).toHaveBeenCalledWith([...messages, appended]);
+
+    const compressed = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    expect(compressed.ok).toBe(false);
+    expect(compressed.message).toContain('no context limit');
+    const reported = await setup.service.statusReport();
+    expect(reported.ok).toBe(false);
+    expect(reported.message).toContain('no context limit');
+    expect(setup.store.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to persist a compress when the manager is disabled mid-flight', async () => {
+    const store = createStore();
+    const setup = createService('main', store);
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    const requester = setup.requester.service as unknown as {
+      getActiveContextManager: () => ContextManager;
+    };
+    let releaseLoad: (value: unknown) => void = () => undefined;
+    store.get.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = resolve;
+        }),
+    );
+
+    // The compress parks on the sidecar load after its first active-manager
+    // check; a disable landing in that window must fail the call closed
+    // without persisting the fold.
+    const pending = setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    requester.getActiveContextManager = () => ({ id: 'other-manager' }) as ContextManager;
+    releaseLoad(
+      store.values.get(`sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`),
+    );
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('not the active context manager');
+    const sidecar = store.values.get(
+      `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect((sidecar.compressionState as { blocks: unknown[] }).blocks).toHaveLength(0);
+    expect(setup.store.set).toHaveBeenCalledTimes(1);
+  });
+
   it('fails open when the provider reports no context limit', async () => {
     const setup = createService();
     owned.push(setup.disposables);

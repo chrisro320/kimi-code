@@ -83,6 +83,8 @@ function refFor(index: number): string {
 describe('ACP long-session benchmark (synthetic)', () => {
   it('bounds input size across folds while preserving recoverability and fidelity', async () => {
     const baseline = await runLongSession(false, 13);
+    await baseline.ctx.dispose();
+
     const acp = await runLongSession(true);
 
     try {
@@ -145,7 +147,6 @@ describe('ACP long-session benchmark (synthetic)', () => {
       expect(postRestoreCall.historyText).toContain('turn 3 qqq');
       expect(postRestoreCall.chars).toBeGreaterThan(acpFinal);
     } finally {
-      await baseline.ctx.dispose();
       await acp.ctx.dispose();
     }
   });

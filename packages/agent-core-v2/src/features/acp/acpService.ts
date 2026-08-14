@@ -38,13 +38,17 @@
  * misses in-place edits and undo+regrow, which would let tools act on undone
  * content — and fold eligibility re-checks the prefix after every await
  * because a prefix rewrite (undo/edit) between checks would fold messages
- * the summary never covered. The transform binds the view only when the live
- * context reference is unchanged since the transform began, so a mid-turn
- * clear or rewrite cannot pin the pre-change view onto a trivially-empty
- * snapshot that every later history would extend. Rebuilt histories append
+ * the summary never covered. The transform snapshots the live context when
+ * it is requested — before the serialize queue wait, so a clear landing
+ * while queued cannot bind a stale view — and binds the view only when the
+ * live context reference is still unchanged at the end; a mid-turn clear,
+ * rewrite, or append instead drops the cached view so the next tool view
+ * rebuilds from live history. Rebuilt histories append
  * at the tail, keeping every existing provider prefix intact. On reset the cached view and status
  * are dropped immediately so no exit path (abort, fold failure) leaves a
- * stale compressed view eligible against the fresh sidecar.
+ * stale compressed view eligible against the fresh sidecar; a degrade drops
+ * the cached view as well, so the previous turn's view is never served
+ * against appended history.
  *
  * Tool semantics: compress is all-or-nothing — a rejected range fails the
  * whole call, so the model can retry the batch without hitting
@@ -60,7 +64,11 @@
  * originals visible and lets a nested child block fold its own range again
  * (exactly shallow, one-tier-up restore), while a retained inactive block
  * points the model at its consuming ancestor. Consumed blocks always precede
- * their consumer (kernel appends), which makes the lineage acyclic.
+ * their consumer (kernel appends), which makes the lineage acyclic. Tool
+ * calls fail closed when the last transform reported no provider context
+ * limit, and re-check the active-manager guard after the awaited sidecar
+ * read so a disable landing mid-call cannot persist a mutation the requester
+ * no longer owns.
  *
  * Durability fails open: a read-path load or validation failure never
  * silently resets corrupt durable state — the original bytes are kept for
@@ -196,11 +204,11 @@ export class AcpService extends Service implements IAcpService {
     const manager: ContextManager = {
       id: ACP_MANAGER_ID,
       version: ACP_MANAGER_VERSION,
-      transformMessages: ({ messages, usedContextTokens, maxContextTokens, signal }) =>
-        this.serialize(async () => {
+      transformMessages: ({ messages, usedContextTokens, maxContextTokens, signal }) => {
+        const sourceBefore = this.context.get();
+        return this.serialize(async () => {
           const linked = AbortSignal.any([signal, this.lifetime.signal]);
           let durableRefs = this.currentStatus.refs;
-          const sourceBefore = this.context.get();
           try {
             linked.throwIfAborted();
             this.lastUsage = { usedContextTokens, maxContextTokens };
@@ -264,6 +272,8 @@ export class AcpService extends Service implements IAcpService {
             const outgoing = nudge === undefined ? base : [...base, nudge];
             if (this.context.get() === sourceBefore) {
               this.lastView = { source: sourceBefore, view: messages, compacted: outgoing };
+            } else {
+              this.lastView = undefined;
             }
             if (tagOnly && nudge === undefined) {
               return { messages: outgoing, accounting: 'raw-equivalent' as const };
@@ -274,7 +284,8 @@ export class AcpService extends Service implements IAcpService {
             this.degrade(errorMessage(error), durableRefs);
             return { messages, accounting: 'raw-equivalent' as const };
           }
-        }),
+        });
+      },
       onWillCompact: ({ task, input, signal }) =>
         this.serialize(async (): Promise<CompactDelegation> => {
           const linked = AbortSignal.any([signal, this.lifetime.signal]);
@@ -390,6 +401,12 @@ export class AcpService extends Service implements IAcpService {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
       try {
+        if (this.lastUsage.maxContextTokens <= 0) {
+          return {
+            ok: false,
+            message: 'ACP status failed: the provider reports no context limit.',
+          };
+        }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
         const usage = this.core.status(
@@ -442,6 +459,12 @@ export class AcpService extends Service implements IAcpService {
         if (!this.isActive()) {
           return { ok: false, message: 'ACP is not the active context manager.' };
         }
+        if (this.lastUsage.maxContextTokens <= 0) {
+          return {
+            ok: false,
+            message: 'ACP compression failed: the provider reports no context limit.',
+          };
+        }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
         const { state, result } = this.core.applyCompression({
@@ -461,6 +484,9 @@ export class AcpService extends Service implements IAcpService {
           };
         }
         const nextSidecar = { ...view.sidecar, compressionState: state };
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
         this.lastView = undefined;
         this.setStatus({
@@ -541,6 +567,9 @@ export class AcpService extends Service implements IAcpService {
         };
         linked.throwIfAborted();
         const nextSidecar = { ...view.sidecar, compressionState: next };
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
         this.lastView = undefined;
         this.setStatus({
@@ -580,6 +609,9 @@ export class AcpService extends Service implements IAcpService {
         }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         const ownerByMessage = new Map<string, CompressionBlock>();
         for (const block of view.state.blocks) {
           if (!block.active) continue;
@@ -722,6 +754,7 @@ export class AcpService extends Service implements IAcpService {
   }
 
   private degrade(reason: string, refs: number): void {
+    this.lastView = undefined;
     this.setStatus({
       managerId: ACP_MANAGER_ID,
       managerVersion: ACP_MANAGER_VERSION,
