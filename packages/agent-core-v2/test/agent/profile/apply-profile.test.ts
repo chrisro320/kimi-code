@@ -14,15 +14,21 @@ import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
 import type { SkillCatalog } from '#/app/skillCatalog/types';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import {
+  ISessionMetadata,
+  type SessionMetadataChangedEvent,
+} from '#/session/sessionMetadata/sessionMetadata';
+import {
   BUILTIN_SKILL_SOURCE_ID,
   PLUGIN_SKILL_SOURCE_ID,
 } from '#/app/skillCatalog/skillSource';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { DEFAULT_PRODUCT_NAME } from '#/app/agentProfileCatalog/profile-shared';
+import { IWireService } from '#/wire/wire';
 
 import { stubAgentIdentity } from '../../app/agentIdentity/stubs';
 
 import {
+  InMemoryWireRecordPersistence,
   appService,
   createTestAgent,
   execEnvServices,
@@ -164,6 +170,121 @@ describe('AgentProfileService.applyProfile', () => {
 
     expect(svc.data().systemPrompt).toBe(exactSystemPrompt(workDir, 'new instructions'));
     expect(svc.getActiveToolNames()).toEqual(['Read']);
+  });
+
+  it('keeps the cwd listing frozen without persisting an identical prompt update', async () => {
+    const persistence = new InMemoryWireRecordPersistence();
+    const { ctx: context, profile: svc } = buildContext({ persistence });
+    await svc.applyProfile(exactProfile);
+    await context.get(IWireService).flush();
+    const initialPrompt = svc.getSystemPrompt();
+    const initialGeneration = svc.data().renderGeneration;
+    const recordCount = persistence.records.length;
+    await writeFile(join(workDir, 'created-after-bind.txt'), 'new file', 'utf-8');
+
+    await svc.refreshSystemPrompt();
+    await context.get(IWireService).flush();
+
+    expect(svc.getSystemPrompt()).toBe(initialPrompt);
+    expect(svc.data().renderGeneration).toBe(initialGeneration);
+    expect(
+      persistence.records.slice(recordCount).filter((record) => record['systemPrompt'] !== undefined),
+    ).toEqual([]);
+
+    await context.dispose();
+    const { profile: nextAgent } = buildContext();
+    await nextAgent.applyProfile(exactProfile);
+    expect(nextAgent.getSystemPrompt()).toContain('created-after-bind.txt');
+  });
+
+  it('does not persist an identical prompt when applying the active profile again', async () => {
+    const persistence = new InMemoryWireRecordPersistence();
+    const { ctx: context, profile: svc } = buildContext({ persistence });
+    await svc.applyProfile(exactProfile);
+    await context.get(IWireService).flush();
+    const initialGeneration = svc.data().renderGeneration;
+    const recordCount = persistence.records.length;
+
+    await svc.applyProfile(exactProfile);
+    await context.get(IWireService).flush();
+
+    expect(svc.data().renderGeneration).toBe(initialGeneration);
+    expect(
+      persistence.records.slice(recordCount).filter((record) => record['systemPrompt'] !== undefined),
+    ).toEqual([]);
+  });
+
+  it('keeps explicit additional directory listings live across prompt refreshes', async () => {
+    const extraDir = await mkdtemp(join(tmpdir(), 'kimi-apply-extra-'));
+    try {
+      await writeFile(join(extraDir, 'before.txt'), 'old file', 'utf-8');
+      const { profile: svc } = buildContext();
+      await svc.applyProfile(exactProfile, { additionalDirs: [extraDir] });
+      expect(svc.getSystemPrompt()).toContain('before.txt');
+
+      await writeFile(join(extraDir, 'after.txt'), 'new file', 'utf-8');
+      await svc.refreshSystemPrompt();
+
+      expect(svc.getSystemPrompt()).toContain('after.txt');
+    } finally {
+      await rm(extraDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the latest successful explicit additional directories on refresh', async () => {
+    const firstDir = await mkdtemp(join(tmpdir(), 'kimi-apply-extra-first-'));
+    const secondDir = await mkdtemp(join(tmpdir(), 'kimi-apply-extra-second-'));
+    try {
+      await writeFile(join(firstDir, 'first.txt'), 'first file', 'utf-8');
+      await writeFile(join(secondDir, 'second.txt'), 'second file', 'utf-8');
+      const { profile: svc } = buildContext();
+      await svc.applyProfile(exactProfile, { additionalDirs: [firstDir] });
+      await svc.applyProfile(exactProfile, { additionalDirs: [secondDir] });
+      await writeFile(join(secondDir, 'after-switch.txt'), 'new file', 'utf-8');
+
+      await svc.refreshSystemPrompt();
+
+      expect(svc.getSystemPrompt()).toContain('second.txt');
+      expect(svc.getSystemPrompt()).toContain('after-switch.txt');
+      expect(svc.getSystemPrompt()).not.toContain('first.txt');
+    } finally {
+      await rm(firstDir, { recursive: true, force: true });
+      await rm(secondDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not freeze a cwd listing from a failed context build', async () => {
+    let shouldFail = false;
+    const createdAt = Date.parse('2026-08-12T00:00:00.000Z');
+    const metadata: ISessionMetadata = {
+      _serviceBrand: undefined,
+      ready: Promise.resolve(),
+      onDidChangeMetadata: Event.None as Event<SessionMetadataChangedEvent>,
+      read: async () => {
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error('metadata unavailable');
+        }
+        return {
+          id: 'test-session',
+          createdAt,
+          updatedAt: createdAt,
+          archived: false,
+        };
+      },
+      update: async () => {},
+      setTitle: async () => {},
+      setArchived: async () => {},
+      registerAgent: async () => {},
+    };
+    const { profile: svc } = buildContext(sessionService(ISessionMetadata, metadata));
+    shouldFail = true;
+
+    await expect(svc.applyProfile(exactProfile)).rejects.toThrow('metadata unavailable');
+    await writeFile(join(workDir, 'created-after-failure.txt'), 'new file', 'utf-8');
+    await svc.applyProfile(exactProfile);
+
+    expect(svc.getSystemPrompt()).toContain('created-after-failure.txt');
   });
 
   it('caches an agents-md warning when the content exceeds the 32 KB soft budget', async () => {

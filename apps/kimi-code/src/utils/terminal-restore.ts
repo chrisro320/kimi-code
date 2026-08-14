@@ -13,9 +13,13 @@
  * path must never throw.
  */
 
-// Show cursor (`?25h`), disable bracketed paste (`?2004l`), pop the Kitty
-// keyboard protocol (`<u`), and reset modifyOtherKeys (`>4;0m`).
-const TERMINAL_RESTORE_SEQUENCE = '\u001B[?25h\u001B[?2004l\u001B[<u\u001B[>4;0m';
+// Disable SGR encoding, all-motion/button-motion/button mouse tracking, focus
+// reporting, and appearance reporting before restoring ordinary shell modes. Leave the
+// alternate screen last so every preceding control sequence targets the TUI
+// surface, then show the cursor on the restored shell surface.
+export const TERMINAL_RESTORE_SEQUENCE =
+  '\u001B[?1006l\u001B[?1003l\u001B[?1002l\u001B[?1000l' +
+  '\u001B[?1004l\u001B[?2031l\u001B[?2004l\u001B[<u\u001B[>4;0m\u001B[?1049l\u001B[?25h';
 
 export function restoreTerminalModes(): void {
   try {

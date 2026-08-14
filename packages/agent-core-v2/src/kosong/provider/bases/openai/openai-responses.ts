@@ -11,6 +11,11 @@
  * classification (already-converted errors crossing an outer catch pass
  * through without re-consulting). The developer-role model detection lives
  * here.
+ *
+ * The SDK client is built with `maxRetries: 0`: the SDK's internal backoff
+ * sleep never observes the turn's AbortSignal, so rate-limit / server /
+ * connection retry is owned by the engine's step-retry layer (observable and
+ * cancellable), never by the SDK.
  */
 
 import OpenAI from 'openai';
@@ -1304,6 +1309,55 @@ export function decodeCompactionResponse(body: unknown): CompactionResponseOutco
   };
 }
 
+async function decodeCompactionStream(
+  response: unknown,
+  convertErrorHook: ((error: unknown) => ChatProviderError | undefined) | undefined,
+): Promise<CompactionResponseOutcome> {
+  if (typeof response !== 'object' || response === null || !(Symbol.asyncIterator in response)) {
+    return decodeCompactionResponse(response);
+  }
+
+  const output: unknown[] = [];
+  let completedResponse: RawObject | undefined;
+  for await (const value of response as AsyncIterable<unknown>) {
+    const event = asRawObject(value);
+    if (event === null) {
+      failResponsesDecode('compaction stream event', 'must be an object.');
+    }
+    const type = requireStringField(event, 'type', 'compaction stream event');
+    if (type === 'response.output_item.done') {
+      output.push(event['item']);
+    } else if (type === 'response.completed' || type === 'response.incomplete') {
+      completedResponse = requireObjectField(event, 'response', type);
+    } else if (type === 'error') {
+      throw errorFromOpenAIResponsesEvent(
+        'OpenAI Responses compaction stream error',
+        readNullableStringField(event, 'code') ?? null,
+        requireStringField(event, 'message', type),
+        readNullableStringField(event, 'param') ?? null,
+        { rawEvent: event, convertErrorHook },
+      );
+    } else if (type === 'response.failed') {
+      const failedResponse = requireObjectField(event, 'response', type);
+      const error = readResponsesFailedResponseError(failedResponse);
+      if (error !== undefined) {
+        throw errorFromOpenAIResponsesEvent(
+          'OpenAI Responses compaction response.failed',
+          error.code,
+          error.message,
+          null,
+          { rawEvent: event, convertErrorHook },
+        );
+      }
+      throw new ChatProviderError(
+        `OpenAI Responses compaction response.failed: ${formatResponsesFailedResponse(failedResponse)}`,
+      );
+    }
+  }
+
+  return decodeCompactionResponse({ ...completedResponse, output });
+}
+
 export class OpenAIResponsesChatProvider implements ChatProvider {
   readonly name: string = 'openai-responses';
 
@@ -1534,57 +1588,33 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
 
     try {
       const client = this._createClient(options?.auth);
+      const responses = (
+        client as {
+          responses?: {
+            create?: (params: unknown, opts?: unknown) => Promise<unknown>;
+            compact?: (params: unknown, opts?: unknown) => Promise<unknown>;
+          };
+        }
+      ).responses;
       if (
-        !('responses' in client) ||
-        typeof (client as { responses?: { compact?: unknown } }).responses?.compact !== 'function'
+        responses === undefined ||
+        (typeof responses.create !== 'function' && typeof responses.compact !== 'function')
       ) {
-        throw new ChatProviderError(
-          'OpenAI SDK version does not support the Responses compaction endpoint.',
-        );
+        throw new ChatProviderError('OpenAI SDK version does not support Responses compaction.');
       }
 
-      // No `store`: unlike `/responses`, the compaction endpoint rejects it
-      // outright ("Unknown parameter: 'store'"). Compaction is stateless here
-      // either way — the checkpoint comes back in the response body.
-      const params: Record<string, unknown> = {
-        model: this._model,
-        input: wireInput,
-      };
+      const params: Record<string, unknown> = { model: this._model, input: wireInput };
       if (input.systemPrompt) {
         params['instructions'] = input.systemPrompt;
       }
-      // Mirror the deferred strip the loop path applies before a request
-      // reaches the wire (`providerVisibleTools` in llmRequesterService):
-      // deferred tool schemas travel via message-level declarations, and one
-      // extra top-level tool voids the prompt cache outright.
       const wireTools = input.tools.filter((tool) => tool.deferred !== true);
       if (wireTools.length > 0) {
         params['tools'] = wireTools.map((tool) => convertTool(tool));
-        // Prefix alignment: the two endpoints render a tool-calling preamble
-        // from different defaults for this flag, and `/responses` (which
-        // never sends it either) matches the `false` rendering. Omitting it
-        // here breaks the prefix partway through the tool block and the
-        // request misses the loop's prompt cache. No behavioural cost: this
-        // endpoint compacts, it never calls a tool. The alignment is
-        // empirical, not a documented guarantee — if fold-time requests ever
-        // drop back to a partial hit, re-check this flag first.
         params['parallel_tool_calls'] = false;
       }
-      // Session affinity: the loop path sends `prompt_cache_key` (injected
-      // per session by the host), and the provider-side cache buckets by that
-      // key. Without it here the fold lands in a different bucket and
-      // re-sends the whole context uncached. Only this one kwarg is
-      // forwarded: the endpoint rejects `store` outright (see above), and the
-      // rest are unverified against it.
       if (options?.cacheKey !== undefined) {
         params['prompt_cache_key'] = options.cacheKey;
       }
-      // Reasoning-field alignment: the loop path sends
-      // `reasoning: {effort, summary:'auto'}` whenever a reasoning effort is
-      // configured (see generate()), and the provider's prompt-cache entry is
-      // keyed on that request shape. A compact request without `reasoning`
-      // misses the loop's cache outright. Only `reasoning` is mirrored: the
-      // endpoint rejects `include` outright ("Unknown parameter: 'include'").
       const thinking =
         options?.thinking ??
         (this._thinkingEffort !== undefined ? { effort: this._thinkingEffort } : undefined);
@@ -1601,13 +1631,26 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
 
       options?.onRequestSent?.();
-      const response = await (
-        client.responses as {
-          compact(params: unknown, opts?: unknown): Promise<unknown>;
-        }
-      ).compact(params, options?.signal ? { signal: options.signal } : undefined);
-
-      const outcome = decodeCompactionResponse(response);
+      const requestOptions = options?.signal ? { signal: options.signal } : undefined;
+      let outcome: CompactionResponseOutcome;
+      if (typeof responses.create === 'function') {
+        // Current Codex OAuth compacts through the streamed Responses endpoint;
+        // its legacy `/responses/compact` route returns 404.
+        const response = await responses.create(
+          {
+            ...params,
+            input: [...wireInput, { type: 'compaction_trigger' }],
+            store: false,
+            stream: true,
+          },
+          requestOptions,
+        );
+        outcome = await decodeCompactionStream(response, this._convertErrorHook);
+      } else {
+        // Compatibility for clients that only implement the original endpoint.
+        const response = await responses.compact!(params, requestOptions);
+        outcome = decodeCompactionResponse(response);
+      }
       switch (outcome.kind) {
         case 'ok':
           return {
@@ -1672,6 +1715,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     const clientOpts: Record<string, unknown> = {
       apiKey,
       baseURL: this._baseUrl,
+      maxRetries: 0,
     };
     const defaultHeaders = mergeRequestHeaders(this._defaultHeaders, auth?.headers);
     if (defaultHeaders !== undefined) {

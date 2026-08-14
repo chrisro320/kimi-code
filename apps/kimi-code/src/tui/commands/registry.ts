@@ -214,8 +214,8 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'idle-only',
   },
   {
-    name: 'secondary_model',
-    aliases: [],
+    name: 'secondary-model',
+    aliases: ['subagent-model', 'secondary_model'],
     description: 'Configure the secondary model for subagents',
     priority: 90,
     availability: 'always',

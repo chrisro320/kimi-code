@@ -13,12 +13,14 @@ import { limitAgentReplayByTurns } from '@moonshot-ai/kimi-code-sdk';
 import type {
   AppState,
   BackgroundAgentMetadata,
+  HookResultBlock,
   SkillActivationTrigger,
   ToolCallBlockData,
   TranscriptEntry,
 } from '#/tui/types';
 
 import { modelDisplayName } from '../components/dialogs/model-selector';
+import { formatHookResultBody, formatHookResultTitle } from './hook-result-format';
 import { mediaUrlPartToText } from './media-url';
 import { nextTranscriptId } from './transcript-id';
 
@@ -273,32 +275,46 @@ export function pluginCommandFromOrigin(
   };
 }
 
-export function formatHookResultMessageForTranscript(
+/**
+ * Splits a replayed hook-result message into its `<hook_result>` blocks. Any
+ * stray text outside the tags means the payload is not a clean block list, so
+ * the whole message degrades to a single block under the fallback event.
+ */
+export function hookResultBlocksForTranscript(
   text: string,
   fallbackEvent: string,
-  blocked: boolean,
-): string {
-  const results: Array<{ event: string; body: string }> = [];
+): HookResultBlock[] {
+  const results: HookResultBlock[] = [];
   let lastIndex = 0;
 
   for (const match of text.matchAll(HOOK_RESULT_RE)) {
     if (text.slice(lastIndex, match.index).trim().length > 0) {
-      return formatHookResultBlock(fallbackEvent, text, blocked);
+      return [{ event: fallbackEvent, body: text }];
     }
     const event = match[1];
     const body = match[2];
     if (event === undefined || body === undefined) {
-      return formatHookResultBlock(fallbackEvent, text, blocked);
+      return [{ event: fallbackEvent, body: text }];
     }
     results.push({ event, body });
     lastIndex = match.index + match[0].length;
   }
 
   if (results.length === 0 || text.slice(lastIndex).trim().length > 0) {
-    return formatHookResultBlock(fallbackEvent, text, blocked);
+    return [{ event: fallbackEvent, body: text }];
   }
 
-  return results.map(({ event, body }) => formatHookResultBlock(event, body, blocked)).join('\n\n');
+  return results;
+}
+
+export function formatHookResultMessageForTranscript(
+  text: string,
+  fallbackEvent: string,
+  blocked: boolean,
+): string {
+  return hookResultBlocksForTranscript(text, fallbackEvent)
+    .map(({ event, body }) => formatHookResultBlock(event, body, blocked))
+    .join('\n\n');
 }
 
 function parseReplayToolArguments(value: string | null): Record<string, unknown> {
@@ -334,7 +350,7 @@ const HOOK_RESULT_RE =
   /<hook_result\s+hook_event="([^"]+)">\n?([\s\S]*?)\n?<\/hook_result>/g;
 
 function formatHookResultBlock(event: string, body: string, blocked: boolean): string {
-  return `*${event} hook${blocked ? ' blocked' : ''}*\n\n${body.trim() || '(empty)'}`;
+  return `*${formatHookResultTitle(event, blocked)}*\n\n${formatHookResultBody(body)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

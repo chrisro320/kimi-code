@@ -74,11 +74,15 @@ export interface AppState {
   isReplaying: boolean;
   streamingPhase: 'idle' | 'waiting' | 'thinking' | 'composing' | 'shell';
   streamingStartTime: number;
+  /** Pending step retry backoff (fed by `turn.step.retrying`); null when no retry is in flight. */
+  stepRetry: StepRetryState | null;
   theme: ThemeName;
   version: string;
   editorCommand: string | null;
   /** Mirrors the TUI config toggle; defaults to false when absent from older fixtures. */
   disablePasteBurst?: boolean;
+  /** LaTeX math rendering in Markdown; defaults to true when absent from older fixtures. */
+  renderLatex?: boolean;
   /** Mirrors the TUI config toggle; defaults to true when absent from older fixtures. */
   cacheExpiryHint?: boolean;
   notifications: NotificationsConfig;
@@ -114,6 +118,24 @@ export interface AppState {
   mcpServersSummary: string | null;
   /** Optional banner shown below the welcome panel; null means no banner to render. */
   banner?: BannerState | null;
+}
+
+export interface StepRetryState {
+  /** Upcoming attempt number (1-based). */
+  nextAttempt: number;
+  maxAttempts: number;
+  /** Backoff wait before the next attempt, in milliseconds. */
+  delayMs: number;
+  errorName: string;
+  errorMessage: string;
+  /** HTTP status code for `APIStatusError`; undefined for network/timeout failures. */
+  statusCode?: number;
+  /**
+   * `backoff` while sleeping before the next attempt (label shows the
+   * countdown); `attempt` once the `delayMs` backoff has elapsed and the next
+   * attempt is running — the countdown has expired by then and is dropped.
+   */
+  phase: 'backoff' | 'attempt';
 }
 
 export interface ToolCallBlockData {
@@ -230,6 +252,23 @@ export interface PluginCommandTranscriptData {
   readonly trigger: 'user-slash';
 }
 
+export interface HookResultBlock {
+  readonly event: string;
+  readonly body: string;
+}
+
+/**
+ * Render-only side channel for hook-result cards. The entry keeps kind
+ * 'assistant' and the original markdown in `content` so /copy, markdown
+ * export, and session search stay unchanged; only the transcript component
+ * reads this. Replay can fold several hook payloads into one card, hence the
+ * block list.
+ */
+export interface HookResultTranscriptData {
+  readonly blocks: readonly HookResultBlock[];
+  readonly blocked: boolean;
+}
+
 export interface TranscriptEntry {
   id: string;
   kind: TranscriptEntryKind;
@@ -252,6 +291,7 @@ export interface TranscriptEntry {
   compactionData?: CompactionTranscriptData;
   cronData?: CronTranscriptData;
   goalData?: GoalTranscriptData;
+  hookResultData?: HookResultTranscriptData;
   imageAttachmentIds?: readonly number[];
   skillActivationId?: string;
   skillName?: string;

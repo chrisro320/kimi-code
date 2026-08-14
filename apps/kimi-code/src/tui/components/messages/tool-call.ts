@@ -13,6 +13,7 @@ import {
   BRAILLE_SPINNER_FRAMES,
   BRAILLE_SPINNER_INTERVAL_MS,
   COMMAND_PREVIEW_LINES,
+  DIFF_PREVIEW_LINES,
   RESULT_PREVIEW_LINES,
   THINKING_PREVIEW_LINES,
 } from '#/tui/constant/rendering';
@@ -414,7 +415,7 @@ function formatKeyArgument(
   return truncateArgValue(key, displayValue);
 }
 
-function extractKeyArgument(
+export function extractKeyArgument(
   toolName: string,
   args: Record<string, unknown>,
   workspaceDir?: string,
@@ -1994,7 +1995,7 @@ export class ToolCallComponent extends Container {
       // and the snap back to the collapsed cap triggers pi-tui's full-redraw
       // path which wipes the terminal scrollback (pre-TUI history).
       const writeShouldCap = !this.expanded;
-      const shown = writeShouldCap ? allLines.slice(0, COMMAND_PREVIEW_LINES) : allLines;
+      const shown = writeShouldCap ? allLines.slice(0, DIFF_PREVIEW_LINES) : allLines;
       const remaining = allLines.length - shown.length;
       for (const [i, line] of shown.entries()) {
         const lineNum = currentTheme.dim(String(i + 1).padStart(4) + '  ');
@@ -2018,7 +2019,7 @@ export class ToolCallComponent extends Container {
       const filePath = str(this.toolCall.args['file_path'] ?? this.toolCall.args['path']);
       const lines = renderDiffLinesClustered(oldStr, newStr, filePath, {
         contextLines: 3,
-        ...(shouldCap ? { maxLines: COMMAND_PREVIEW_LINES } : {}),
+        ...(shouldCap ? { maxLines: DIFF_PREVIEW_LINES } : {}),
       });
       for (const line of lines) {
         this.addChild(new Text(line, 2, 0));
@@ -2066,7 +2067,7 @@ export class ToolCallComponent extends Container {
         '';
       const lang = langFromPath(filePath);
       const allLines = highlightLines(content, lang);
-      const maxLines = COMMAND_PREVIEW_LINES;
+      const maxLines = DIFF_PREVIEW_LINES;
       const scrollLines =
         allLines.length > maxLines
           ? allLines.slice(allLines.length - maxLines)

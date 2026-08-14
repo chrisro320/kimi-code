@@ -17,6 +17,17 @@ export const TERMINAL_FOCUS_OUT = `${ESC}[O`;
 export const ENABLE_TERMINAL_FOCUS_REPORTING = `${ESC}[?1004h`;
 export const DISABLE_TERMINAL_FOCUS_REPORTING = `${ESC}[?1004l`;
 
+// Full SGR mouse reporting. 1000 reports buttons, 1002 button-motion, 1003 all
+// motion, and 1006 supplies unbounded SGR coordinates. Fullscreen mode owns
+// selection and scrollbar dragging, so every motion report belongs to the app.
+// Disable in exact reverse order to leave no terminal mode behind.
+export const ENABLE_TERMINAL_MOUSE_REPORTING = `${ESC}[?1000h${ESC}[?1002h${ESC}[?1003h${ESC}[?1006h`;
+export const DISABLE_TERMINAL_MOUSE_REPORTING = `${ESC}[?1006l${ESC}[?1003l${ESC}[?1002l${ESC}[?1000l`;
+
+// `ESC [ < button ; column ; row (M|m)` — `M` is a press, `m` a release.
+// Wheel reports only ever arrive as `M`.
+export const SGR_MOUSE_REPORT = /^\u001B\[<(\d+);(\d+);(\d+)([Mm])$/;
+
 // Standard OSC 11 background-color query. The response regex intentionally
 // allows a missing leading ESC because terminals can echo replies alongside
 // other raw input, but it requires an OSC terminator so fragmented color

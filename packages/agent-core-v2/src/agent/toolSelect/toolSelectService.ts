@@ -2,14 +2,20 @@
  * `toolSelect` domain — `IAgentToolSelectService` implementation.
  *
  * Shapes the provider-visible tool and history views for progressive tool
- * disclosure, loads deferred schemas (MCP, deferred user tools, and the
- * selected low-frequency builtins) into `contextMemory`, and exposes
- * loadable-tools announcement text. Reads live tools from `toolRegistry`,
- * active-tool and capability state from `profile`, gates through `flag`,
- * hooks into `toolExecutor`, and listens to context lifecycle events through
- * `event`. The mutable load-tracking state (`pendingLoaded`) is registered
- * into `agentState` (`IAgentStateService`) and read/written through it. Bound
- * at Agent scope.
+ * disclosure, tracks loaded dynamic schemas as pending declarations drained
+ * by the `contextInjector` boundary provider (the declaration lands at a
+ * quiescent boundary instead of mid-step inside a streaming tool exchange),
+ * and exposes loadable-tools announcement text. Removal splices
+ * (`undo`/`clear`) drop pending entries whose announcing exchange left the
+ * conversation, while compaction's replacement splice keeps them, so the
+ * declaration still lands at the post-compaction boundary. Deferred schemas
+ * cover MCP, deferred user tools, and the selected low-frequency builtins.
+ * Reads live tools from
+ * `toolRegistry`, active-tool and capability state from `profile`, gates
+ * through `flag`, hooks into `toolExecutor`, and listens to context
+ * lifecycle events through `event`. The mutable load-tracking state
+ * (`pendingLoaded`) is registered into `agentState` (`IAgentStateService`)
+ * and read/written through it. Bound at Agent scope.
  */
 
 import { Service } from '#/_base/di/service';
@@ -31,7 +37,6 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { isDeferredBuiltinToolName } from './deferredBuiltins';
 import {
   collectLoadedDynamicToolNames,
-  DYNAMIC_TOOL_SCHEMA_VARIANT,
   foldAnnouncedToolNames,
   renderLoadableToolsAnnouncement,
   stripDynamicToolContext,
@@ -77,7 +82,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     );
     this._register(
       eventBus.subscribe('context.spliced', (splice) => {
-        if (splice.deleteCount === 0 || this.pendingLoaded.size === 0) return;
+        if (splice.deleteCount === 0 || splice.messages.length > 0) return;
         this.dropPendingLoadedNotLanded();
       }),
     );
@@ -146,20 +151,22 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       }
     }
     if (toLoad.length > 0) {
-      toLoad.sort((a, b) => a.localeCompare(b));
-      const tools = toLoad
-        .map((name) => this.schemaOf(name))
-        .filter((tool): tool is Tool => tool !== undefined);
-      this.context.append({
-        role: 'system',
-        content: [],
-        toolCalls: [],
-        tools,
-        origin: { kind: 'injection', variant: DYNAMIC_TOOL_SCHEMA_VARIANT },
-      });
       for (const name of toLoad) this.pendingLoaded.add(name);
     }
     return { toLoad, alreadyAvailable, unknown };
+  }
+
+  drainPendingToolSchemas(): readonly Tool[] | undefined {
+    if (!this.enabled() || this.pendingLoaded.size === 0) return undefined;
+    const names = [...this.pendingLoaded].toSorted((a, b) => a.localeCompare(b));
+    const tools: Tool[] = [];
+    for (const name of names) {
+      const tool = this.schemaOf(name);
+      if (tool === undefined) continue;
+      this.pendingLoaded.delete(name);
+      tools.push(tool);
+    }
+    return tools.length === 0 ? undefined : tools;
   }
 
   loadableToolsAnnouncement(): string | undefined {

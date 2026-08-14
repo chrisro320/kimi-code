@@ -11,7 +11,7 @@ import {
 	getGraphemeSegmenter,
 	getWordSegmenter,
 	isWhitespaceChar,
-	truncateToWidth,
+	sliceByColumn,
 	visibleWidth,
 } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
@@ -225,10 +225,25 @@ interface EditorState {
 	cursorCol: number;
 }
 
+/** Undo snapshot: editor text state plus the paste registry. */
+interface EditorSnapshot {
+	state: EditorState;
+	pastes: Map<number, string>;
+	pasteCounter: number;
+}
+
 interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	/**
+	 * Which logical line this row came from, and the offset into it where the
+	 * row starts. Recorded so a click on a rendered row can be resolved back to
+	 * a cursor position through the exact wrapping that produced the row — a
+	 * second wrapping pass would drift from what is on screen.
+	 */
+	sourceLine: number;
+	startIndex: number;
 }
 
 export interface EditorTheme {
@@ -263,6 +278,17 @@ function buildDebouncePattern(triggerCharacters: string[]): RegExp {
 	return new RegExp(`(?:^|[ \\t])(?:@(?:"[^"]*|[^\\s]*)|[${escapedWithoutAt.join("")}][^\\s]*)$`);
 }
 
+function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
+	const availableWidth = Math.max(0, width);
+	const indicator = `─── ${direction} ${hiddenLineCount} more `;
+	const remaining = availableWidth - visibleWidth(indicator);
+	if (remaining >= 0) return indicator + "─".repeat(remaining);
+
+	const ellipsis = "...".slice(0, availableWidth);
+	const indicatorWidth = availableWidth - visibleWidth(ellipsis);
+	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
+}
+
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
 		lines: [""],
@@ -282,6 +308,16 @@ export class Editor implements Component, Focusable {
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
+	/** Last painted layout, kept for mouse hit testing. See `placeCursorAtComponentRow`. */
+	private lastLayout: { lines: LayoutLine[]; paddingX: number } | null = null;
+
+	/**
+	 * Mouse-drag selection anchor; the cursor is the focus. Null when there is
+	 * no active selection. Set by `beginSelectionAtComponentRow`, moved by
+	 * `extendSelectionToComponentRow`, dropped on any keyboard input or
+	 * programmatic text change.
+	 */
+	private selectionAnchor: { line: number; col: number } | null = null;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
@@ -338,7 +374,7 @@ export class Editor implements Component, Focusable {
 	private snappedFromCursorCol: number | null = null;
 
 	// Undo support
-	private undoStack = new UndoStack<EditorState>();
+	private undoStack = new UndoStack<EditorSnapshot>();
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
@@ -536,6 +572,8 @@ export class Editor implements Component, Focusable {
 		this.state.lines = lines.length === 0 ? [""] : lines;
 		this.state.cursorLine = cursorPlacement === "start" ? 0 : this.state.lines.length - 1;
 		this.setCursorCol(cursorPlacement === "start" ? 0 : this.state.lines[this.state.cursorLine]?.length || 0);
+		// The buffer changed out from under any anchor the mouse was holding
+		this.selectionAnchor = null;
 		// Reset scroll - render() will adjust to show cursor
 		this.scrollOffset = 0;
 
@@ -587,19 +625,19 @@ export class Editor implements Component, Focusable {
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
 
+		// Anchor for mouse hit testing: the rows and the left inset actually used
+		// by this paint. Recorded rather than re-derived, so click mapping cannot
+		// drift from the layout on screen.
+		this.lastLayout = { lines: layoutLines, paddingX };
+
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
 		// Render top border (with scroll indicator if scrolled down)
 		if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
-			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
-				result.push(this.borderColor(indicator + "─".repeat(remaining)));
-			} else {
-				result.push(this.borderColor(truncateToWidth(indicator, width)));
-			}
+			const border = createScrollBorder("↑", this.scrollOffset, width);
+			result.push(this.borderColor(border));
 		} else {
 			result.push(horizontal.repeat(Math.max(0, width)));
 		}
@@ -610,13 +648,53 @@ export class Editor implements Component, Focusable {
 		// autocomplete (e.g. slash-command menu) is visible.
 		const emitCursorMarker = this.focused;
 
+		// Mouse selection range, normalized once per paint. Rows inside it wrap
+		// the selected slice in inverse video instead of painting the fake
+		// cursor — a selection means the mouse owns the cursor position.
+		const selection = this.selectionRange();
+
 		for (const layoutLine of visibleLines) {
 			let displayText = layoutLine.text;
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
 
+			// Selection slice within this layout row, in row-local string offsets.
+			let selectionStart: number | undefined;
+			let selectionEnd: number | undefined;
+			if (
+				selection &&
+				layoutLine.sourceLine >= selection.start.line &&
+				layoutLine.sourceLine <= selection.end.line
+			) {
+				const logicalLine = this.state.lines[layoutLine.sourceLine] ?? "";
+				const sliceStart = layoutLine.sourceLine === selection.start.line ? selection.start.col : 0;
+				const sliceEnd = layoutLine.sourceLine === selection.end.line ? selection.end.col : logicalLine.length;
+				const rowStart = Math.max(0, sliceStart - layoutLine.startIndex);
+				const rowEnd = Math.min(layoutLine.text.length, sliceEnd - layoutLine.startIndex);
+				if (rowStart < rowEnd) {
+					selectionStart = rowStart;
+					selectionEnd = rowEnd;
+				}
+			}
+
 			// Add cursor if this line has it
-			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+			if (selectionStart !== undefined && selectionEnd !== undefined) {
+				// Selection highlight: inverse-video the selected slice. The
+				// hardware cursor marker still goes out at the cursor position so
+				// IME candidate-window placement keeps working mid-selection.
+				const before = displayText.slice(0, selectionStart);
+				const selected = displayText.slice(selectionStart, selectionEnd);
+				const after = displayText.slice(selectionEnd);
+				displayText = `${before}\x1b[7m${selected}\x1b[27m${after}`;
+				if (emitCursorMarker && layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+					const markerOffset =
+						layoutLine.cursorPos +
+						(layoutLine.cursorPos > selectionStart ? "\x1b[7m".length : 0) +
+						(layoutLine.cursorPos > selectionEnd ? "\x1b[27m".length : 0);
+					displayText = displayText.slice(0, markerOffset) + CURSOR_MARKER + displayText.slice(markerOffset);
+				}
+				// lineVisibleWidth stays the same - escape sequences are zero-width
+			} else if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
 				const before = displayText.slice(0, layoutLine.cursorPos);
 				const after = displayText.slice(layoutLine.cursorPos);
 
@@ -655,9 +733,8 @@ export class Editor implements Component, Focusable {
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
-			const indicator = `─── ↓ ${linesBelow} more `;
-			const remaining = width - visibleWidth(indicator);
-			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
+			const border = createScrollBorder("↓", linesBelow, width);
+			result.push(this.borderColor(border));
 		} else {
 			result.push(horizontal.repeat(Math.max(0, width)));
 		}
@@ -677,6 +754,11 @@ export class Editor implements Component, Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		// Any keyboard input dismisses the mouse selection; mouse reports never
+		// reach this method (the terminal-mouse layer consumes them), so an
+		// in-progress drag is unaffected.
+		this.selectionAnchor = null;
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.jumpMode !== null) {
@@ -849,6 +931,18 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Dedicated history actions always browse entries instead of moving the cursor.
+		if (kb.matches(data, "tui.editor.historyPrevious")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(-1);
+			return;
+		}
+		if (kb.matches(data, "tui.editor.historyNext")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(1);
+			return;
+		}
+
 		// Cursor movement actions
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.moveToLineStart();
@@ -987,6 +1081,131 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Moves the cursor to the character a click landed on.
+	 *
+	 * `row` and `column` are 0-based within this component, as returned by the
+	 * TUI's screen-row hit test. Row 0 is the top border; text starts at row 1.
+	 *
+	 * Returns false when the click was on the border or past the last row, so the
+	 * caller can leave the event unconsumed.
+	 */
+	public placeCursorAtComponentRow(row: number, column: number): boolean {
+		const position = this.resolveComponentPosition(row, column);
+		if (!position) return false;
+
+		this.state.cursorLine = position.line;
+		this.setCursorCol(position.col);
+		return true;
+	}
+
+	/**
+	 * Resolves a 0-based component row/column to a buffer position.
+	 *
+	 * Resolution goes through the layout rows recorded by the last paint, so the
+	 * editor's own scroll offset, its padding and the exact soft-wrap boundaries
+	 * are all accounted for without re-deriving any of them. Returns undefined
+	 * for the border row and rows past the text.
+	 */
+	private resolveComponentPosition(row: number, column: number): { line: number; col: number } | undefined {
+		const layout = this.lastLayout;
+		if (!layout) return undefined;
+
+		const textRow = row - 1; // row 0 is the top border
+		if (textRow < 0) return undefined;
+
+		const layoutLine = layout.lines[textRow + this.scrollOffset];
+		if (!layoutLine) return undefined;
+
+		const targetColumn = Math.max(0, column - layout.paddingX);
+		let consumedWidth = 0;
+		let offset = 0;
+		for (const grapheme of this.segment(layoutLine.text, "grapheme")) {
+			const graphemeWidth = visibleWidth(grapheme.segment);
+			if (consumedWidth + graphemeWidth > targetColumn) break;
+			consumedWidth += graphemeWidth;
+			offset += grapheme.segment.length;
+		}
+
+		return { line: layoutLine.sourceLine, col: layoutLine.startIndex + offset };
+	}
+
+	/**
+	 * Starts a mouse selection at the pressed position: places the cursor there
+	 * (same resolution as `placeCursorAtComponentRow`) and anchors the selection,
+	 * so a following drag extends from the press point. Returns false on the
+	 * border row or past the text, exactly like a bare click.
+	 */
+	public beginSelectionAtComponentRow(row: number, column: number): boolean {
+		this.selectionAnchor = null;
+		if (!this.placeCursorAtComponentRow(row, column)) return false;
+		this.selectionAnchor = { line: this.state.cursorLine, col: this.state.cursorCol };
+		return true;
+	}
+
+	/**
+	 * Extends an active mouse selection to the dragged position. A drag is not
+	 * a click: rows above or below the text clamp to the nearest text edge
+	 * instead of being rejected, so brushing the borders keeps extending.
+	 */
+	public extendSelectionToComponentRow(row: number, column: number): boolean {
+		if (!this.selectionAnchor || !this.lastLayout) return false;
+
+		let position = this.resolveComponentPosition(row, column);
+		if (!position) {
+			if (row - 1 < 0) {
+				position = { line: 0, col: 0 };
+			} else {
+				const lastLine = this.state.lines.length - 1;
+				position = { line: lastLine, col: this.state.lines[lastLine]?.length ?? 0 };
+			}
+		}
+
+		this.state.cursorLine = position.line;
+		this.setCursorCol(position.col);
+		return true;
+	}
+
+	/** Selected buffer text, or "" when there is no active selection. */
+	public getSelectedText(): string {
+		const range = this.selectionRange();
+		if (!range) return "";
+
+		const { start, end } = range;
+		if (start.line === end.line) {
+			return (this.state.lines[start.line] ?? "").slice(start.col, end.col);
+		}
+
+		const parts: string[] = [];
+		for (let i = start.line; i <= end.line; i++) {
+			const line = this.state.lines[i] ?? "";
+			if (i === start.line) parts.push(line.slice(start.col));
+			else if (i === end.line) parts.push(line.slice(0, end.col));
+			else parts.push(line);
+		}
+		return parts.join("\n");
+	}
+
+	/** Drops the mouse selection without moving the cursor. */
+	public clearSelection(): void {
+		this.selectionAnchor = null;
+	}
+
+	/**
+	 * Normalized [start, end) selection range in buffer coordinates, or null
+	 * when anchor and focus coincide (an empty selection renders nothing).
+	 */
+	private selectionRange(): { start: { line: number; col: number }; end: { line: number; col: number } } | null {
+		const anchor = this.selectionAnchor;
+		if (!anchor) return null;
+
+		const focus = { line: this.state.cursorLine, col: this.state.cursorCol };
+		if (anchor.line === focus.line && anchor.col === focus.col) return null;
+
+		const anchorFirst = anchor.line < focus.line || (anchor.line === focus.line && anchor.col < focus.col);
+		return anchorFirst ? { start: anchor, end: focus } : { start: focus, end: anchor };
+	}
+
 	private layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
 
@@ -996,6 +1215,8 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				sourceLine: 0,
+				startIndex: 0,
 			});
 			return layoutLines;
 		}
@@ -1013,11 +1234,15 @@ export class Editor implements Component, Focusable {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
+						sourceLine: i,
+						startIndex: 0,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
 						hasCursor: false,
+						sourceLine: i,
+						startIndex: 0,
 					});
 				}
 			} else {
@@ -1061,11 +1286,15 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							sourceLine: i,
+							startIndex: chunk.startIndex,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							sourceLine: i,
+							startIndex: chunk.startIndex,
 						});
 					}
 				}
@@ -1104,7 +1333,7 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
-	setText(text: string): void {
+	setText(text: string, options?: { preservePasteRegistry?: boolean }): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
@@ -1112,6 +1341,10 @@ export class Editor implements Component, Focusable {
 		// Push undo snapshot if content differs (makes programmatic changes undoable)
 		if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
+		}
+		if (!options?.preservePasteRegistry) {
+			this.pastes.clear();
+			this.pasteCounter = 0;
 		}
 		this.setTextInternal(normalized);
 	}
@@ -1372,13 +1605,41 @@ export class Editor implements Component, Focusable {
 			this.pushUndoSnapshot();
 
 			// Delete grapheme before cursor (handles emojis, combining characters, etc.)
-			const line = this.state.lines[this.state.cursorLine] || "";
+			let line = this.state.lines[this.state.cursorLine] || "";
 			const beforeCursor = line.slice(0, this.state.cursorCol);
 
 			// Find the last grapheme in the text before cursor
 			const graphemes = [...this.segment(beforeCursor, "grapheme")];
 			const lastGrapheme = graphemes[graphemes.length - 1];
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
+			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme!.segment);
+
+			if (isPastedSegmented) {
+				// This contains the id part e.g 4 from [paste #4 +123 lines]
+				const targetId = Number(isPastedSegmented[1]);
+				this.pastes.delete(targetId);
+				this.pasteCounter--;
+
+				// Shift registry entries down in ascending id order, independent
+				// of marker order in the text ([paste #3] becomes [paste #2] when
+				// [paste #1] is removed).
+				const higherIds = [...this.pastes.keys()].filter((id) => id > targetId).sort((a, b) => a - b);
+				for (const id of higherIds) {
+					this.pastes.set(id - 1, this.pastes.get(id)!);
+					this.pastes.delete(id);
+				}
+
+				// Renumber markers with ids greater than the removed one.
+				this.state.lines = this.state.lines.map((line) =>
+					line.replace(PASTE_MARKER_REGEX, (fullMatch, idGroup, suffixGroup) => {
+						const x = Number(idGroup);
+						if (x <= targetId) return fullMatch;
+						return `[paste #${x - 1}${suffixGroup}]`;
+					}),
+				);
+			}
+
+			line = this.state.lines[this.state.cursorLine] || "";
 
 			const before = line.slice(0, this.state.cursorCol - graphemeLength);
 			const after = line.slice(this.state.cursorCol);
@@ -2073,14 +2334,16 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push(this.state);
+		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
 	}
 
 	private undo(): void {
 		this.exitHistoryBrowsing();
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
-		Object.assign(this.state, snapshot);
+		Object.assign(this.state, snapshot.state);
+		this.pastes = snapshot.pastes;
+		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
 		if (this.onChange) {

@@ -4,6 +4,18 @@ import type { ProbeResult } from "./terminal-probe.ts";
 export type ImageProtocol = "kitty" | "sixel" | "iterm2" | "none";
 
 export interface TerminalCapabilities {
+	/**
+	 * Whether the terminal acknowledged DECSET 2026 (synchronized output).
+	 *
+	 * NOTE: nothing reads this yet. `TuiAltScreen.doRender` wraps every frame in
+	 * the 2026 pair unconditionally, which is safe — a terminal that does not
+	 * know the mode ignores the sequence. What is *not* safe is treating the
+	 * wrapper as a guarantee that a frame's intermediate states stay invisible:
+	 * on a terminal without 2026 support every escape presents as it arrives.
+	 * A frame that only overwrites what it needs to is correct on both kinds of
+	 * terminal; one that clears first and repaints after flashes on the second
+	 * kind. Fix the frame, do not gate it on this flag.
+	 */
 	readonly syncEnabled: boolean;
 	readonly supportsScreenToScrollback: boolean;
 	readonly deccara: boolean;

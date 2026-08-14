@@ -70,14 +70,16 @@
  * / the three emitted-warning dedupe sets) is registered into `agentState`
  * (`IAgentStateService`) and read/written through it; `optionsValue` (holds
  * the `cwd` / `emitStatusUpdated` callbacks), `activeProfile`
- * (a `ResolvedAgentProfile` carrying the `systemPrompt` function), and the
- * frozen plugin-derived prompt inputs (`frozenSkillListing` /
- * `frozenPluginSections` — one-shot snapshots, so there is nothing to
- * restore) stay plain
- * fields because the container only holds pure data structures. After every
- * successful bind / apply / refresh (never before the new prompt commits,
- * so a failed build cannot poison the set), the injected AGENTS.md paths are
- * seeded into `agentsMdReminder`'s known-set with the effective cwd. Fills the
+ * (a `ResolvedAgentProfile` carrying the `systemPrompt` function), the frozen
+ * cwd listing, and the frozen plugin-derived prompt inputs
+ * (`frozenSkillListing` / `frozenPluginSections` — one-shot snapshots, so
+ * there is nothing to restore) stay plain fields because the container only
+ * holds pure data structures. The cwd listing is pinned by the first
+ * successful context build so a deferred compaction refresh cannot move the
+ * provider-cache prefix merely because files changed. After every successful
+ * bind / apply / refresh (never before the new prompt commits, so a failed
+ * build cannot poison the set), the injected AGENTS.md paths are seeded into
+ * `agentsMdReminder`'s known-set with the effective cwd. Fills the
  * prompt's product-name slot from the `agentIdentity` snapshot — frozen for
  * the process, so no `[identity]` subscription belongs here; the template's
  * own default applies when nothing is configured. `bind` gates on the freeze
@@ -131,7 +133,6 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import type { ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { subagentDisplayModel } from '#/session/subagent/configSection';
 import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { BUILTIN_SKILL_SOURCE_ID } from '#/app/skillCatalog/skillSource';
@@ -243,6 +244,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   private activeProfile: ResolvedAgentProfile | undefined;
+  private frozenCwdListing: string | undefined;
+  private promptAdditionalDirs: readonly string[] | undefined;
 
   // Plugin-derived prompt inputs, snapshotted on first successful build and
   // frozen for the agent's lifetime (see the file header): a live agent's
@@ -436,6 +439,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
     const rendered = profile.renderSystemPrompt(context);
+    this.frozenCwdListing ??= context.cwdListing;
     this.activeProfile = profile;
     this.cacheAgentsMdWarning(context);
 
@@ -519,12 +523,14 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   useProfile(profile: ResolvedAgentProfile, context: SystemPromptContext): void {
-    this.activeProfile = profile;
     const rendered = profile.renderSystemPrompt(context);
+    this.frozenCwdListing ??= context.cwdListing;
+    this.activeProfile = profile;
+    const promptChanged = rendered.text !== this.systemPrompt;
     this.update({
       profileName: profile.name,
-      systemPrompt: rendered.text,
-      environmentDisclosure: rendered.environment,
+      systemPrompt: promptChanged ? rendered.text : undefined,
+      environmentDisclosure: promptChanged ? rendered.environment : undefined,
       agentsMdPaths: context.agentsMdPaths ?? [],
       disallowedTools: profile.disallowedTools ?? [],
     });
@@ -555,12 +561,14 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       });
       return;
     }
-    this.activeProfile = profile;
     const rendered = profile.renderSystemPrompt(context);
+    this.frozenCwdListing ??= context.cwdListing;
+    this.activeProfile = profile;
+    const promptChanged = rendered.text !== this.systemPrompt;
     this.update({
       profileName: profile.name,
-      systemPrompt: rendered.text,
-      environmentDisclosure: rendered.environment,
+      systemPrompt: promptChanged ? rendered.text : undefined,
+      environmentDisclosure: promptChanged ? rendered.environment : undefined,
       agentsMdPaths: context.agentsMdPaths ?? [],
     });
     this.seedAgentsMdReminder(context);
@@ -789,7 +797,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const maxContextTokens = capabilities?.max_input_tokens ?? capabilities?.max_context_tokens;
     this.eventBus.publish({
       type: 'agent.status.updated',
-      model: subagentDisplayModel(this.config, modelAlias),
+      model: modelAlias,
       thinkingEffort: includeThinkingEffort
         ? this.getEffectiveThinkingLevel()
         : undefined,
@@ -974,12 +982,15 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     options?: ApplyProfileOptions,
   ): Promise<SystemPromptContext> {
     const preloadedAgentsMd = await this.workspaceInstructionsSnapshot();
+    const additionalDirs = options?.additionalDirs ??
+      this.promptAdditionalDirs ??
+      this.workspace.additionalDirs;
     const base = await prepareSystemPromptContext(
       { fs: this.fs, homeDir: this.env.homeDir },
       this.sessionContext.cwd,
       this.bootstrap.homeDir,
       {
-        additionalDirs: options?.additionalDirs ?? this.workspace.additionalDirs,
+        additionalDirs,
         preloadedAgentsMd,
       },
     );
@@ -987,8 +998,15 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const pluginSections = await this.resolvePluginSections();
     const sessionMetadata = await this.sessionMetadata.read();
     const timeZone = this.clock.timeZone();
+    const skillActive = this.isToolActiveForProfile(profile, 'Skill');
+    const productName = (await this.identity.resolved()).displayName;
+    this.frozenCwdListing ??= base.cwdListing;
+    if (options?.additionalDirs !== undefined) {
+      this.promptAdditionalDirs = options.additionalDirs;
+    }
     return {
       ...base,
+      cwdListing: this.frozenCwdListing,
       cwd: this.sessionContext.cwd,
       osKind: this.env.osKind,
       shellName: this.env.shellName,
@@ -997,8 +1015,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       timeZone,
       skills,
       pluginSections,
-      skillActive: this.isToolActiveForProfile(profile, 'Skill'),
-      productName: (await this.identity.resolved()).displayName,
+      skillActive,
+      productName,
       replyStyleGuide: this.bootstrap.args.replyStyleGuide,
     };
   }

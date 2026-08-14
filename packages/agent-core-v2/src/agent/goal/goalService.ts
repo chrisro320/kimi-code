@@ -16,9 +16,13 @@
  * `StepRequest`s onto `loop` (the continuation message materializes when the
  * loop pops it), accounts live
  * turn usage through `usage`, observes terminal goal tool results through
- * `toolExecutor`, writes system reminders through `systemReminder`, reports
+ * `toolExecutor`, appends one-time reminder events through `systemReminder`, reports
  * telemetry through `telemetry`, and checks main-agent eligibility through
- * `scopeContext`. Measures time and arms hard deadlines through `goal`'s
+ * `scopeContext`. Tracks which background tasks the goal owns and whether they
+ * have settled through `task`, and withholds the continuation turn while any
+ * owned task is still unsettled, re-deciding on a backing-off watchdog until an
+ * incoming task notification opens its own turn. Measures time and arms hard
+ * deadlines through `goal`'s
  * App-scoped deadline scheduler. Two `onBeforeExecuteTool` veto listeners
  * guard the goal lifecycle: stale or budget-exhausted goal tool calls are
  * vetoed with synthetic results, and a `CreateGoal` call carrying a
@@ -32,8 +36,10 @@
  * `pendingContinuationGoals`, `goalTurnTargets`, `exhaustedTurnBudgetGoals`,
  * `liveWallClockStartedAt`, `resumeContinuation`) is registered into
  * `agentState` (`IAgentStateService`) and read/written through it; the
- * `pendingContinuation` promise lock and the `wallClockDeadline` disposable
- * slot stay plain fields. Bound at Agent scope.
+ * `pendingContinuation` promise lock, the `wallClockDeadline` and
+ * `waitWatchdog` disposable slots, and the task-ownership and wait-backoff
+ * driver state stay plain fields, so waiting never survives a restart or a
+ * fork. Bound at Agent scope.
  * Subagent instances reject every goal command and do not install goal
  * injection, accounting, budget, or continuation hooks.
  */
@@ -59,9 +65,11 @@ import {
 import { LOOP_CONTROL_SECTION, type LoopControl } from '#/agent/loop/configSection';
 import { LoopErrors } from '#/agent/loop/errors';
 import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
-import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentTaskService } from '#/agent/task/task';
+import { TERMINAL_STATUSES, type AgentTaskStatus } from '#/agent/task/types';
+import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import type { ExecutableToolResult } from '#/tool/toolContract';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
@@ -182,6 +190,8 @@ const GOAL_STEP_CAP_CONTINUATION_PROMPT = [
   GOAL_CONTINUATION_PROMPT,
 ].join(' ');
 
+const GOAL_WAIT_BACKOFF_MS: readonly number[] = [120_000, 300_000, 900_000];
+
 interface GoalForkNoticeState {
   readonly goalPresent: boolean;
   readonly reminderPending: boolean;
@@ -218,10 +228,9 @@ const GoalForkNoticeModel = defineModel<GoalForkNoticeState>(
 );
 
 function isGoalForkClearedReminder(message: ContextMessage | undefined): boolean {
-  return (
-    message?.origin?.kind === 'system_trigger' &&
-    message.origin.name === GOAL_FORK_CLEARED_REMINDER_NAME
-  );
+  const origin = message?.origin;
+  if (origin?.kind === 'injection') return origin.variant === GOAL_FORK_CLEARED_REMINDER_NAME;
+  return origin?.kind === 'system_trigger' && origin.name === GOAL_FORK_CLEARED_REMINDER_NAME;
 }
 
 function isGoalContinuationOrigin(origin: TurnStartedEvent['origin']): boolean {
@@ -282,14 +291,21 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   declare readonly _serviceBrand: undefined;
 
   private readonly wallClockDeadline = this._register(new MutableDisposable<IDisposable>());
+  private readonly waitWatchdog = this._register(new MutableDisposable<IDisposable>());
   private pendingContinuation?: PendingContinuation;
+  private readonly ownedTasks = new Set<string>();
+  private turnTaskBaseline: ReadonlySet<string> = new Set();
+  private waitingGoalId?: string;
+  private waitingStepCapped = false;
+  private waitingBackoffIndex = 0;
+  private waitingGeneration = 0;
 
   constructor(
     @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
-    @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
+    @IAgentContextInjectorService injector: IAgentContextInjectorService,
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IAgentToolApprovalService private readonly toolApproval: IAgentToolApprovalService,
@@ -299,6 +315,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     @IGoalDeadlineScheduler private readonly deadlineScheduler: IGoalDeadlineScheduler,
     @IAgentScopeContext private readonly agentContext: IAgentScopeContext,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentTaskService private readonly tasks: IAgentTaskService,
   ) {
     super();
     this.states.register(goalLiveTurnIdKey);
@@ -319,7 +336,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
         {
           getGoal: () => this.getGoal().goal,
         },
-        dynamicInjector,
+        injector,
       ),
     );
     this._register(
@@ -501,6 +518,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     this.assertSupportedAgent();
     const objective = this.validateObjective(input.objective);
     this.prepareForGoalCreation(input.replace === true);
+    this.resetWaitingDriver();
+    this.rebaseOwnedTasks();
     const wallClockResumedAt = Date.now();
     this.wire.dispatch(
       createGoal({
@@ -629,8 +648,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     this.clearInternal(actor);
     if (actor === 'user') {
       this.reminders.appendSystemReminder(GOAL_CANCELLED_REMINDER, {
-        kind: 'system_trigger',
-        name: 'goal_cancelled',
+        kind: 'injection',
+        variant: 'goal_cancelled',
       });
     }
     return snapshot;
@@ -721,6 +740,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   }
 
   private handleTurnLaunched(turnId: number, origin: TurnStartedEvent['origin']): void {
+    this.resetWaitingDriver();
+    this.turnTaskBaseline = this.snapshotActiveTaskIds();
     this.liveTurnId = turnId;
     this.goalTurnTargets.delete(turnId);
     this.exhaustedTurnBudgetGoals.delete(turnId);
@@ -807,8 +828,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     ) {
       this.budgetGraceTurns.add(ctx.turnId);
       this.reminders.appendSystemReminder(GOAL_BUDGET_STOP_REMINDER, {
-        kind: 'system_trigger',
-        name: GOAL_BUDGET_STOP_REMINDER_NAME,
+        kind: 'injection',
+        variant: GOAL_BUDGET_STOP_REMINDER_NAME,
       });
       return true;
     }
@@ -834,6 +855,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     turnId: number,
     result: Pick<TurnEndedEvent, 'reason' | 'error'>,
   ): Promise<void> {
+    this.adoptTurnTasks();
     const { goalId, lifecycleGoalId, starterTurn } = this.clearTurnTracking(turnId);
     const resumeContinuation = this.resumeContinuation;
     if (resumeContinuation?.turnId === turnId) this.resumeContinuation = undefined;
@@ -862,6 +884,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const state = this.goalState;
     if (state === null || state.status !== 'active' || state.goalId !== lifecycleGoalId) return;
     if (this.blockIfBudgetReached(state) !== null) return;
+    if (this.beginTaskWait(lifecycleGoalId, stepCapped)) return;
     this.launchContinuationTurn(lifecycleGoalId, stepCapped);
   }
 
@@ -963,6 +986,81 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     return status.state === 'idle' && !status.hasPendingRequests;
   }
 
+  private snapshotActiveTaskIds(): ReadonlySet<string> {
+    return new Set(this.tasks.list(true).map((task) => task.taskId));
+  }
+
+  private rebaseOwnedTasks(): void {
+    this.ownedTasks.clear();
+    this.turnTaskBaseline = this.snapshotActiveTaskIds();
+  }
+
+  private adoptTurnTasks(): void {
+    if (this.goalState === null) return;
+    for (const task of this.tasks.list(true)) {
+      if (!this.turnTaskBaseline.has(task.taskId)) this.ownedTasks.add(task.taskId);
+    }
+  }
+
+  private pruneOwnedTasks(): void {
+    for (const taskId of this.ownedTasks) {
+      const info = this.tasks.getTask(taskId);
+      if (info === undefined || isSettledTaskStatus(info.status)) this.ownedTasks.delete(taskId);
+    }
+  }
+
+  private hasOwnedTasksPending(): boolean {
+    this.pruneOwnedTasks();
+    return this.ownedTasks.size > 0;
+  }
+
+  private beginTaskWait(goalId: string, stepCapped: boolean): boolean {
+    if (!this.hasOwnedTasksPending()) return false;
+    this.waitingGoalId = goalId;
+    this.waitingStepCapped = stepCapped;
+    this.armWaitWatchdog();
+    return true;
+  }
+
+  private armWaitWatchdog(): void {
+    const goalId = this.waitingGoalId;
+    if (goalId === undefined) return;
+    const generation = ++this.waitingGeneration;
+    const delayMs =
+      GOAL_WAIT_BACKOFF_MS[Math.min(this.waitingBackoffIndex, GOAL_WAIT_BACKOFF_MS.length - 1)] ?? 0;
+    this.waitWatchdog.value = this.deadlineScheduler.schedule(delayMs, () => {
+      this.handleWaitWatchdog(generation, goalId);
+    });
+  }
+
+  private handleWaitWatchdog(generation: number, goalId: string): void {
+    if (generation !== this.waitingGeneration || this.waitingGoalId !== goalId) return;
+    if (!this.isActiveGoal(goalId)) {
+      this.resetWaitingDriver();
+      return;
+    }
+    if (this.hasOwnedTasksPending()) {
+      this.waitingBackoffIndex = Math.min(
+        this.waitingBackoffIndex + 1,
+        GOAL_WAIT_BACKOFF_MS.length - 1,
+      );
+      this.armWaitWatchdog();
+      return;
+    }
+    const stepCapped = this.waitingStepCapped;
+    this.resetWaitingDriver();
+    if (this.blockIfBudgetReached(this.requireState()) !== null) return;
+    this.launchContinuationTurn(goalId, stepCapped);
+  }
+
+  private resetWaitingDriver(): void {
+    this.waitingGeneration += 1;
+    this.waitingGoalId = undefined;
+    this.waitingStepCapped = false;
+    this.waitingBackoffIndex = 0;
+    this.waitWatchdog.clear();
+  }
+
   private isActiveGoal(goalId: string): boolean {
     const state = this.goalState;
     return state?.status === 'active' && state.goalId === goalId;
@@ -995,6 +1093,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   }
 
   private normalizeAfterReplay(): void {
+    this.resetWaitingDriver();
+    this.rebaseOwnedTasks();
     this.appendForkClearedReminder();
     this.wallClockDeadline.clear();
     this.liveWallClockStartedAt = undefined;
@@ -1021,8 +1121,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   private appendForkClearedReminder(): void {
     if (!this.wire.getModel(GoalForkNoticeModel).reminderPending) return;
     this.reminders.appendSystemReminder(GOAL_FORK_CLEARED_REMINDER, {
-      kind: 'system_trigger',
-      name: GOAL_FORK_CLEARED_REMINDER_NAME,
+      kind: 'injection',
+      variant: GOAL_FORK_CLEARED_REMINDER_NAME,
     });
   }
 
@@ -1031,6 +1131,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     opts: { readonly emit?: boolean; readonly track?: boolean; readonly preserveLiveContinuation?: boolean } = {},
   ): void {
     if (this.goalState === null) return;
+    this.resetWaitingDriver();
+    this.rebaseOwnedTasks();
     this.resumeContinuation = undefined;
     this.cancelPendingContinuation(opts.preserveLiveContinuation === true);
     this.wallClockDeadline.clear();
@@ -1055,6 +1157,8 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     if (status === 'active') {
       this.liveWallClockStartedAt = this.deadlineScheduler.now();
     } else if (state.status === 'active') {
+      this.resetWaitingDriver();
+      this.rebaseOwnedTasks();
       this.resumeContinuation = undefined;
       this.cancelPendingContinuation(
         opts.preserveLiveContinuation === true,
@@ -1217,6 +1321,10 @@ function computeBudgetReport(state: GoalState, wallClockMs: number): GoalBudgetR
     wallClockBudgetReached,
     overBudget: tokenBudgetReached || turnBudgetReached || wallClockBudgetReached,
   };
+}
+
+function isSettledTaskStatus(status: AgentTaskStatus): boolean {
+  return TERMINAL_STATUSES.has(status) || status === 'input_required';
 }
 
 function matchesGoal(state: GoalState, goalId: string | undefined): boolean {

@@ -400,6 +400,66 @@ describe('OpenAIResponsesChatProvider compactionLineage', () => {
 });
 
 describe('OpenAIResponsesChatProvider compactConversation', () => {
+  it('uses the streamed Responses compaction trigger when create is available', async () => {
+    let captured: Record<string, unknown> | undefined;
+    let compactCalled = false;
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      clientFactory: () =>
+        ({
+          responses: {
+            create: (params: Record<string, unknown>) => {
+              captured = params;
+              return Promise.resolve(
+                makeAsyncIterable([
+                  {
+                    type: 'response.output_item.done',
+                    item: { id: 'cmp_v2', type: 'compaction', encrypted_content: 'v2-payload' },
+                  },
+                  {
+                    type: 'response.completed',
+                    response: {
+                      id: 'resp_v2',
+                      status: 'completed',
+                      usage: { input_tokens: 12, output_tokens: 1, total_tokens: 13 },
+                    },
+                  },
+                ]),
+              );
+            },
+            compact: () => {
+              compactCalled = true;
+              return Promise.reject(new Error('legacy compact must not run'));
+            },
+          },
+        }) as unknown as OpenAI,
+    });
+
+    const result = await provider.compactConversation({
+      systemPrompt: 'sys',
+      tools: [],
+      history: [{ kind: 'message', message: userMessage('hello') }],
+      retainedMessages: [],
+    });
+
+    expect(compactCalled).toBe(false);
+    expect(captured).toMatchObject({ model: 'gpt-5.6-sol', store: false, stream: true });
+    expect(captured?.['input']).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      { type: 'compaction_trigger' },
+    ]);
+    expect(result.checkpoint).toMatchObject({
+      encrypted: 'v2-payload',
+      itemType: 'compaction',
+      itemId: 'cmp_v2',
+    });
+    expect(result.usage).toEqual({
+      inputOther: 12,
+      output: 1,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+    });
+  });
   it('replays an owned checkpoint byte-for-byte as a top-level input item', async () => {
     const { provider, fake } = makeEndpointProvider({});
     const history: ModelHistoryItem[] = [
@@ -591,7 +651,7 @@ describe('OpenAIResponsesChatProvider compactConversation', () => {
         history: [{ kind: 'message', message: userMessage('hi') }],
         retainedMessages: [],
       }),
-    ).rejects.toThrowError(/does not support the Responses compaction endpoint/);
+    ).rejects.toThrowError(/does not support Responses compaction/);
   });
 
   it('converts transport failures through the provider error mapping', async () => {

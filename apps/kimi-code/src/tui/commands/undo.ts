@@ -11,6 +11,7 @@ import {
 import { AgentGroupComponent } from '../components/messages/agent-group';
 import { AgentSwarmProgressComponent } from '../components/messages/agent-swarm-progress';
 import { AssistantMessageComponent } from '../components/messages/assistant-message';
+import { HookResultComponent } from '../components/messages/hook-result';
 import { BackgroundAgentStatusComponent } from '../components/messages/background-agent-status';
 import { CronMessageComponent } from '../components/messages/cron-message';
 import { ReadGroupComponent } from '../components/messages/read-group';
@@ -475,6 +476,7 @@ function isUndoContextComponent(child: Component): boolean {
   return (
     child instanceof UserMessageComponent ||
     child instanceof AssistantMessageComponent ||
+    child instanceof HookResultComponent ||
     child instanceof ThinkingComponent ||
     child instanceof ToolCallComponent ||
     child instanceof AgentGroupComponent ||

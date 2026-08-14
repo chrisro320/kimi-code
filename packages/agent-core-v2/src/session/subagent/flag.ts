@@ -1,11 +1,10 @@
 /**
  * `subagent` domain — registers the subagent experimental flags into `flag`.
  *
- * `secondary-model` gates secondary-model selection for newly spawned
- * subagents, including the agent-facing model choices and startup validation
- * warning. Off by default; enable via `KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL`,
- * the master `KIMI_CODE_EXPERIMENTAL_FLAG`, or the `[experimental]` config
- * section.
+ * Gates the subagent model pool for newly spawned subagents, including the
+ * agent-facing model choices and startup pool validation. Off by default;
+ * enable via `KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL`, the master
+ * `KIMI_CODE_EXPERIMENTAL_FLAG`, or the `[experimental]` config section.
  *
  * `subagent-worktree-isolation` is a definition-only port of the v1 flag; the
  * gated behavior lands with worktree isolation (B6).

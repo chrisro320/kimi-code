@@ -1,18 +1,18 @@
 import type { HookResultEvent } from '@moonshot-ai/kimi-code-sdk';
 
 export function formatHookResultMarkdown(event: HookResultEvent): string {
-  return `*${formatHookResultTitle(event)}*\n\n${formatHookResultBody(event)}`;
+  return `*${formatHookResultTitle(event.hookEvent, event.blocked === true)}*\n\n${formatHookResultBody(event.content)}`;
 }
 
 export function formatHookResultPlain(event: HookResultEvent): string {
-  return `${formatHookResultTitle(event)}\n\n${formatHookResultBody(event)}`;
+  return `${formatHookResultTitle(event.hookEvent, event.blocked === true)}\n\n${formatHookResultBody(event.content)}`;
 }
 
-function formatHookResultTitle(event: HookResultEvent): string {
-  return `${event.hookEvent} hook${event.blocked === true ? ' blocked' : ''}`;
+export function formatHookResultTitle(hookEvent: string, blocked: boolean): string {
+  return `${hookEvent} hook${blocked ? ' blocked' : ''}`;
 }
 
-function formatHookResultBody(event: HookResultEvent): string {
-  const content = event.content.trim();
-  return content.length === 0 ? '(empty)' : content;
+export function formatHookResultBody(content: string): string {
+  const trimmed = content.trim();
+  return trimmed.length === 0 ? '(empty)' : trimmed;
 }

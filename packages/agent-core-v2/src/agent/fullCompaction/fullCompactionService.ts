@@ -17,9 +17,10 @@
  * `consecutiveOverflowCompactions`, `activeTurnId`) is registered into
  * `agentState` (`IAgentStateService`) and read/written through it;
  * `_compacting` (the in-flight job — AbortController / Promise / trace), the
- * `hooks.onWillCompact` slot, the `_onDidFinishCompaction` Emitter, the
- * `strategy`, and the lazily-resolved `contextInjectorService` stay instance
- * fields (mechanism, not plain data). Bound at Agent scope and constructed with
+ * `hooks.onWillCompact` slot, the `_onDidFinishCompaction` Emitter, and the
+ * `strategy` stay instance fields (mechanism, not plain data). The compaction
+ * splice re-arms `contextInjector`'s new-turn flag, so providers re-reconcile
+ * at the next step head. Bound at Agent scope and constructed with
  * the scope so the overflow recovery handler registers before the first turn
  * runs. A completed round does not refresh the profile's system prompt inline:
  * the mid-turn refresh would reach no request of this turn — the turn config
@@ -28,8 +29,8 @@
  * requests the refresh and the loop applies it at the next turn boundary.
  */
 
+import type { IDisposable } from '#/_base/di/lifecycle';
 import { Service } from "#/_base/di/service";
-import { IInstantiationService } from '#/_base/di/instantiation';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ILogService, type LogContext } from '#/_base/log/log';
@@ -37,7 +38,6 @@ import { defineState } from '#/_base/state/stateRegistry';
 import { renderPrompt } from "#/_base/utils/render-prompt";
 import { estimateTokensForMessage } from "#/kosong/contract/tokens";
 import { buildCompactionSummaryText, isRealUserInput } from '#/agent/contextMemory/compactionHandoff';
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
@@ -111,6 +111,7 @@ type CompactionTelemetryProperties = Pick<
 
 interface ActiveCompaction extends FullCompactionTask {
   readonly originTurnId?: number;
+  readonly quiescence?: IDisposable;
   trace?: LLMRequestTrace;
   blockedByTurn: boolean;
 }
@@ -159,7 +160,6 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
   private readonly strategy: CompactionStrategy;
   private _compacting: ActiveCompaction | null = null;
-  private contextInjectorService: IAgentContextInjectorService | undefined;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -168,7 +168,6 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentToolSelectService private readonly toolSelect: IAgentToolSelectService,
-    @IInstantiationService private readonly instantiation: IInstantiationService,
     @ISessionTodoService private readonly todo: ISessionTodoService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IWireService private readonly wire: IWireService,
@@ -262,6 +261,17 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     return this._compacting;
   }
 
+  cancel(): void {
+    const active = this._compacting;
+    if (active !== null) {
+      this.telemetry.track2('cancel', {
+        from: 'compacting',
+        trace_id: active.traceId,
+      });
+    }
+    active?.abortController.abort();
+  }
+
   private getEffectiveMaxContextTokens(): number {
     const capability = this.profile.data().modelCapabilities;
     const configured = capability.max_input_tokens ?? capability.max_context_tokens;
@@ -343,22 +353,37 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     if (!this.reserveCompactionSlot(data.source)) return false;
 
     const tokenCount = this.validateCompactionStart(data.source);
-    this.wire.dispatch(fullCompactionBegin(data));
+    const quiescence = data.source === 'manual'
+      ? this.loopService.tryAcquireQuiescence()
+      : undefined;
+    if (data.source === 'manual' && quiescence === undefined) {
+      throw new Error2(
+        ErrorCodes.COMPACTION_UNABLE,
+        'Cannot compact while a turn is active or another context change is running. Wait for it to finish, then retry.',
+      );
+    }
+    try {
+      this.wire.dispatch(fullCompactionBegin(data));
 
-    const active = this.createActiveCompaction(
-      data.source,
-      tokenCount,
-      data.source === 'auto' ? this.activeTurnId : undefined,
-    );
-    this._compacting = active.task;
-    active.task.abortController.signal.addEventListener(
-      'abort',
-      () => this.cancelActive(active.task),
-      { once: true },
-    );
-    void this.compactionOrchestrator(active.task, data).then(active.resolve, active.reject);
-    void active.task.promise.catch(() => undefined);
-    return true;
+      const active = this.createActiveCompaction(
+        data.source,
+        tokenCount,
+        data.source === 'auto' ? this.activeTurnId : undefined,
+        quiescence,
+      );
+      this._compacting = active.task;
+      active.task.abortController.signal.addEventListener(
+        'abort',
+        () => this.cancelActive(active.task),
+        { once: true },
+      );
+      void this.compactionOrchestrator(active.task, data).then(active.resolve, active.reject);
+      void active.task.promise.catch(() => undefined);
+      return true;
+    } catch (error) {
+      quiescence?.dispose();
+      throw error;
+    }
   }
 
   private reserveCompactionSlot(source: CompactionBeginData['source']): boolean {
@@ -381,13 +406,14 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         'Cannot compact while a turn is active. Wait for it to finish, then retry.',
       );
     }
-    return this.tokenCounting.estimateMessages(history);
+    return this.requestTokens(history);
   }
 
   private createActiveCompaction(
     trigger: CompactionBeginData['source'],
     tokenCount: number,
     originTurnId: number | undefined,
+    quiescence: IDisposable | undefined,
   ): {
     readonly task: ActiveCompaction;
     readonly resolve: (result: CompactionResult) => void;
@@ -407,6 +433,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         trigger,
         tokenCount,
         originTurnId,
+        quiescence,
         get traceId() {
           return this.trace?.traceId;
         },
@@ -588,8 +615,6 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       if (this._compacting !== active) throw compactionCancelledReason(active);
       this.profile.requestSystemPromptRefresh();
       this.lastCompactedTokenCount = result.tokensAfter;
-      await this.contextInjector.injectAfterCompaction();
-      this.lastCompactedTokenCount = this.tokenCountWithPending();
       if (!this.markCompleted(active)) {
         throw compactionCancelledReason(active);
       }
@@ -615,7 +640,11 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       });
       throw error;
     } finally {
-      this._onDidFinishCompaction.fire(active);
+      try {
+        this._onDidFinishCompaction.fire(active);
+      } finally {
+        active.quiescence?.dispose();
+      }
     }
   }
 
@@ -711,7 +740,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     originalHistory: readonly ContextMessage[],
   ): Promise<CompactionResult> {
     const startedAt = Date.now();
-    const tokensBefore = this.tokenCounting.estimateMessages(originalHistory);
+    const tokensBefore = this.requestTokens(originalHistory);
     let retryCount = 0;
     let thinkingEffort = this.profile.data().thinkingLevel;
 
@@ -878,6 +907,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         compactedCount: originalHistory.length,
         tokensBefore,
         summaryOutputTokens: attempt.usage?.output,
+        requestOverheadTokens: this.requestTokens([]),
         droppedCount: droppedCount === 0 ? undefined : droppedCount,
         checkpoint,
       });
@@ -938,15 +968,6 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
   private tokenCountWithPending(): number {
     return this.tokenCounting.get().size;
-  }
-
-  private get contextInjector(): IAgentContextInjectorService {
-    if (this.contextInjectorService === undefined) {
-      this.contextInjectorService = this.instantiation.invokeFunction((accessor) =>
-        accessor.get(IAgentContextInjectorService),
-      );
-    }
-    return this.contextInjectorService;
   }
 }
 

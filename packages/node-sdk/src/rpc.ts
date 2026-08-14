@@ -36,6 +36,7 @@ import type {
   CreateGoalInput,
   ForkSessionInput,
   GetConfigOptions,
+  GlobalMcpServerAuthStatus,
   McpServerConfig,
   GoalSnapshot,
   GoalToolResult,
@@ -59,6 +60,7 @@ import type {
   ResumeSessionInput,
   ResumedSessionSummary,
   SessionSummary,
+  SessionSummaryPage,
   SkillSummary,
   PluginCommandDef,
   Unsubscribe,
@@ -70,12 +72,6 @@ const MAIN_AGENT_ID = 'main';
 export interface SessionPromptRpcInput {
   readonly sessionId: string;
   readonly input: PromptInput;
-  /**
-   * Client-managed session tool denylist (full-replace semantics), forwarded
-   * to engines with profile tool gating. Omit to keep the persisted value;
-   * `[]` clears the client portion.
-   */
-  readonly disabledTools?: readonly string[];
 }
 
 export interface SessionIdRpcInput {
@@ -228,6 +224,17 @@ export abstract class SDKRpcClientBase {
     return rpc.listSessions(input);
   }
 
+  /**
+   * One keyset page of the session listing (`limit` / `before` in
+   * `ListSessionsOptions`). The base implementation serves the whole filtered
+   * set as a single terminal page — the v1 engine has no paged listing;
+   * `SDKRpcClientV2` overrides this with real index paging.
+   */
+  async listSessionsPage(input: ListSessionsOptions = {}): Promise<SessionSummaryPage> {
+    const items = await this.listSessions(input);
+    return { items, nextCursor: undefined };
+  }
+
   async listWorkspaceSkills(workDir: string): Promise<readonly SkillSummary[]> {
     const rpc = await this.getRpc();
     return rpc.listWorkspaceSkills({ workDir });
@@ -320,6 +327,11 @@ export abstract class SDKRpcClientBase {
     return rpc.listGlobalMcpServers({});
   }
 
+  async listGlobalMcpServerAuthStatuses(): Promise<readonly GlobalMcpServerAuthStatus[]> {
+    const rpc = await this.getRpc();
+    return rpc.listGlobalMcpServerAuthStatuses({});
+  }
+
   async addGlobalMcpServer(server: McpServerConfig): Promise<readonly McpServerConfig[]> {
     const rpc = await this.getRpc();
     return rpc.addGlobalMcpServer({ server });
@@ -373,7 +385,6 @@ export abstract class SDKRpcClientBase {
       sessionId: input.sessionId,
       agentId,
       input: input.input,
-      disabledTools: input.disabledTools,
     });
   }
 
@@ -479,11 +490,6 @@ export abstract class SDKRpcClientBase {
       agentId: this.interactiveAgentId,
       effort: input.effort,
     });
-  }
-
-  async applyPersistedSecondaryModel(input: SessionIdRpcInput): Promise<void> {
-    const rpc = await this.getRpc();
-    return rpc.applyPersistedSecondaryModel({ sessionId: input.sessionId });
   }
 
   async setPermission(input: SetSessionPermissionRpcInput): Promise<void> {
