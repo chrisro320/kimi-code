@@ -7,8 +7,8 @@
  * `handled: true` return must already carry its durable wire mutation — the
  * result is only a receipt) or drives the built-in compaction LLM round
  * (with overflow / truncation shrink retries), and finishes both through
- * one common envelope (prompt refresh → token counts → injection →
- * completion → settle last). Also recovers the loop from
+ * one common envelope (prompt refresh → token counts → completion → settle
+ * last). Also recovers the loop from
  * context-overflow failures by blocking the turn on the in-flight job. The
  * built-in round's remote and local requests share the orchestrator's
  * single `LlmRequestContext` manager snapshot. The

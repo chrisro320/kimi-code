@@ -45,8 +45,8 @@ import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSel
 import { cacheCliffFields, dropOrphanToolResults, fullCompactionLastCompactedTokenCountKey } from '#/agent/fullCompaction/fullCompactionService';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { CONTEXT_MANAGER_SECTION } from '#/agent/llmRequester/configSection';
+import { IAcpService } from '#/features/acp/acp';
 import type { CompactDelegation, ContextManager } from '#/agent/llmRequester/llmRequester';
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
@@ -698,7 +698,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 14_520,
+        tokens_before: 15_165,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1081,7 +1081,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 14_520,
+        tokens_before: 15_165,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1306,7 +1306,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 14_520,
+        tokens_before: 15_165,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -3849,6 +3849,13 @@ describe('goal reminder re-injection after full compaction', () => {
       };
     }
 
+    function disposeAcpManager(ctx: TestAgentContext): void {
+      // The harness folds feature contributions into every test agent, so
+      // AcpService has already registered 'acp-kernel'; disposing it frees
+      // the single manager slot for the delegate under test.
+      (ctx.get(IAcpService) as unknown as { dispose(): void }).dispose();
+    }
+
     function delegatedAgent(manager: ContextManager): TestAgentContext {
       const ctx = testAgent();
       ctx.configure({
@@ -3858,6 +3865,7 @@ describe('goal reminder re-injection after full compaction', () => {
       });
       ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
       ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+      disposeAcpManager(ctx);
       ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
       void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
       return ctx;
@@ -3894,11 +3902,6 @@ describe('goal reminder re-injection after full compaction', () => {
         if (key === fullCompactionLastCompactedTokenCountKey) order.push('tokens');
         originalSet(key, value);
       }) as unknown as typeof states.set);
-      vi.spyOn(ctx.get(IAgentContextInjectorService), 'injectAfterCompaction').mockImplementation(
-        async () => {
-          order.push('inject');
-        },
-      );
       const wire = ctx.get(IWireService);
       const originalDispatch = wire.dispatch.bind(wire) as (op: unknown) => void;
       vi.spyOn(wire, 'dispatch').mockImplementation(((op: { type?: string }) => {
@@ -3927,8 +3930,6 @@ describe('goal reminder re-injection after full compaction', () => {
         'precompact',
         'delegate',
         'refresh',
-        'tokens',
-        'inject',
         'tokens',
         'wire-complete',
         'completed',
@@ -4014,6 +4015,7 @@ describe('goal reminder re-injection after full compaction', () => {
         provider: CATALOGUED_PROVIDER,
         modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
       });
+      disposeAcpManager(ctx);
       ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
       void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
       ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
@@ -4141,6 +4143,7 @@ describe('goal reminder re-injection after full compaction', () => {
       });
       ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
       ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+      disposeAcpManager(ctx);
       ctx.get(IAgentLLMRequesterService).registerContextManager(manager);
       void ctx.get(IConfigService).set(CONTEXT_MANAGER_SECTION, manager.id);
 
