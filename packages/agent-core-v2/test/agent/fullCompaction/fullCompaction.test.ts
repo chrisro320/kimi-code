@@ -323,7 +323,7 @@ describe('FullCompaction', () => {
         // (routing / circuit / dispatch) and four extra builtin profiles, so the
         // full-request overhead the counter now includes is larger. Re-measure
         // rather than reverting to upstream numbers.
-        tokens_before: 3_886,
+        tokens_before: 3_898,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -612,7 +612,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 3_886,
+      token_count: 3_898,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -698,7 +698,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 15_165,
+        tokens_before: 15_178,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1081,7 +1081,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 15_165,
+        tokens_before: 15_178,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1306,7 +1306,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 15_165,
+        tokens_before: 15_178,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1682,12 +1682,12 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 3_893,
-        // 3255 estimated request-overhead tokens (system prompt + tools) +
+        tokens_before: 3_905,
+        // 3267 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
         // 21 estimated tokens for the kept user messages — the summary
         // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_877,
+        tokens_after: 3_889,
         compacted_count: 7,
         retry_count: 0,
       }),
