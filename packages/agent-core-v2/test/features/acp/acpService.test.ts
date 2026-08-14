@@ -1012,4 +1012,34 @@ describe('AcpService', () => {
     expect(result.message).toContain('m00007');
     expect(setup.project).not.toHaveBeenCalled();
   });
+
+  it('drops the cached view when the live context changes mid-transform', async () => {
+    const store = createStore();
+    const setup = createService('main', store);
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    let releaseLoad: (value: unknown) => void = () => undefined;
+    store.get.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = resolve;
+        }),
+    );
+
+    // A clear landing while the sidecar load is in flight must not let the
+    // transform bind the pre-clear view to the empty post-clear snapshot.
+    const pending = transform(setup.requester.manager(), messages);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setup.env.history = [];
+    releaseLoad(undefined);
+    const outcome = await pending;
+    expect(outcome.accounting).toBe('raw-equivalent');
+
+    const result = await setup.service.search({ query: 'MARKER-7' });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('No ACP context matches');
+    expect(setup.project).toHaveBeenCalledOnce();
+  });
 });

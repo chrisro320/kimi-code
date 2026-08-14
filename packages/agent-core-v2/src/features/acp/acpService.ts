@@ -38,8 +38,11 @@
  * misses in-place edits and undo+regrow, which would let tools act on undone
  * content — and fold eligibility re-checks the prefix after every await
  * because a prefix rewrite (undo/edit) between checks would fold messages
- * the summary never covered. Rebuilt histories append at the tail, keeping
- * every existing provider prefix intact. On reset the cached view and status
+ * the summary never covered. The transform binds the view only when the live
+ * context reference is unchanged since the transform began, so a mid-turn
+ * clear or rewrite cannot pin the pre-change view onto a trivially-empty
+ * snapshot that every later history would extend. Rebuilt histories append
+ * at the tail, keeping every existing provider prefix intact. On reset the cached view and status
  * are dropped immediately so no exit path (abort, fold failure) leaves a
  * stale compressed view eligible against the fresh sidecar.
  *
@@ -193,6 +196,7 @@ export class AcpService extends Service implements IAcpService {
         this.serialize(async () => {
           const linked = AbortSignal.any([signal, this.lifetime.signal]);
           let durableRefs = this.currentStatus.refs;
+          const sourceBefore = this.context.get();
           try {
             linked.throwIfAborted();
             this.lastUsage = { usedContextTokens, maxContextTokens };
@@ -248,7 +252,9 @@ export class AcpService extends Service implements IAcpService {
             const nudge = renderTurnNudge(turn);
             const base = tagOnly ? messages : rebuilt.messages;
             const outgoing = nudge === undefined ? base : [...base, nudge];
-            this.lastView = { source: this.context.get(), view: messages, compacted: outgoing };
+            if (this.context.get() === sourceBefore) {
+              this.lastView = { source: sourceBefore, view: messages, compacted: outgoing };
+            }
             if (tagOnly && nudge === undefined) {
               return { messages: outgoing, accounting: 'raw-equivalent' as const };
             }
