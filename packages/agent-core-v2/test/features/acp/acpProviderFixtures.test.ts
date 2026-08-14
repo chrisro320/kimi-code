@@ -105,7 +105,15 @@ const FIXTURES: readonly ProviderFixture[] = [
           { type: 'think', think: 'querying', encrypted: 'gemini-thought-signature' },
           { type: 'text', text: 'Querying now.' },
         ],
-        toolCalls: [{ type: 'function', id: 'call_g1', name: 'run_sql', arguments: '{"q":"select *"}' }],
+        toolCalls: [
+          {
+            type: 'function',
+            id: 'call_g1',
+            name: 'run_sql',
+            arguments: '{"q":"select *"}',
+            extras: { thought_signature_b64: 'gemini-sig-call-g1' },
+          },
+        ],
       },
       {
         role: 'tool',

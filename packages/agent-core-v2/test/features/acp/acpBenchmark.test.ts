@@ -85,51 +85,68 @@ describe('ACP long-session benchmark (synthetic)', () => {
     const baseline = await runLongSession(false, 13);
     const acp = await runLongSession(true);
 
-    const baselinePeak = Math.max(...baseline.metrics.map((metric) => metric.chars));
-    const acpPeakBeforeFold = acp.metrics[7]!.chars;
+    try {
+      const baselinePeak = Math.max(...baseline.metrics.map((metric) => metric.chars));
+      const acpPeakBeforeFold = acp.metrics[7]!.chars;
 
-    const acpService = acp.ctx.get(IAcpService);
-    const foldOne = await acpService.compress({
-      ranges: [{ startRef: refFor(1), endRef: refFor(8), summary: `Fold A covers turns one through four of the synthetic benchmark session.` }],
-    });
-    expect(foldOne.ok, foldOne.message).toBe(true);
-
-    for (let turn = 9; turn <= 12; turn += 1) {
-      await acp.ctx.rpc.prompt({
-        input: [{ type: 'text', text: `turn ${String(turn)} ${'q'.repeat(8000)}` }],
+      const acpService = acp.ctx.get(IAcpService);
+      const foldOne = await acpService.compress({
+        ranges: [{ startRef: refFor(1), endRef: refFor(8), summary: `Fold A covers turns one through four of the synthetic benchmark session.` }],
       });
+      expect(foldOne.ok, foldOne.message).toBe(true);
+
+      for (let turn = 9; turn <= 12; turn += 1) {
+        await acp.ctx.rpc.prompt({
+          input: [{ type: 'text', text: `turn ${String(turn)} ${'q'.repeat(8000)}` }],
+        });
+        await acp.ctx.untilTurnEnd();
+      }
+
+      const foldTwo = await acpService.compress({
+        ranges: [{ startRef: refFor(9), endRef: refFor(16), summary: `Fold B covers turns five through eight of the benchmark session.` }],
+      });
+      expect(foldTwo.ok, foldTwo.message).toBe(true);
+
+      await acp.ctx.rpc.prompt({ input: [{ type: 'text', text: `turn 13 ${'q'.repeat(8000)}` }] });
       await acp.ctx.untilTurnEnd();
+
+      const finalCall = acp.metrics.at(-1)!;
+      expect(finalCall.historyText).toContain('Fold A covers turns one through four');
+      expect(finalCall.historyText).toContain('Fold B covers turns five through eight');
+      // The kernel always keeps the first user message, so turn 1 stays visible.
+      expect(finalCall.historyText).toContain('turn 1 qqq');
+      expect(finalCall.historyText).not.toContain('turn 2 qqq');
+      expect(finalCall.historyText).not.toContain('turn 5 qqq');
+      // Immediately after each fold the outgoing history drops back below the
+      // pre-fold peak (turn 9 after fold A; turn 13 after fold B). Turns between
+      // scheduled folds accumulate by design, so the bound is per-fold, not per-turn.
+      expect(acp.metrics[8]!.chars).toBeLessThan(acpPeakBeforeFold);
+      expect(acp.metrics[12]!.chars).toBeLessThan(acpPeakBeforeFold);
+
+      const acpFinal = finalCall.chars;
+      const reduction = 1 - acpFinal / baselinePeak;
+      console.table({
+        baselinePeakChars: baselinePeak,
+        acpPeakBeforeFoldChars: acpPeakBeforeFold,
+        acpFinalCallChars: acpFinal,
+        inputReductionVsBaselinePeak: `${(reduction * 100).toFixed(1)}%`,
+      });
+      expect(acpFinal).toBeLessThan(acpPeakBeforeFold);
+      expect(acpFinal).toBeLessThan(baselinePeak * 0.6);
+
+      const restored = await acpService.decompress({ blockId: 'b1' });
+      expect(restored.ok, restored.message).toBe(true);
+      // 'turn 3 qqq' lives only inside fold b1; 'turn 1' is kernel-kept and proves nothing.
+      expect(restored.message).toContain('turn 3 qqq');
+
+      await acp.ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 14 post-restore check' }] });
+      await acp.ctx.untilTurnEnd();
+      const postRestoreCall = acp.metrics.at(-1)!;
+      expect(postRestoreCall.historyText).toContain('turn 3 qqq');
+      expect(postRestoreCall.chars).toBeGreaterThan(acpFinal);
+    } finally {
+      await baseline.ctx.dispose();
+      await acp.ctx.dispose();
     }
-
-    const foldTwo = await acpService.compress({
-      ranges: [{ startRef: refFor(9), endRef: refFor(16), summary: `Fold B covers turns five through eight of the benchmark session.` }],
-    });
-    expect(foldTwo.ok, foldTwo.message).toBe(true);
-
-    await acp.ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 13 tail question' }] });
-    await acp.ctx.untilTurnEnd();
-
-    const finalCall = acp.metrics.at(-1)!;
-    expect(finalCall.historyText).toContain('Fold A covers turns one through four');
-    expect(finalCall.historyText).toContain('Fold B covers turns five through eight');
-    // The kernel always keeps the first user message, so turn 1 stays visible.
-    expect(finalCall.historyText).toContain('turn 1 qqq');
-    expect(finalCall.historyText).not.toContain('turn 2 qqq');
-    expect(finalCall.historyText).not.toContain('turn 5 qqq');
-
-    const acpFinal = finalCall.chars;
-    const reduction = 1 - acpFinal / baselinePeak;
-    console.table({
-      baselinePeakChars: baselinePeak,
-      acpPeakBeforeFoldChars: acpPeakBeforeFold,
-      acpFinalCallChars: acpFinal,
-      inputReductionVsBaselinePeak: `${(reduction * 100).toFixed(1)}%`,
-    });
-    expect(acpFinal).toBeLessThan(acpPeakBeforeFold);
-    expect(acpFinal).toBeLessThan(baselinePeak * 0.6);
-
-    const restored = await acpService.decompress({ blockId: 'b1' });
-    expect(restored.ok, restored.message).toBe(true);
-    expect(restored.message).toContain('turn 1');
   });
 });

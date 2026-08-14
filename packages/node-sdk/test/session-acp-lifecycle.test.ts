@@ -13,6 +13,8 @@ afterEach(async () => {
   await removeTempDirs(tempDirs);
 });
 
+// These SDK-level tests run no turns, so no refs are ever minted; state-bearing
+// reset/isolation semantics live at the engine layer (test/features/acp/ in agent-core-v2).
 describe('Session ACP lifecycle (v2)', () => {
   it('keeps the manager enabled across a harness restart and resets after resume', async () => {
     const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-acp-resume-home-');
@@ -35,6 +37,8 @@ describe('Session ACP lifecycle (v2)', () => {
 
       await resumed.acpReset();
       expect((await resumed.acpStatus()).health).toBe('healthy');
+      // Reset clears state but must NOT disable the manager (the disable leg below covers that).
+      expect((await resumed.acpStatus()).enabled).toBe(true);
 
       await resumed.acpDisable();
       expect((await resumed.acpStatus()).enabled).toBe(false);
@@ -64,6 +68,8 @@ describe('Session ACP lifecycle (v2)', () => {
         forkId: 'ses_acp_fork_child',
       });
       expect((await fork.acpStatus()).refs).toBe(0);
+      // A fork inherits activation (config-level) but not refs (session-scoped sidecar).
+      expect((await fork.acpStatus()).enabled).toBe(true);
 
       await fork.acpReset();
       expect((await source.acpStatus()).enabled).toBe(true);
