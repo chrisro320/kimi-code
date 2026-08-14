@@ -423,6 +423,9 @@ export class AcpService extends Service implements IAcpService {
           : AbortSignal.any([this.lifetime.signal, input.signal]);
       linked.throwIfAborted();
       try {
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
         const { state, result } = this.core.applyCompression({
@@ -484,6 +487,9 @@ export class AcpService extends Service implements IAcpService {
           : AbortSignal.any([this.lifetime.signal, input.signal]);
       linked.throwIfAborted();
       try {
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
         const parsed = parseBlockIdArg(input.blockId);
@@ -555,6 +561,9 @@ export class AcpService extends Service implements IAcpService {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
       try {
+        if (!this.isActive()) {
+          return { ok: false, message: 'ACP is not the active context manager.' };
+        }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
         const ownerByMessage = new Map<string, CompressionBlock>();

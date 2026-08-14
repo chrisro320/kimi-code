@@ -286,6 +286,32 @@ describe('AcpService', () => {
     expect(seen).toEqual([]);
   });
 
+  it('refuses mutations while another context manager is active', async () => {
+    const setup = createService('inactive-guard');
+    owned.push(setup.disposables);
+    const requester = setup.requester.service as unknown as {
+      getActiveContextManager: () => ContextManager;
+    };
+    requester.getActiveContextManager = () => ({ id: 'other-manager' }) as ContextManager;
+
+    const compressed = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00002', summary: SUMMARY }],
+    });
+    expect(compressed.ok).toBe(false);
+    expect(compressed.message).toContain('not the active context manager');
+
+    const decompressed = await setup.service.decompress({ blockId: 'b1' });
+    expect(decompressed.ok).toBe(false);
+    expect(decompressed.message).toContain('not the active context manager');
+
+    const searched = await setup.service.search({ query: 'anything' });
+    expect(searched.ok).toBe(false);
+    expect(searched.message).toContain('not the active context manager');
+
+    expect(setup.store.set).not.toHaveBeenCalled();
+    expect(setup.service.status().health).toBe('healthy');
+  });
+
   it('fails open on load, validation, and save failure without changing durable state', async () => {
     const messages = [textMessage('safe')];
     const loadFailure = createService('load-failure');
