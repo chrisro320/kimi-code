@@ -1,5 +1,6 @@
 import assert from "node:assert";
-import { type Component, TUI } from "../src/tui.ts";
+import type { Component, TUI } from "../src/tui.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "../test/virtual-terminal.ts";
 
 /** A component whose rendered lines are fully controlled by the test. */
@@ -44,7 +45,7 @@ export async function createHarness(
 	const columns = options?.columns ?? 60;
 	const rows = options?.rows ?? 10;
 	const terminal = options?.capture ? new WriteCapturingTerminal(columns, rows) : new VirtualTerminal(columns, rows);
-	const tui = new TUI(terminal);
+	const tui = new TuiMainScreen(terminal);
 	const content = new Lines();
 	tui.addChild(content);
 	content.setLines(initialLines);
