@@ -121,6 +121,49 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("shows a jump-to-bottom hint when scrolled away from the end and jumps on click", async () => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TuiAltScreen(terminal);
+		const transcriptText = new Text(Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0);
+		const transcript = new ScrollView(transcriptText, { follow: "end", primary: true });
+		const todo = new Text("todo", 0, 0);
+		const dock = new VStack([todo, new Text("editor", 0, 0), new Text("footer", 0, 0)]);
+		tui.setJumpToBottomAnchor(todo);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: dock, basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		// Following the end: no hint above the todo pane's top edge (row 1).
+		assert.ok(!terminal.getViewport()[1]!.includes("Jump to bottom"));
+
+		// Wheel up away from the end: the hint appears centered on that row.
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		assert.ok(terminal.getViewport()[1]!.includes("Jump to bottom"));
+
+		// Clicking the hint jumps back to the bottom and hides it again.
+		terminal.sendInput("\x1b[<0;15;2M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, true);
+		assert.ok(!terminal.getViewport()[1]!.includes("Jump to bottom"));
+
+		// Hovering over the hint row (button 32 = motion) must not jump.
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<32;15;2M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		assert.ok(terminal.getViewport()[1]!.includes("Jump to bottom"));
+
+		tui.stop();
+	});
+
 	it("invalidates overlays with an explicit layout root", () => {
 		const tui = new TuiAltScreen(new VirtualTerminal());
 		const overlay = new Text("overlay", 0, 0);

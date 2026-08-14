@@ -64,6 +64,12 @@ const END_SYNCHRONIZED_OUTPUT = "\x1b[?2026l";
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 const OSC133_PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
 const PAGE_SCROLL_OVERLAP = 4;
+const JUMP_TO_BOTTOM_HINT = "Jump to bottom (End) \u2193";
+// Fixed row for the hint instead of the scroll-view bottom: the dock's
+// expandable panes (activity/todo/queue/btw) change the viewport height while
+// the model streams output, which would otherwise bounce the hint up and down.
+// The minimum dock is the editor (3 rows) plus the footer (1 row).
+const JUMP_TO_BOTTOM_ROW_OFFSET = 4;
 const MAX_CACHED_OFFSCREEN_KITTY_IMAGES = 16;
 const MAX_CACHED_OFFSCREEN_KITTY_TRANSMISSION_BYTES = 32 * 1024 * 1024;
 const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES = 64 * 1024 * 1024;
@@ -167,6 +173,13 @@ export interface TuiAltScreenOptions {
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
 	onRightClickPaste?: () => void;
+	/**
+	 * Anchor whose top edge the jump-to-bottom hint sits on. The app passes its
+	 * todo-panel container: with a visible todo list the hint floats above it,
+	 * and with an empty panel it naturally lands above the editor. Anchoring on
+	 * a fixed row would drift into the dock as panes expand and contract.
+	 */
+	jumpToBottomAnchor?: Component;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -208,6 +221,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private mouseEditorTarget?: TuiAltScreenMouseEditorTarget;
 	private editorMouseSelecting = false;
+	private jumpToBottomAnchor?: Component;
 
 	constructor(
 		terminal: Terminal,
@@ -231,6 +245,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.mouseEditorTarget = options.mouseEditor;
+		this.jumpToBottomAnchor = options.jumpToBottomAnchor;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -238,6 +253,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	setMouseEditorTarget(target: TuiAltScreenMouseEditorTarget | undefined): void {
 		this.mouseEditorTarget = target;
 		if (!target) this.editorMouseSelecting = false;
+	}
+
+	/** Set the container whose top edge the jump-to-bottom hint sits on (built after the TUI). */
+	setJumpToBottomAnchor(container: Component | undefined): void {
+		if (this.jumpToBottomAnchor === container) return;
+		this.jumpToBottomAnchor = container;
+		this.requestRender();
 	}
 
 	get viewportTop(): number {
@@ -588,6 +610,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
+			if (!handled && this.isJumpToBottomHit(mouseEvent)) {
+				this.scrollToBottom();
+				return { consume: true };
+			}
 			if (!handled && this.handleEditorMouseEvent(mouseEvent)) return { consume: true };
 			if (!handled) this.handleSelectionMouseEvent(mouseEvent);
 			return { consume: true };
@@ -1295,6 +1321,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || (data.length === 6 && data.startsWith("\x1b[M"));
 	}
 
+	private jumpToBottomRow(layout: LayoutFrame | undefined): number | undefined {
+		if (this.jumpToBottomAnchor && layout) {
+			const box = getComponentBox(layout, this.jumpToBottomAnchor);
+			// One blank row between the hint and the anchored pane's top edge.
+			if (box) return box.rect.y - 2;
+		}
+		return layout ? Math.max(0, layout.height - JUMP_TO_BOTTOM_ROW_OFFSET) : undefined;
+	}
+
+	private isJumpToBottomHit(event: SgrMouseEvent): boolean {
+		// Primary-button press only: motion/release events must not trigger the jump
+		// (button 32 is the motion flag, 3 the button number mask).
+		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
+		if (this.terminal.columns < JUMP_TO_BOTTOM_HINT.length) return false;
+		const scrollView = this.getPrimaryScrollView();
+		if (!scrollView.canScroll || scrollView.isFollowingEnd || !this.currentLayout) return false;
+		const overlayRow = this.jumpToBottomRow(this.currentLayout);
+		if (overlayRow === undefined || event.y !== overlayRow) return false;
+		const hintWidth = Math.min(JUMP_TO_BOTTOM_HINT.length, this.terminal.columns);
+		const left = Math.max(0, Math.floor((this.terminal.columns - hintWidth) / 2));
+		return event.x >= left && event.x < left + hintWidth;
+	}
+
 	private compositeFlashes(screen: string[], width: number, height: number): string[] {
 		const flashLines = this.flashes.render(width).slice(-height);
 		if (flashLines.length === 0) return screen;
@@ -1306,6 +1355,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (flashWidth === 0) continue;
 			result[row] = compositeTuiLine(result[row] ?? "", line, width - flashWidth, flashWidth, width);
 		}
+		return result;
+	}
+
+	private compositeJumpToBottom(screen: string[], width: number, height: number, layout: LayoutFrame): string[] {
+		if (width < JUMP_TO_BOTTOM_HINT.length) return screen;
+		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		if (!scrollView.canScroll || scrollView.isFollowingEnd) return screen;
+		const overlayRow = this.jumpToBottomRow(layout);
+		if (overlayRow === undefined || overlayRow < 0 || overlayRow >= height) return screen;
+		const hint = JUMP_TO_BOTTOM_HINT.slice(0, width);
+		const hintWidth = visibleWidth(hint);
+		const left = Math.max(0, Math.floor((width - hintWidth) / 2));
+		const result = [...screen];
+		result[overlayRow] = compositeTuiLine(result[overlayRow] ?? "", `\x1b[33m${hint}\x1b[39m`, left, hintWidth, width);
 		return result;
 	}
 
@@ -1324,6 +1387,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
+		screen = this.compositeJumpToBottom(screen, width, height, nextLayout);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => {

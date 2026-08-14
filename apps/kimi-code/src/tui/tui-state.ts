@@ -131,6 +131,10 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     // cursor, drags highlight text, and releasing copies to the clipboard.
     // The gutter inset maps screen columns to editor component columns.
     ui.setMouseEditorTarget({ container: editorContainer, editor, columnInset: CHROME_GUTTER });
+    // The jump-to-bottom hint floats above the todo panel's top edge (or the
+    // editor's when the panel is empty), staying put while the activity pane
+    // expands and contracts during output.
+    ui.setJumpToBottomAnchor(todoPanelContainer);
   }
   const footer = new FooterComponent({ ...initialAppState }, () => {
     ui.requestRender();
