@@ -33,6 +33,36 @@
  * slightly under-estimates `tokensAfter`). Post-takeover the cached view is
  * dropped and the next transform starts from the fold summary.
  *
+ * The cached transform view is sound only while the live history still
+ * extends the exact live snapshot it was shaped from — a length check alone
+ * misses in-place edits and undo+regrow, which would let tools act on undone
+ * content — and fold eligibility re-checks the prefix after every await
+ * because a prefix rewrite (undo/edit) between checks would fold messages
+ * the summary never covered. Rebuilt histories append at the tail, keeping
+ * every existing provider prefix intact. On reset the cached view and status
+ * are dropped immediately so no exit path (abort, fold failure) leaves a
+ * stale compressed view eligible against the fresh sidecar.
+ *
+ * Tool semantics: compress is all-or-nothing — a rejected range fails the
+ * whole call, so the model can retry the batch without hitting
+ * already-consumed boundaries — and both compress and restore invalidate the
+ * cached view immediately after the sidecar save, before the abort check, so
+ * an abort cannot leave a view that hides the wrong content (or still shows
+ * folded content) eligible for the next transform or takeover. Tools speak
+ * the model-visible kernel ref, not the raw projection id — the two diverge
+ * once one source message yields several cores. Restore drops the block
+ * record entirely: this host re-projects the full raw history every turn, so
+ * the kernel's syncBlocks re-derives `active` from message presence and
+ * would resurrect a merely-deactivated block; dropping the record keeps the
+ * originals visible and lets a nested child block fold its own range again
+ * (exactly shallow, one-tier-up restore), while a retained inactive block
+ * points the model at its consuming ancestor. Consumed blocks always precede
+ * their consumer (kernel appends), which makes the lineage acyclic.
+ *
+ * Durability fails open: a read-path load or validation failure never
+ * silently resets corrupt durable state — the original bytes are kept for
+ * `/acp reset` — and a failed save leaves the live history untouched.
+ *
  * Status changes publish the `acp` slice (health only) of
  * `agent.status.updated` on the agent event bus, gated on ACP being the
  * requester's active manager so a `reset()` issued while disabled does not
@@ -177,8 +207,6 @@ export class AcpService extends Service implements IAcpService {
             }
             const config = defaultConfig(maxContextTokens);
             if (loaded.compressionState !== null && !isCompressionState(loaded.compressionState)) {
-              // Never silently reset corrupt durable state on a read path:
-              // fail open and keep the original bytes for `/acp reset`.
               this.degrade('ACP sidecar compression state is corrupt', durableRefs);
               return { messages, accounting: 'raw-equivalent' as const };
             }
@@ -219,7 +247,6 @@ export class AcpService extends Service implements IAcpService {
             });
             const nudge = renderTurnNudge(turn);
             const base = tagOnly ? messages : rebuilt.messages;
-            // Appending at the tail keeps every existing provider prefix intact.
             const outgoing = nudge === undefined ? base : [...base, nudge];
             this.lastView = { source: this.context.get(), view: messages, compacted: outgoing };
             if (tagOnly && nudge === undefined) {
@@ -248,8 +275,6 @@ export class AcpService extends Service implements IAcpService {
             return { handled: false };
           }
 
-          // Re-checked after every await: a prefix rewrite (undo/edit) between
-          // checks would fold messages the summary never covered.
           const assertFoldSafe = (): void => {
             if (historySafeToCompact(this.context.get(), live)) return;
             const error = new Error(
@@ -285,8 +310,6 @@ export class AcpService extends Service implements IAcpService {
             finish = await request.result;
           } catch (error) {
             if (linked.aborted) throw linked.reason;
-            // The summarizer itself overflowed: nothing durable has changed
-            // yet, so decline to the built-in round, which has shrink-retry.
             if (unwrapErrorCause(error) instanceof APIContextOverflowError) {
               return { handled: false };
             }
@@ -317,9 +340,6 @@ export class AcpService extends Service implements IAcpService {
             ...loaded,
             compressionState: nextState,
           });
-          // The kernel state is reset from here on: drop the cached view and
-          // status immediately so no path (abort, fold failure) leaves the
-          // stale compressed view eligible against the fresh sidecar.
           this.lastView = undefined;
           this.setStatus({
             managerId: ACP_MANAGER_ID,
@@ -415,8 +435,6 @@ export class AcpService extends Service implements IAcpService {
           config: defaultConfig(this.lastUsage.maxContextTokens),
         });
         linked.throwIfAborted();
-        // All-or-nothing: a rejected range fails the whole call, so the model
-        // can retry the batch without hitting already-consumed boundaries.
         if (result.blocksCreated === 0 || result.errors.length > 0) {
           return {
             ok: false,
@@ -425,10 +443,6 @@ export class AcpService extends Service implements IAcpService {
         }
         const nextSidecar = { ...view.sidecar, compressionState: state };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
-        // The cached transform output no longer matches this state: the new
-        // block folds content the cached view still shows. Invalidate right
-        // after the save — before the abort check — so an abort cannot exit
-        // with the stale view still eligible for the next transform/takeover.
         this.lastView = undefined;
         linked.throwIfAborted();
         this.setStatus({
@@ -479,8 +493,6 @@ export class AcpService extends Service implements IAcpService {
           return { ok: false, message: `Unknown ACP block "${input.blockId}". Known blocks: ${known}.` };
         }
         if (!block.active) {
-          // Restored blocks are removed from the record, so a retained
-          // inactive block is consumed by a newer one — point at the ancestor.
           const ancestor = findActiveAncestor(view.state, block.blockId);
           return {
             ok: false,
@@ -491,12 +503,6 @@ export class AcpService extends Service implements IAcpService {
           };
         }
         const full = input.full ?? false;
-        // This host always re-projects the full raw history, so the kernel's
-        // syncBlocks node re-derives `active` from message presence every turn
-        // and would resurrect a merely-deactivated block. Restoring a block
-        // therefore means dropping its record: the originals stay visible, and
-        // a nested child block (no longer consumed) folds its own range again,
-        // which is exactly the shallow (one-tier-up) restore semantics.
         const removed = new Set<string>([block.blockId]);
         if (full) {
           const queue = [...block.directBlockIds];
@@ -515,10 +521,6 @@ export class AcpService extends Service implements IAcpService {
         linked.throwIfAborted();
         const nextSidecar = { ...view.sidecar, compressionState: next };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
-        // The cached transform output still hides what this restore just made
-        // visible again; invalidate right after the save — before the abort
-        // check — so an abort cannot leave a view that omits the restored
-        // content eligible for a takeover.
         this.lastView = undefined;
         linked.throwIfAborted();
         this.setStatus({
@@ -566,8 +568,6 @@ export class AcpService extends Service implements IAcpService {
             view.projection.messages.flatMap((core) => {
               if (core.role === 'system') return [];
               const owner = ownerByMessage.get(core.id);
-              // Speak the model-visible kernel ref, not the raw projection id:
-              // the two diverge once one source message yields several cores.
               const kernelRef = view.state.messageRefs.byRaw[core.id];
               return [
                 {
@@ -616,10 +616,6 @@ export class AcpService extends Service implements IAcpService {
       this.degrade(reason, loaded.refs.length);
       return { ok: false, reason };
     }
-    // The cached view is only sound while the live history still extends the
-    // exact live snapshot it was shaped from — a length check alone misses
-    // in-place edits and undo+regrow, which would let tools act on undone
-    // content.
     const history = this.context.get();
     const cached = this.lastView;
     const messages =
@@ -804,8 +800,6 @@ function compressionStateInvariantsHold(
   }
   if (nextBlockId < 1 || nextBlockId <= maxBlock) return false;
   if (nextRunId < 1 || nextRunId <= maxRun) return false;
-  // Consumed blocks always precede the consumer (kernel appends), which also
-  // proves the lineage is acyclic.
   const order = new Map(blocks.map((block, index) => [block.blockId, index]));
   for (const [index, block] of blocks.entries()) {
     for (const id of block.directBlockIds) {

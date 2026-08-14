@@ -320,10 +320,6 @@ function rebuildOriginal(
       toolCalls.push(call);
       continue;
     }
-    // The kernel cosmetically filters consumed ranges out of a surviving
-    // compress call's arguments (hide-consumed). Emit the rewritten arguments
-    // only when they verify as an ordered subsequence of the original content
-    // with every other field preserved; otherwise fail the rebuild.
     if (KERNEL_REWRITABLE_TOOLS.has(call.name)) {
       const rewritten = validatedCompressRewrite(call.arguments ?? '', rewrittenText);
       if (rewritten !== undefined) {
