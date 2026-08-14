@@ -4226,6 +4226,48 @@ command = "vim"
     expect(driver.state.appState.thinkingEffort).toBe('mid');
   });
 
+  it('applies the acp health slice from status updates', async () => {
+    const { driver } = await makeDriver();
+
+    expect(driver.state.appState.acp).toBeUndefined();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        acp: 'healthy',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('healthy');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        acp: 'degraded',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('degraded');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        model: 'turbo',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('degraded');
+  });
+
   it('renders swarm mode markers from /swarm commands, not tool-triggered status updates', async () => {
     const { driver } = await makeDriver();
 

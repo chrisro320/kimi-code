@@ -148,12 +148,14 @@ import { IAtomicDocumentStore } from '@moonshot-ai/agent-core-v2/persistence/int
 import { loadMcpServers } from '@moonshot-ai/agent-core-v2/workspace/workspaceMcpConfig/internal/config-loader';
 import type { McpServerConfig as WorkspaceMcpServerConfig } from '@moonshot-ai/agent-core-v2/mcpCore/config-schema';
 import {
+  ACP_MANAGER_ID,
   bootstrap,
   DEFAULT_AGENT_PROFILE_NAME,
   drainQueryStoreDisposals,
   drainSessionIndexMirror,
   ensureKimiHome,
   ensureMainAgent,
+  IAcpService,
   IAgentActivityView,
   IAgentContextInjectorService,
   IAgentContextMemoryService,
@@ -163,6 +165,7 @@ import {
   IAgentGoalService,
   IAgentPluginService,
   IAgentLifecycleService,
+  IAgentLLMRequesterService,
   IAgentLoopService,
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
@@ -254,6 +257,7 @@ import {
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
 import type {
+  AcpStatusInfo,
   AddAdditionalDirInput,
   AddAdditionalDirResult,
   AgentCommandInfo,
@@ -1597,6 +1601,44 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async cancelCompaction(input: SessionIdRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
     agent.accessor.get(IAgentFullCompactionService).cancel();
+  }
+
+  /**
+   * Through the agent scope (`IAcpService`) — no klient facade exists, and
+   * the v1 engine has no ACP at all (the base throws NOT_IMPLEMENTED).
+   * `enabled` comes from the requester's active-manager snapshot rather than
+   * the raw config section, so a section naming an unknown manager reports
+   * disabled instead of a stale enabled.
+   */
+  override async acpStatus(input: SessionIdRpcInput): Promise<AcpStatusInfo> {
+    const agent = await this.agentScope(input.sessionId);
+    const status = agent.accessor.get(IAcpService).status();
+    const active = agent.accessor.get(IAgentLLMRequesterService).getActiveContextManager();
+    return { enabled: active?.id === ACP_MANAGER_ID, ...status };
+  }
+
+  /**
+   * Enable writes the engine-internal `contextManager` section in one atomic
+   * replace; the requester re-reads the section on every request, so the
+   * manager activates on the next turn without a session restart. The write
+   * is global — the session id only scopes the RPC route.
+   */
+  override async acpEnable(_input: SessionIdRpcInput): Promise<void> {
+    await this.replaceConfigSections({ contextManager: ACP_MANAGER_ID });
+  }
+
+  /** Disable clears the section (replace-with-undefined semantics). */
+  override async acpDisable(_input: SessionIdRpcInput): Promise<void> {
+    await this.replaceConfigSections({ contextManager: undefined });
+  }
+
+  /**
+   * Reset deletes the agent's ACP sidecar state through the agent scope; the
+   * next turn starts from a fresh kernel state and outstanding refs die.
+   */
+  override async acpReset(input: SessionIdRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    await agent.accessor.get(IAcpService).reset();
   }
 
   /**

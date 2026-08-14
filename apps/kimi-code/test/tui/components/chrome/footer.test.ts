@@ -189,3 +189,24 @@ describe('FooterComponent displayName override', () => {
     expect(footer.render(120).join('\n')).not.toContain('Remote Name');
   });
 });
+
+describe('FooterComponent acp badge', () => {
+  it('hides the badge when acp is absent', () => {
+    const footer = new FooterComponent(appState);
+
+    expect(footer.render(120).join('\n')).not.toContain('acp');
+  });
+
+  it('shows a healthy badge when acp is healthy', () => {
+    const footer = new FooterComponent({ ...appState, acp: 'healthy' });
+
+    expect(footer.render(120).join('\n')).toContain('acp');
+    expect(footer.render(120).join('\n')).not.toContain('acp!');
+  });
+
+  it('shows a degraded badge when acp is degraded', () => {
+    const footer = new FooterComponent({ ...appState, acp: 'degraded' });
+
+    expect(footer.render(120).join('\n')).toContain('acp!');
+  });
+});

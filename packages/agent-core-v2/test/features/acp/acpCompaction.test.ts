@@ -4,6 +4,8 @@ import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import type { Event } from '#/_base/event';
+import { IEventBus } from '#/app/event/eventBus';
+import { EventBusService } from '#/app/event/eventBusService';
 import { buildCompactionSummaryText } from '#/agent/contextMemory/compactionHandoff';
 import {
   IAgentContextMemoryService,
@@ -167,6 +169,7 @@ function createService(agentId = 'main', store = createStore()) {
     _serviceBrand: undefined,
     getTodos: () => todos.current,
   } as unknown as ISessionTodoService);
+  ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.set(IAcpService, new SyncDescriptor(AcpService));
   const service = ix.get(IAcpService);
   return { disposables, requester, service, store, env, todos, applyCompaction };

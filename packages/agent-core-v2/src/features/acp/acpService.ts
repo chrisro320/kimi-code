@@ -32,6 +32,11 @@
  * built-in recomputes it from profile/tool services; the omission only
  * slightly under-estimates `tokensAfter`). Post-takeover the cached view is
  * dropped and the next transform starts from the fold summary.
+ *
+ * Status changes publish the `acp` slice (health only) of
+ * `agent.status.updated` on the agent event bus, gated on ACP being the
+ * requester's active manager so a `reset()` issued while disabled does not
+ * light the TUI badge.
  */
 
 import {
@@ -70,6 +75,7 @@ import {
 } from '#/agent/llmRequester/llmRequester';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IEventBus } from '#/app/event/eventBus';
 import { unwrapErrorCause } from '#/errors';
 import { APIContextOverflowError } from '#/kosong/contract/errors';
 import { createUserMessage, type Message } from '#/kosong/contract/message';
@@ -143,6 +149,7 @@ export class AcpService extends Service implements IAcpService {
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
     @IAgentContextMemoryService context: IAgentContextMemoryService,
     @ISessionTodoService private readonly todo: ISessionTodoService,
+    @IEventBus private readonly eventBus: IEventBus,
   ) {
     super();
     this.sidecarScope = agentContext.scope('acp');
@@ -201,7 +208,7 @@ export class AcpService extends Service implements IAcpService {
               await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
               linked.throwIfAborted();
             }
-            this.currentStatus = {
+            this.setStatus({
               managerId: ACP_MANAGER_ID,
               managerVersion: ACP_MANAGER_VERSION,
               health: 'healthy',
@@ -209,7 +216,7 @@ export class AcpService extends Service implements IAcpService {
               blocks: turn.state.blocks.length,
               activeBlocks: turn.state.blocks.filter((block) => block.active).length,
               contextUsage: maxContextTokens > 0 ? usedContextTokens / maxContextTokens : undefined,
-            };
+            });
             const nudge = renderTurnNudge(turn);
             const base = tagOnly ? messages : rebuilt.messages;
             // Appending at the tail keeps every existing provider prefix intact.
@@ -314,14 +321,14 @@ export class AcpService extends Service implements IAcpService {
           // status immediately so no path (abort, fold failure) leaves the
           // stale compressed view eligible against the fresh sidecar.
           this.lastView = undefined;
-          this.currentStatus = {
+          this.setStatus({
             managerId: ACP_MANAGER_ID,
             managerVersion: ACP_MANAGER_VERSION,
             health: 'healthy',
             refs: loaded.refs.length,
             blocks: 0,
             activeBlocks: 0,
-          };
+          });
           linked.throwIfAborted();
           assertFoldSafe();
 
@@ -424,7 +431,7 @@ export class AcpService extends Service implements IAcpService {
         // with the stale view still eligible for the next transform/takeover.
         this.lastView = undefined;
         linked.throwIfAborted();
-        this.currentStatus = {
+        this.setStatus({
           managerId: ACP_MANAGER_ID,
           managerVersion: ACP_MANAGER_VERSION,
           health: 'healthy',
@@ -432,7 +439,7 @@ export class AcpService extends Service implements IAcpService {
           blocks: state.blocks.length,
           activeBlocks: state.blocks.filter((block) => block.active).length,
           contextUsage: this.currentStatus.contextUsage,
-        };
+        });
         const created = state.blocks
           .slice(-result.blocksCreated)
           .map((block) => block.blockId)
@@ -514,7 +521,7 @@ export class AcpService extends Service implements IAcpService {
         // content eligible for a takeover.
         this.lastView = undefined;
         linked.throwIfAborted();
-        this.currentStatus = {
+        this.setStatus({
           managerId: ACP_MANAGER_ID,
           managerVersion: ACP_MANAGER_VERSION,
           health: 'healthy',
@@ -522,7 +529,7 @@ export class AcpService extends Service implements IAcpService {
           blocks: next.blocks.length,
           activeBlocks: next.blocks.filter((entry) => entry.active).length,
           contextUsage: this.currentStatus.contextUsage,
-        };
+        });
         const { text, count } = collectBlockContent(
           view.state,
           block,
@@ -643,14 +650,14 @@ export class AcpService extends Service implements IAcpService {
       await resetAcpSidecar(this.documents, this.sidecarScope);
       this.lastView = undefined;
       this.lifetime.signal.throwIfAborted();
-      this.currentStatus = {
+      this.setStatus({
         managerId: ACP_MANAGER_ID,
         managerVersion: ACP_MANAGER_VERSION,
         health: 'healthy',
         refs: 0,
         blocks: 0,
         activeBlocks: 0,
-      };
+      });
     });
   }
 
@@ -664,7 +671,7 @@ export class AcpService extends Service implements IAcpService {
   }
 
   private degrade(reason: string, refs: number): void {
-    this.currentStatus = {
+    this.setStatus({
       managerId: ACP_MANAGER_ID,
       managerVersion: ACP_MANAGER_VERSION,
       health: 'degraded',
@@ -673,7 +680,13 @@ export class AcpService extends Service implements IAcpService {
       activeBlocks: this.currentStatus.activeBlocks,
       contextUsage: this.currentStatus.contextUsage,
       reason,
-    };
+    });
+  }
+
+  private setStatus(status: AcpStatus): void {
+    this.currentStatus = status;
+    if (this.requester.getActiveContextManager()?.id !== ACP_MANAGER_ID) return;
+    this.eventBus.publish({ type: 'agent.status.updated', acp: status.health });
   }
 
   private appendTodoList(summary: string): string {

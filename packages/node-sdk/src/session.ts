@@ -10,6 +10,7 @@ import {
 import { type ApprovalHandler, type Event, type QuestionHandler } from '#/events';
 import type { SDKRpcClientBase } from '#/rpc';
 import type {
+  AcpStatusInfo,
   AddAdditionalDirOptions,
   AddAdditionalDirResult,
   AgentCommandInfo,
@@ -333,6 +334,27 @@ export class Session {
   async cancelCompaction(): Promise<void> {
     this.ensureOpen();
     await this.rpc.cancelCompaction({ sessionId: this.id });
+  }
+
+  async acpStatus(): Promise<AcpStatusInfo> {
+    this.ensureOpen();
+    return this.rpc.acpStatus({ sessionId: this.id });
+  }
+
+  async acpEnable(): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.acpEnable({ sessionId: this.id });
+  }
+
+  async acpDisable(): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.acpDisable({ sessionId: this.id });
+  }
+
+  /** Delete the current agent's ACP sidecar state; the next turn starts fresh. */
+  async acpReset(): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.acpReset({ sessionId: this.id });
   }
 
   async undoHistory(count: number = 1): Promise<void> {

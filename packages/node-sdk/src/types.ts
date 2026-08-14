@@ -265,6 +265,24 @@ export interface CompactOptions {
   readonly instruction?: string | undefined;
 }
 
+/**
+ * Snapshot of the ACP context manager for one session agent. `enabled`
+ * reflects the requester's currently-active manager (the engine-internal
+ * `contextManager` config section naming the ACP manager); the remaining
+ * fields come from the agent-scoped ACP service regardless of activation.
+ */
+export interface AcpStatusInfo {
+  readonly enabled: boolean;
+  readonly managerId: string;
+  readonly managerVersion: string;
+  readonly health: 'healthy' | 'degraded';
+  readonly refs: number;
+  readonly blocks: number;
+  readonly activeBlocks: number;
+  readonly contextUsage?: number;
+  readonly reason?: string;
+}
+
 export interface ReloadSessionOptions {
   readonly forcePluginSessionStartReminder?: boolean;
 }

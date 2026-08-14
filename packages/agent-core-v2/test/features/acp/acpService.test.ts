@@ -12,6 +12,8 @@ import {
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IEventBus } from '#/app/event/eventBus';
+import { EventBusService } from '#/app/event/eventBusService';
 import { ACP_MANAGER_ID, IAcpService } from '#/features/acp/acp';
 import { AcpService } from '#/features/acp/acpService';
 import { ACP_SIDECAR_KEY, type AcpSidecar } from '#/features/acp/sidecar';
@@ -176,9 +178,10 @@ function createService(agentId = 'main', store = createStore()) {
     _serviceBrand: undefined,
     getTodos: () => [],
   } as unknown as ISessionTodoService);
+  ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.set(IAcpService, new SyncDescriptor(AcpService));
   const service = ix.get(IAcpService);
-  return { disposables, requester, service, store, env, project };
+  return { disposables, requester, service, store, env, project, eventBus: ix.get(IEventBus) };
 }
 
 describe('AcpService', () => {
@@ -243,6 +246,44 @@ describe('AcpService', () => {
       reason: 'ACP cannot safely remap an edited duplicate message sequence',
     });
     expect(setup.store.values).toEqual(before);
+  });
+
+  it('publishes the acp health slice on the agent event bus while the manager is active', async () => {
+    const setup = createService('publish');
+    owned.push(setup.disposables);
+    const seen: Array<'healthy' | 'degraded'> = [];
+    setup.eventBus.subscribe('agent.status.updated', (event) => {
+      if (event.acp !== undefined) seen.push(event.acp);
+    });
+    const duplicate = textMessage('same');
+
+    await transform(setup.requester.manager(), [duplicate, duplicate]);
+    expect(seen).toEqual(['healthy']);
+
+    await transform(setup.requester.manager(), [duplicate]);
+    expect(seen).toEqual(['healthy', 'degraded']);
+  });
+
+  it('stays silent on the event bus while another context manager is active', async () => {
+    const setup = createService('suppressed');
+    owned.push(setup.disposables);
+    const seen: Array<'healthy' | 'degraded'> = [];
+    setup.eventBus.subscribe('agent.status.updated', (event) => {
+      if (event.acp !== undefined) seen.push(event.acp);
+    });
+    const requester = setup.requester.service as unknown as {
+      getActiveContextManager: () => ContextManager;
+    };
+    requester.getActiveContextManager = () => ({ id: 'other-manager' }) as ContextManager;
+    const duplicate = textMessage('same');
+
+    await transform(setup.requester.manager(), [duplicate, duplicate]);
+    await transform(setup.requester.manager(), [duplicate]);
+    expect(setup.service.status().health).toBe('degraded');
+
+    await setup.service.reset();
+    expect(setup.service.status().health).toBe('healthy');
+    expect(seen).toEqual([]);
   });
 
   it('fails open on load, validation, and save failure without changing durable state', async () => {

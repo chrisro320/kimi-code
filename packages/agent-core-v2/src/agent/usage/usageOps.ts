@@ -11,7 +11,8 @@
  * found on replayed legacy records (early v2 logs carried `turnId` / `context`).
  * Also declares the canonical `agent.status.updated` event shape on
  * `DomainEventMap`; the usage slice is published live after
- * each dispatch (never on replay).
+ * each dispatch (never on replay). The `acp` slice carries the ACP manager's
+ * health and is published by the acp domain (`features/acp`), not from here.
  */
 
 import { z } from 'zod';
@@ -33,6 +34,7 @@ declare module '#/app/event/eventBus' {
       thinkingEffort?: string;
       maxContextTokens?: number;
       contextTokens?: number;
+      acp?: 'healthy' | 'degraded';
     };
   }
 }

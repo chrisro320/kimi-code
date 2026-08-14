@@ -2206,7 +2206,7 @@ export class KimiTUI {
     this.session = undefined;
     this.state.swarmModeEntry = undefined;
     this.harness.setTelemetryContext({ sessionId: null });
-    this.setAppState({ goal: null });
+    this.setAppState({ goal: null, acp: undefined });
     return previous;
   }
 
