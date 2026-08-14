@@ -446,6 +446,56 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
+		// Content collapsed to entirely above the previous viewport — every line
+		// that changed has already scrolled into scrollback, which is read-only.
+		// A full redraw would clear it with ED3, and on a terminal where the user
+		// is scrolled up reading history that yanks the view to the top of the
+		// buffer (microsoft/Terminal#20370). Repaint just the live screen area
+		// and leave scrollback holding its now-stale copy: that trade-off is what
+		// keeps the reader's position intact, and it is the one e2e/README.md
+		// documents under "stale bytes". Kitty images are excluded because the
+		// placements we would have to delete also live in scrollback.
+		if (
+			firstChanged < prevViewportTop &&
+			newLines.length <= prevViewportTop &&
+			this.previousKittyImageIds.size === 0
+		) {
+			logRedraw(`content collapsed above viewport (${newLines.length} <= ${prevViewportTop})`);
+			let buffer = "\x1b[?2026h";
+			const currentScreenRow = hardwareCursorRow - prevViewportTop;
+			if (currentScreenRow > 0) buffer += `\x1b[${currentScreenRow}A`;
+			for (let i = 0; i < newLines.length; i++) {
+				if (i > 0) buffer += "\r\n";
+				buffer += `\r\x1b[2K${newLines[i] ?? ""}`;
+			}
+			// Wipe whatever the taller frame left below the new content. The last
+			// row is reached without a trailing newline so the terminal never
+			// scrolls — scrolling here would move the reader's viewport, which is
+			// the whole thing this branch exists to avoid.
+			for (let i = newLines.length; i < height; i++) {
+				buffer += "\r\n\x1b[2K";
+			}
+			const lastContentRow = Math.max(0, newLines.length - 1);
+			const parkBack = Math.max(0, height - 1 - lastContentRow);
+			if (parkBack > 0) buffer += `\x1b[${parkBack}A`;
+			buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+
+			viewportTop = 0;
+			this.cursorRow = lastContentRow;
+			this.hardwareCursorRow = lastContentRow;
+			this.maxLinesRendered = newLines.length;
+			this.previousViewportTop = 0;
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousRawLines = rawLines;
+			this.previousLineImageIds = lineImageIds;
+			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+			this.previousWidth = width;
+			this.previousHeight = height;
+			return;
+		}
+
 		// Differential rendering can only touch what was actually visible.
 		// If the first changed line is above the previous viewport, we need a full redraw.
 		if (firstChanged < prevViewportTop) {
