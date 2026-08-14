@@ -64,7 +64,11 @@
  *
  * Durability fails open: a read-path load or validation failure never
  * silently resets corrupt durable state — the original bytes are kept for
- * `/acp reset` — and a failed save leaves the live history untouched.
+ * `/acp reset` — and a failed save leaves the live history untouched. The
+ * durable write is the commit point: once a sidecar save (or reset delete)
+ * resolves, the outcome is reported as committed even when the caller
+ * aborted while the write was in flight, so a late abort never misreports
+ * persisted state as failed.
  *
  * Status changes publish the `acp` slice (health only) of
  * `agent.status.updated` on the agent event bus, gated on ACP being the
@@ -209,6 +213,13 @@ export class AcpService extends Service implements IAcpService {
               this.degrade(projection.reason, durableRefs);
               return { messages, accounting: 'raw-equivalent' as const };
             }
+            if (maxContextTokens <= 0) {
+              this.degrade(
+                'provider reports no context limit; ACP is disabled for this model',
+                durableRefs,
+              );
+              return { messages, accounting: 'raw-equivalent' as const };
+            }
             const config = defaultConfig(maxContextTokens);
             if (loaded.compressionState !== null && !isCompressionState(loaded.compressionState)) {
               this.degrade('ACP sidecar compression state is corrupt', durableRefs);
@@ -238,7 +249,6 @@ export class AcpService extends Service implements IAcpService {
             linked.throwIfAborted();
             if (stable.changed || !acpCompressionStatesEqual(loaded.compressionState, turn.state)) {
               await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
-              linked.throwIfAborted();
             }
             this.setStatus({
               managerId: ACP_MANAGER_ID,
@@ -453,7 +463,6 @@ export class AcpService extends Service implements IAcpService {
         const nextSidecar = { ...view.sidecar, compressionState: state };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
         this.lastView = undefined;
-        linked.throwIfAborted();
         this.setStatus({
           managerId: ACP_MANAGER_ID,
           managerVersion: ACP_MANAGER_VERSION,
@@ -534,7 +543,6 @@ export class AcpService extends Service implements IAcpService {
         const nextSidecar = { ...view.sidecar, compressionState: next };
         await saveAcpSidecar(this.documents, this.sidecarScope, nextSidecar);
         this.lastView = undefined;
-        linked.throwIfAborted();
         this.setStatus({
           managerId: ACP_MANAGER_ID,
           managerVersion: ACP_MANAGER_VERSION,
@@ -693,7 +701,6 @@ export class AcpService extends Service implements IAcpService {
       this.lifetime.signal.throwIfAborted();
       await resetAcpSidecar(this.documents, this.sidecarScope);
       this.lastView = undefined;
-      this.lifetime.signal.throwIfAborted();
       this.setStatus({
         managerId: ACP_MANAGER_ID,
         managerVersion: ACP_MANAGER_VERSION,

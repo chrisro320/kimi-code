@@ -1042,4 +1042,62 @@ describe('AcpService', () => {
     expect(result.message).toContain('No ACP context matches');
     expect(setup.project).toHaveBeenCalledOnce();
   });
+
+  it('fails open when the provider reports no context limit', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = [textMessage('one'), textMessage('two')];
+    setup.env.history = messages;
+
+    const outcome = await transform(
+      setup.requester.manager(),
+      messages,
+      new AbortController().signal,
+      { usedContextTokens: 10, maxContextTokens: 0 },
+    );
+
+    expect(outcome.accounting).toBe('raw-equivalent');
+    expect(outcome.messages).toBe(messages);
+    expect(setup.store.set).not.toHaveBeenCalled();
+    expect(setup.service.status()).toMatchObject({ health: 'degraded' });
+    expect(setup.service.status().reason).toContain('no context limit');
+  });
+
+  it('reports a committed save when the caller aborts mid-flight', async () => {
+    const store = createStore();
+    const setup = createService('main', store);
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    let releaseSave: () => void = () => undefined;
+    store.set.mockImplementationOnce(
+      (scope: string, key: string, value: unknown) =>
+        new Promise<void>((resolve) => {
+          releaseSave = () => {
+            store.values.set(`${scope}/${key}`, value);
+            resolve();
+          };
+        }),
+    );
+    const controller = new AbortController();
+
+    // The sidecar write is the commit point: an abort landing while the save
+    // is in flight must not turn the committed fold into a reported failure.
+    const pending = setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    releaseSave();
+    const result = await pending;
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('b1');
+    const sidecar = store.values.get(
+      `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect((sidecar.compressionState as { blocks: unknown[] }).blocks).toHaveLength(1);
+  });
 });
