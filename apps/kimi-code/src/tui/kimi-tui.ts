@@ -2,7 +2,13 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
-import { effectiveModelAlias, log, setUnexpectedErrorHandler } from '@moonshot-ai/kimi-code-sdk';
+import {
+  effectiveModelAlias,
+  ErrorCodes,
+  isKimiError,
+  log,
+  setUnexpectedErrorHandler,
+} from '@moonshot-ai/kimi-code-sdk';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -2130,7 +2136,11 @@ export class KimiTUI {
   }
 
   async syncRuntimeState(session: Session = this.requireSession()): Promise<void> {
-    const [status, goalResult] = await Promise.all([session.getStatus(), session.getGoal()]);
+    const [status, goalResult, acp] = await Promise.all([
+      session.getStatus(),
+      session.getGoal(),
+      this.acpBadgeState(session),
+    ]);
     this.setAppState({
       sessionId: session.id,
       model: status.model ?? '',
@@ -2144,8 +2154,21 @@ export class KimiTUI {
       contextUsage: status.contextUsage,
       sessionTitle: session.summary?.title ?? null,
       goal: goalResult.goal,
+      acp,
     });
     this.syncAdditionalDirs(session);
+  }
+
+  // ACP is a v2-only capability; v1 sessions answer NOT_IMPLEMENTED and simply
+  // leave the badge unset.
+  private async acpBadgeState(session: Session): Promise<AppState['acp']> {
+    try {
+      const status = await session.acpStatus();
+      return status.enabled ? status.health : undefined;
+    } catch (error) {
+      if (isKimiError(error) && error.code === ErrorCodes.NOT_IMPLEMENTED) return undefined;
+      throw error;
+    }
   }
 
   // Apply --auto/--yolo/--plan startup flags to a resumed session. The resumed
