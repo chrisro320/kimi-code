@@ -183,6 +183,7 @@ const ModelBaseSchema = z.object({
   maxInputSize: z.number().int().min(1).optional(),
   maxOutputSize: z.number().int().min(1).optional(),
   capabilities: z.array(z.string()).optional(),
+  anchoredBootstrapTools: z.array(z.string()).optional(),
   displayName: z.string().optional(),
   reasoningKey: z.string().optional(),
   preserveThinking: z.boolean().optional(),
@@ -220,6 +221,11 @@ type _AssertModelsSection = AssertExact<
   Equal<z.infer<typeof ModelsSectionSchema>, ModelsSection>
 >;
 
+const PRESERVED_MODEL_ARRAY_KEYS: ReadonlySet<string> = new Set([
+  'capabilities',
+  'anchoredBootstrapTools',
+]);
+
 export const modelsFromToml = (rawSnake: unknown): unknown => {
   if (!isPlainObject(rawSnake)) return rawSnake;
   const out: Record<string, unknown> = {};
@@ -248,7 +254,7 @@ export const modelsToToml = (value: unknown, rawSnake: unknown): unknown => {
     }
     const merged = cloneRecord(rawSub[id]);
     for (const [key, field] of Object.entries(entry)) {
-      if (key === 'capabilities' && Array.isArray(field)) {
+      if (PRESERVED_MODEL_ARRAY_KEYS.has(key) && Array.isArray(field)) {
         merged[camelToSnake(key)] = [...field];
       } else if (key === 'overrides' && isPlainObject(field)) {
         merged['overrides'] = modelOverridesToToml(field, merged['overrides']);
@@ -267,7 +273,7 @@ function modelOverridesToToml(
 ): Record<string, unknown> {
   const out = cloneRecord(rawSnake);
   for (const [key, value] of Object.entries(overrides)) {
-    if (key === 'capabilities' && Array.isArray(value)) {
+    if (PRESERVED_MODEL_ARRAY_KEYS.has(key) && Array.isArray(value)) {
       out[camelToSnake(key)] = [...value];
     } else {
       setDefined(out, camelToSnake(key), value);

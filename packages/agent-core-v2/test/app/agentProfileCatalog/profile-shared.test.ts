@@ -61,6 +61,48 @@ describe('systemPromptVars', () => {
     expect(vars['skills_section']).toContain('SKILLS');
   });
 
+  function voiceDirectiveTail(text: string): string {
+    return text.slice(text.indexOf('# Reasoning Voice')).trimEnd();
+  }
+
+  it('omits the reasoning-voice directive unless anchored bootstrap is declared', () => {
+    expect(systemPromptVars({}, { skillActive: true })['anchored_directive']).toBe('');
+    expect(
+      systemPromptVars({ anchoredBootstrap: false }, { skillActive: true })['anchored_directive'],
+    ).toBe('');
+  });
+
+  it('injects the reasoning-voice directive when anchored bootstrap is declared', () => {
+    const directive = systemPromptVars({ anchoredBootstrap: true }, { skillActive: true })[
+      'anchored_directive'
+    ];
+
+    expect(directive).toContain('# Reasoning Voice');
+    expect(directive).toContain('Think in ENGLISH');
+    expect(directive).toContain('"We need"');
+  });
+
+  it('places the reasoning-voice directive after every language rule it overrides', () => {
+    const { text } = renderSystemPromptResult('', { anchoredBootstrap: true }, { skillActive: true });
+
+    const voiceAt = text.indexOf('# Reasoning Voice');
+    const remindersAt = text.indexOf('# Ultimate Reminders');
+    const replyInUserLanguageAt = text.indexOf('Reply in the user\'s language');
+
+    expect(voiceAt).toBeGreaterThan(-1);
+    expect(remindersAt).toBeGreaterThan(-1);
+    expect(replyInUserLanguageAt).toBeGreaterThan(-1);
+    expect(voiceAt).toBeGreaterThan(remindersAt);
+    expect(voiceAt).toBeGreaterThan(replyInUserLanguageAt);
+    expect(text.trimEnd().endsWith(voiceDirectiveTail(text))).toBe(true);
+  });
+
+  it('keeps the default system prompt free of the directive', () => {
+    const { text } = renderSystemPromptResult('', {}, { skillActive: true });
+
+    expect(text).not.toContain('# Reasoning Voice');
+  });
+
   it('renders missing context fields as empty strings and defaults ${now}', () => {
     const vars = systemPromptVars({}, { skillActive: true });
 

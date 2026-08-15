@@ -435,7 +435,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     }
 
     await this.sessionToolPolicy.ready;
-    const context = await this.buildSystemPromptContext(profile);
+    const context = await this.buildSystemPromptContext(profile, { capabilities: model.capabilities });
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
     const rendered = profile.renderSystemPrompt(context);
@@ -977,9 +977,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     }
   }
 
+
   private async buildSystemPromptContext(
     profile: ResolvedAgentProfile,
-    options?: ApplyProfileOptions,
+    options?: ApplyProfileOptions & { readonly capabilities?: ModelCapability },
   ): Promise<SystemPromptContext> {
     const preloadedAgentsMd = await this.workspaceInstructionsSnapshot();
     const additionalDirs = options?.additionalDirs ??
@@ -1018,6 +1019,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       skillActive,
       productName,
       replyStyleGuide: this.bootstrap.args.replyStyleGuide,
+      anchoredBootstrap:
+        (options?.capabilities ?? this.getModelCapabilities()).anchored_bootstrap === true,
     };
   }
 

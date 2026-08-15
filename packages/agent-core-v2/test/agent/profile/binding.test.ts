@@ -335,6 +335,40 @@ describe('AgentProfileService.bind', () => {
     expect(svc.data().profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
   });
 
+  it('injects the reasoning-voice directive on the very bind that declares anchored_bootstrap', async () => {
+    ctx = createTestAgent(
+      {
+        initialConfig: {
+          providers: {
+            kimi: { type: 'kimi', apiKey: 'test-key', baseUrl: 'https://api.example.test/v1' },
+          },
+          models: {
+            'anchored/model': {
+              provider: 'kimi',
+              model: 'anchored-model',
+              maxContextSize: 1_000_000,
+              capabilities: ['tool_use', 'anchored_bootstrap'],
+            },
+          },
+        },
+      },
+      hostEnvironmentServices(homeDir),
+    );
+    const svc = ctx.get(IAgentProfileService);
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: 'anchored/model' });
+
+    expect(svc.getSystemPrompt()).toContain('# Reasoning Voice');
+  });
+
+  it('leaves the reasoning-voice directive out for a model without the capability', async () => {
+    const { profile: svc } = buildContext();
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(svc.getSystemPrompt()).not.toContain('# Reasoning Voice');
+  });
+
   it('rejects an unsupported thinking effort atomically before first bind', async () => {
     ctx = createTestAgent(
       {

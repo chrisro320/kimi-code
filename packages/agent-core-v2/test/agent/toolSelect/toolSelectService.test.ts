@@ -18,6 +18,7 @@ import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ToolCall } from '#/kosong/contract/message';
+import { createCompactionSummaryMessage } from '#/agent/contextMemory/compactionHandoff';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { UndoCut } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -69,6 +70,9 @@ const MCP_ALPHA = 'mcp__srv__alpha';
 const MCP_BETA = 'mcp__srv__beta';
 const MCP_GAMMA = 'mcp__srv__gamma';
 const MCP_GONE = 'mcp__srv__gone';
+const BOOTSTRAP_SHELL = 'Bash';
+const BOOTSTRAP_READ = 'Read';
+const OFF_BOOTSTRAP = 'Write';
 const USER_DEFERRED = 'dashboard_create';
 const USER_INLINE = 'echo_inline';
 const REQUIRED_PAYLOAD_PARAMETERS = {
@@ -97,6 +101,7 @@ afterEach(() => disposables.dispose());
 function makeCapabilities(overrides: {
   readonly tool_use?: boolean;
   readonly dynamically_loaded_tools?: boolean;
+  readonly anchored_bootstrap?: boolean;
 } = {}): ModelCapability {
   return {
     image_in: false,
@@ -106,6 +111,7 @@ function makeCapabilities(overrides: {
     tool_use: overrides.tool_use ?? false,
     max_context_tokens: 128_000,
     dynamically_loaded_tools: overrides.dynamically_loaded_tools,
+    anchored_bootstrap: overrides.anchored_bootstrap,
   };
 }
 
@@ -115,6 +121,14 @@ function toolCall(id: string, name: string, args: unknown = {}): ToolCall {
 
 function userMessage(text: string): ContextMessage {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+function assistantMessage(text: string): ContextMessage {
+  return { role: 'assistant', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+function inFlightAssistantMessage(): ContextMessage {
+  return { role: 'assistant', content: [], toolCalls: [] };
 }
 
 function schemaMessage(...names: string[]): ContextMessage {
@@ -1193,5 +1207,151 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
     const h = createHarness();
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
     expect(await announce(h)).toBeUndefined();
+  });
+});
+
+describe('AgentToolSelectService anchored bootstrap', () => {
+  beforeEach(() => {
+    capabilities = makeCapabilities({ tool_use: true, anchored_bootstrap: true });
+  });
+
+  function registerBootstrap(h: Harness): void {
+    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
+    registerBuiltin(h, new EchoTool(BOOTSTRAP_READ));
+  }
+
+  it('narrows the first request to the bootstrap tools', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+    );
+  });
+
+  it('stays anchored while the only assistant message is the in-flight placeholder', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(userMessage('go'), inFlightAssistantMessage());
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+    );
+  });
+
+  it('promotes on an assistant message that only carries a tool call', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push({
+      role: 'assistant',
+      content: [],
+      toolCalls: [toolCall('call-1', BOOTSTRAP_READ)],
+    });
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('restores the full catalogue once the history carries an assistant message', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(assistantMessage('on it'));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('keeps the catalogue open after compaction drops the assistant message', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(assistantMessage('on it'));
+    h.sut.shapeTools(h.registry.list());
+
+    h.contextMemory.history.length = 0;
+    h.contextMemory.history.push(userMessage('next'), createCompactionSummaryMessage('summary'));
+
+    const entries = h.registry.list();
+    expect(h.contextMemory.history.some((message) => message.role === 'assistant')).toBe(false);
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('keeps the full catalogue when a bootstrap tool is not registered', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('keeps the full catalogue when the profile disables a bootstrap tool', () => {
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    activeToolNames = new Set([BOOTSTRAP_SHELL, OFF_BOOTSTRAP]);
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(shaped.map((entry) => entry.name)).toEqual([BOOTSTRAP_SHELL, OFF_BOOTSTRAP]);
+  });
+
+  it('leaves the catalogue untouched when the capability is absent', () => {
+    capabilities = makeCapabilities({ tool_use: true });
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('narrows the first request while progressive disclosure is also on', () => {
+    flagEnabled = true;
+    capabilities = makeCapabilities({
+      tool_use: true,
+      dynamically_loaded_tools: true,
+      anchored_bootstrap: true,
+    });
+    const h = createHarness();
+    registerBootstrap(h);
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+    );
+  });
+
+  it('tells the model a closed tool opens from the next step', async () => {
+    const h = createExecutorHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+
+    const results = await execute(h, toolCall('call-1', OFF_BOOTSTRAP));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.output).toContain('is not open yet');
+    expect(results[0]!.result.isError).toBe(true);
+  });
+
+  it('lets a bootstrap tool run on the first request', async () => {
+    const h = createExecutorHarness();
+    registerBootstrap(h);
+
+    const results = await execute(h, toolCall('call-1', BOOTSTRAP_SHELL, { payload: 'ok' }));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBeFalsy();
   });
 });

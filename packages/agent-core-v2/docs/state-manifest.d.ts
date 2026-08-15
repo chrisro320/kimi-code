@@ -1102,6 +1102,8 @@ export interface AgentStateSnapshot {
         readonly max_input_tokens?: number;
         readonly dynamically_loaded_tools?: boolean;
         readonly remote_compaction?: boolean;
+        readonly anchored_bootstrap?: boolean;
+        readonly anchored_bootstrap_tools?: readonly string[];
       };
       readonly maxOutputSize: number | undefined;
       readonly alwaysThinking: boolean | undefined;

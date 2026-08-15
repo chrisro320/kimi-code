@@ -10,7 +10,12 @@
  * conversation, while compaction's replacement splice keeps them, so the
  * declaration still lands at the post-compaction boundary. Deferred schemas
  * cover MCP, deferred user tools, and the selected low-frequency builtins.
- * Reads live tools from
+ * Independently of disclosure, a model declaring `anchored_bootstrap` has its
+ * catalogue narrowed to the bootstrap tools until the conversation carries an
+ * assistant message; that promotion latches, so compaction replacing the
+ * history cannot narrow an already-opened catalogue again, and a session
+ * missing a bootstrap tool keeps the full catalogue rather than an unusable
+ * one. Reads live tools from
  * `toolRegistry`, active-tool and capability state from `profile`, gates
  * through `flag`, hooks into `toolExecutor`, and listens to context
  * lifecycle events through `event`. The mutable load-tracking state
@@ -18,6 +23,7 @@
  * and read/written through it. Bound at Agent scope.
  */
 
+import { ILogService } from '#/_base/log/log';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -34,6 +40,11 @@ import { isMcpToolName, type ToolInfo } from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
+import {
+  anchoredToolClosedOutput,
+  hasPromotionSignal,
+  resolveAnchoredBootstrapToolNames,
+} from './anchoredBootstrap';
 import { isDeferredBuiltinToolName } from './deferredBuiltins';
 import {
   collectLoadedDynamicToolNames,
@@ -57,6 +68,10 @@ export const toolSelectPendingLoadedKey = defineState<Set<string>>(
 export class AgentToolSelectService extends Service implements IAgentToolSelectService {
   declare readonly _serviceBrand: undefined;
 
+  private anchorPromotedLatch = false;
+
+  private anchorDegradeWarned = false;
+
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
@@ -66,6 +81,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IFlagService private readonly flags: IFlagService,
     @IEventBus eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
+    @ILogService private readonly log?: ILogService,
   ) {
     super();
     this.states.register(toolSelectPendingLoadedKey);
@@ -112,7 +128,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   shapeTools(entries: readonly ToolInfo[]): readonly ShapedToolEntry[] {
     const disclosure = this.enabled();
     const activeEntries = this.activeEntries(entries, disclosure);
-    if (!disclosure) return activeEntries;
+    if (!disclosure) return this.anchorTools(activeEntries);
     const loaded = this.loadedToolNames();
     const shaped: ShapedToolEntry[] = [];
     for (const entry of activeEntries) {
@@ -127,7 +143,47 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       if (!loaded.has(entry.name)) continue;
       shaped.push({ ...entry, deferred: true });
     }
-    return shaped;
+    return this.anchorTools(shaped);
+  }
+
+  private anchorTools(entries: readonly ShapedToolEntry[]): readonly ShapedToolEntry[] {
+    if (!this.anchorActive()) return entries;
+    const bootstrap = this.anchorBootstrapNames();
+    const wanted = new Set(bootstrap);
+    const anchored = entries.filter((entry) => wanted.has(entry.name));
+    const present = new Set(anchored.map((entry) => entry.name));
+    const missing = bootstrap.filter((name) => !present.has(name));
+    if (missing.length > 0) {
+      this.warnAnchorDegraded(missing);
+      return entries;
+    }
+    return anchored;
+  }
+
+  private anchorBootstrapNames(): readonly string[] {
+    return resolveAnchoredBootstrapToolNames(
+      this.profile.getModelCapabilities().anchored_bootstrap_tools,
+    );
+  }
+
+  private anchorActive(): boolean {
+    if (this.profile.getModelCapabilities().anchored_bootstrap !== true) return false;
+    return !this.anchorPromoted();
+  }
+
+  private anchorPromoted(): boolean {
+    if (this.anchorPromotedLatch) return true;
+    if (!hasPromotionSignal(this.context.get())) return false;
+    this.anchorPromotedLatch = true;
+    return true;
+  }
+
+  private warnAnchorDegraded(missing: readonly string[]): void {
+    if (this.anchorDegradeWarned) return;
+    this.anchorDegradeWarned = true;
+    this.log?.warn('anchored bootstrap disabled: bootstrap tools unavailable', {
+      missing: [...missing],
+    });
   }
 
   shapeHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
@@ -191,6 +247,10 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private describeUnavailableTool(name: string): string | undefined {
+    if (this.anchorActive()) {
+      const bootstrap = this.anchorBootstrapNames();
+      if (!bootstrap.includes(name)) return anchoredToolClosedOutput(name, bootstrap);
+    }
     if (this.isInactiveLoadedTool(name)) return inactiveLoadedToolOutput(name);
     if (!this.shouldIntercept(name)) return undefined;
     return notLoadedToolOutput(name);

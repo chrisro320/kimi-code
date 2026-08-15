@@ -68,6 +68,7 @@ export interface AgentProfileContext {
   readonly pluginSections?: string;
   readonly productName?: string;
   readonly replyStyleGuide?: string;
+  readonly anchoredBootstrap?: boolean;
   readonly [key: string]: unknown;
 }
 

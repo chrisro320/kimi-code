@@ -26,6 +26,24 @@ export interface ModelCapability {
    * endpoint, so a wrong guess costs a failed request every compaction.
    */
   readonly remote_compaction?: boolean;
+  /**
+   * The model's first reasoning trajectory is sensitive to how large a tool
+   * catalogue its request carries, so a session's first request is worth
+   * anchoring to a minimal catalogue and opening the full one once the session
+   * has produced an assistant message. Opt-in by explicit declaration only,
+   * for the same reason as `remote_compaction` — no protocol-level probe can
+   * tell, and the evidence for it is per-model.
+   */
+  readonly anchored_bootstrap?: boolean;
+  /**
+   * Tools the anchored first request may carry, overriding the built-in
+   * bootstrap set. Absent means the built-in set; an empty list means the
+   * first request carries no tools at all — a model told to act but handed
+   * nothing will emit tool-call syntax as plain text, so treat the empty list
+   * as a measurement instrument, not a working configuration. Only read while
+   * `anchored_bootstrap` is declared.
+   */
+  readonly anchored_bootstrap_tools?: readonly string[];
 }
 
 const UNKNOWN_CAPABILITY_MARKER = Symbol.for('moonshot-ai.kosong.UNKNOWN_CAPABILITY');
@@ -41,6 +59,7 @@ export const UNKNOWN_CAPABILITY: ModelCapability = Object.freeze(
       max_context_tokens: 0,
       dynamically_loaded_tools: false,
       remote_compaction: false,
+      anchored_bootstrap: false,
     },
     UNKNOWN_CAPABILITY_MARKER,
     { value: true },
@@ -60,6 +79,7 @@ export function isUnknownCapability(capability: ModelCapability): boolean {
     !capability.tool_use &&
     capability.dynamically_loaded_tools !== true &&
     capability.remote_compaction !== true &&
+    capability.anchored_bootstrap !== true &&
     capability.max_context_tokens === 0
   );
 }
