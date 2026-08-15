@@ -38,7 +38,7 @@ export interface ModelOverride {
   maxInputSize?: number;
   maxOutputSize?: number;
   capabilities?: string[];
-  anchoredBootstrapTools?: string[];
+  minimalModeTools?: string[];
   displayName?: string;
   reasoningKey?: string;
   preserveThinking?: boolean;
@@ -66,7 +66,7 @@ export interface ModelRecord {
   maxInputSize?: number;
   maxOutputSize?: number;
   capabilities?: string[];
-  anchoredBootstrapTools?: string[];
+  minimalModeTools?: string[];
   displayName?: string;
   reasoningKey?: string;
   preserveThinking?: boolean;

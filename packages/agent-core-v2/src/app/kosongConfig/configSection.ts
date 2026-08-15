@@ -183,7 +183,7 @@ const ModelBaseSchema = z.object({
   maxInputSize: z.number().int().min(1).optional(),
   maxOutputSize: z.number().int().min(1).optional(),
   capabilities: z.array(z.string()).optional(),
-  anchoredBootstrapTools: z.array(z.string()).optional(),
+  minimalModeTools: z.array(z.string()).optional(),
   displayName: z.string().optional(),
   reasoningKey: z.string().optional(),
   preserveThinking: z.boolean().optional(),
@@ -223,7 +223,7 @@ type _AssertModelsSection = AssertExact<
 
 const PRESERVED_MODEL_ARRAY_KEYS: ReadonlySet<string> = new Set([
   'capabilities',
-  'anchoredBootstrapTools',
+  'minimalModeTools',
 ]);
 
 export const modelsFromToml = (rawSnake: unknown): unknown => {

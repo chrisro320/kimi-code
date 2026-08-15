@@ -70,9 +70,9 @@ const MCP_ALPHA = 'mcp__srv__alpha';
 const MCP_BETA = 'mcp__srv__beta';
 const MCP_GAMMA = 'mcp__srv__gamma';
 const MCP_GONE = 'mcp__srv__gone';
-const BOOTSTRAP_SHELL = 'Bash';
-const BOOTSTRAP_READ = 'Read';
-const OFF_BOOTSTRAP = 'Write';
+const MINIMAL_SHELL = 'Bash';
+const MINIMAL_READ = 'Read';
+const OFF_CATALOGUE = 'Write';
 const USER_DEFERRED = 'dashboard_create';
 const USER_INLINE = 'echo_inline';
 const REQUIRED_PAYLOAD_PARAMETERS = {
@@ -101,7 +101,6 @@ afterEach(() => disposables.dispose());
 function makeCapabilities(overrides: {
   readonly tool_use?: boolean;
   readonly dynamically_loaded_tools?: boolean;
-  readonly anchored_bootstrap?: boolean;
   readonly minimal_mode?: boolean;
 } = {}): ModelCapability {
   return {
@@ -112,7 +111,6 @@ function makeCapabilities(overrides: {
     tool_use: overrides.tool_use ?? false,
     max_context_tokens: 128_000,
     dynamically_loaded_tools: overrides.dynamically_loaded_tools,
-    anchored_bootstrap: overrides.anchored_bootstrap,
     minimal_mode: overrides.minimal_mode,
   };
 }
@@ -1212,217 +1210,149 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
   });
 });
 
-describe('AgentToolSelectService anchored bootstrap', () => {
+describe('AgentToolSelectService minimal mode', () => {
   beforeEach(() => {
-    capabilities = makeCapabilities({ tool_use: true, anchored_bootstrap: true });
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
   });
 
-  function registerBootstrap(h: Harness): void {
-    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
-    registerBuiltin(h, new EchoTool(BOOTSTRAP_READ));
+  function registerMinimal(h: Harness): void {
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(MINIMAL_READ));
   }
 
-  it('narrows the first request to the bootstrap tools', () => {
+  it('narrows the catalogue to the minimal tools', () => {
     const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
 
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ]),
     );
   });
 
-  it('stays anchored while the only assistant message is the in-flight placeholder', () => {
+  // The whole point of the mode: the catalogue is fixed for the session, so no
+  // amount of conversation widens it. There is no promotion path to latch.
+  it('stays narrow however much the conversation has produced', () => {
     const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    h.contextMemory.history.push(userMessage('go'), inFlightAssistantMessage());
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    h.contextMemory.history.push(
+      userMessage('go'),
+      assistantMessage('on it'),
+      userMessage('again'),
+      { role: 'assistant', content: [], toolCalls: [toolCall('call-1', MINIMAL_READ)] },
+      assistantMessage('still here'),
+    );
 
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ]),
     );
   });
 
-  it('promotes on an assistant message that only carries a tool call', () => {
+  it('stays narrow across a compaction that replaces the history', () => {
     const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    h.contextMemory.history.push({
-      role: 'assistant',
-      content: [],
-      toolCalls: [toolCall('call-1', BOOTSTRAP_READ)],
-    });
-
-    const entries = h.registry.list();
-    expect(h.sut.shapeTools(entries)).toBe(entries);
-  });
-
-  it('restores the full catalogue once the history carries an assistant message', () => {
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    h.contextMemory.history.push(assistantMessage('on it'));
-
-    const entries = h.registry.list();
-    expect(h.sut.shapeTools(entries)).toBe(entries);
-  });
-
-  it('keeps the catalogue open after compaction drops the assistant message', () => {
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
     h.contextMemory.history.push(assistantMessage('on it'));
     h.sut.shapeTools(h.registry.list());
 
     h.contextMemory.history.length = 0;
     h.contextMemory.history.push(userMessage('next'), createCompactionSummaryMessage('summary'));
 
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([MINIMAL_SHELL, MINIMAL_READ]),
+    );
+  });
+
+  it('keeps the full catalogue when one of the minimal tools is not registered', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
     const entries = h.registry.list();
-    expect(h.contextMemory.history.some((message) => message.role === 'assistant')).toBe(false);
     expect(h.sut.shapeTools(entries)).toBe(entries);
   });
 
-  it('keeps the full catalogue when a bootstrap tool is not registered', () => {
+  it('keeps the full catalogue when the profile disables a minimal tool', () => {
     const h = createHarness();
-    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-
-    const entries = h.registry.list();
-    expect(h.sut.shapeTools(entries)).toBe(entries);
-  });
-
-  it('keeps the full catalogue when the profile disables a bootstrap tool', () => {
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    activeToolNames = new Set([BOOTSTRAP_SHELL, OFF_BOOTSTRAP]);
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    activeToolNames = new Set([MINIMAL_SHELL, OFF_CATALOGUE]);
 
     const shaped = h.sut.shapeTools(h.registry.list());
 
-    expect(shaped.map((entry) => entry.name)).toEqual([BOOTSTRAP_SHELL, OFF_BOOTSTRAP]);
+    expect(shaped.map((entry) => entry.name)).toEqual([MINIMAL_SHELL, OFF_CATALOGUE]);
   });
 
+  // Sensitivity check for every assertion above.
   it('leaves the catalogue untouched when the capability is absent', () => {
     capabilities = makeCapabilities({ tool_use: true });
     const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
 
     const entries = h.registry.list();
     expect(h.sut.shapeTools(entries)).toBe(entries);
   });
 
-  it('narrows the first request while progressive disclosure is also on', () => {
+  it('narrows even while progressive disclosure is also on', () => {
     flagEnabled = true;
     capabilities = makeCapabilities({
       tool_use: true,
       dynamically_loaded_tools: true,
-      anchored_bootstrap: true,
+      minimal_mode: true,
     });
     const h = createHarness();
-    registerBootstrap(h);
+    registerMinimal(h);
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
 
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ]),
     );
   });
 
-  it('tells the model a closed tool opens from the next step', async () => {
+  // The refusal must not promise a later opening — there is not one.
+  it('tells the model an off-catalogue tool never opens', async () => {
     const h = createExecutorHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
 
-    const results = await execute(h, toolCall('call-1', OFF_BOOTSTRAP));
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE));
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.result.output).toContain('is not open yet');
+    expect(results[0]!.result.output).toContain('no further tool opens later');
+    expect(results[0]!.result.output).not.toContain('next step');
     expect(results[0]!.result.isError).toBe(true);
-  });
-
-  it('lets a bootstrap tool run on the first request', async () => {
-    const h = createExecutorHarness();
-    registerBootstrap(h);
-
-    const results = await execute(h, toolCall('call-1', BOOTSTRAP_SHELL, { payload: 'ok' }));
-
-    expect(results).toHaveLength(1);
-    expect(results[0]!.result.isError).toBeFalsy();
-  });
-});
-
-describe('AgentToolSelectService minimal mode', () => {
-  function registerBootstrap(h: Harness): void {
-    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
-    registerBuiltin(h, new EchoTool(BOOTSTRAP_READ));
-  }
-
-  it('never promotes, however much the conversation has produced', () => {
-    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    h.contextMemory.history.push(
-      userMessage('go'),
-      assistantMessage('on it'),
-      userMessage('again'),
-      assistantMessage('still here'),
-    );
-
-    const shaped = h.sut.shapeTools(h.registry.list());
-
-    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
-    );
-  });
-
-  // Sensitivity check for the test above: the identical history promotes under
-  // `anchored_bootstrap`, so the assertion is reading the capability and not
-  // some unrelated reason the catalogue happened to stay narrow.
-  it('promotes on the same history when only anchored_bootstrap is declared', () => {
-    capabilities = makeCapabilities({ tool_use: true, anchored_bootstrap: true });
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-    h.contextMemory.history.push(
-      userMessage('go'),
-      assistantMessage('on it'),
-      userMessage('again'),
-      assistantMessage('still here'),
-    );
-
-    const entries = h.registry.list();
-    expect(h.sut.shapeTools(entries)).toBe(entries);
-  });
-
-  it('holds the anchor without anchored_bootstrap being declared at all', () => {
-    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
-    const h = createHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
-
-    const shaped = h.sut.shapeTools(h.registry.list());
-
-    expect(shaped.map((entry) => entry.name)).not.toContain(OFF_BOOTSTRAP);
   });
 
   it('keeps refusing an off-catalogue tool on a later step', async () => {
-    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
     const h = createExecutorHarness();
-    registerBootstrap(h);
-    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
     h.contextMemory.history.push(userMessage('go'), assistantMessage('on it'));
 
-    const results = await execute(h, toolCall('call-1', OFF_BOOTSTRAP));
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE));
 
     expect(results).toHaveLength(1);
     expect(results[0]!.result.isError).toBe(true);
+  });
+
+  it('lets a minimal tool run', async () => {
+    const h = createExecutorHarness();
+    registerMinimal(h);
+
+    const results = await execute(h, toolCall('call-1', MINIMAL_SHELL, { payload: 'ok' }));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBeFalsy();
   });
 });

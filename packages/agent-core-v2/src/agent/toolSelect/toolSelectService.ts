@@ -10,12 +10,10 @@
  * conversation, while compaction's replacement splice keeps them, so the
  * declaration still lands at the post-compaction boundary. Deferred schemas
  * cover MCP, deferred user tools, and the selected low-frequency builtins.
- * Independently of disclosure, a model declaring `anchored_bootstrap` has its
- * catalogue narrowed to the bootstrap tools until the conversation carries an
- * assistant message; that promotion latches, so compaction replacing the
- * history cannot narrow an already-opened catalogue again, and a session
- * missing a bootstrap tool keeps the full catalogue rather than an unusable
- * one. Reads live tools from
+ * Independently of disclosure, a model declaring `minimal_mode` has its
+ * catalogue narrowed to the minimal set for the whole session — there is no
+ * promotion, so nothing here latches — and a session missing one of those tools
+ * keeps the full catalogue rather than an unusable one. Reads live tools from
  * `toolRegistry`, active-tool and capability state from `profile`, gates
  * through `flag`, hooks into `toolExecutor`, and listens to context
  * lifecycle events through `event`. The mutable load-tracking state
@@ -41,10 +39,9 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
 import {
-  anchoredToolClosedOutput,
-  hasPromotionSignal,
-  resolveAnchoredBootstrapToolNames,
-} from './anchoredBootstrap';
+  minimalToolUnavailableOutput,
+  resolveMinimalModeToolNames,
+} from './minimalCatalogue';
 import { isDeferredBuiltinToolName } from './deferredBuiltins';
 import {
   collectLoadedDynamicToolNames,
@@ -68,9 +65,7 @@ export const toolSelectPendingLoadedKey = defineState<Set<string>>(
 export class AgentToolSelectService extends Service implements IAgentToolSelectService {
   declare readonly _serviceBrand: undefined;
 
-  private anchorPromotedLatch = false;
-
-  private anchorDegradeWarned = false;
+  private narrowDegradeWarned = false;
 
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
@@ -128,7 +123,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   shapeTools(entries: readonly ToolInfo[]): readonly ShapedToolEntry[] {
     const disclosure = this.enabled();
     const activeEntries = this.activeEntries(entries, disclosure);
-    if (!disclosure) return this.anchorTools(activeEntries);
+    if (!disclosure) return this.narrowTools(activeEntries);
     const loaded = this.loadedToolNames();
     const shaped: ShapedToolEntry[] = [];
     for (const entry of activeEntries) {
@@ -143,50 +138,37 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       if (!loaded.has(entry.name)) continue;
       shaped.push({ ...entry, deferred: true });
     }
-    return this.anchorTools(shaped);
+    return this.narrowTools(shaped);
   }
 
-  private anchorTools(entries: readonly ShapedToolEntry[]): readonly ShapedToolEntry[] {
-    if (!this.anchorActive()) return entries;
-    const bootstrap = this.anchorBootstrapNames();
-    const wanted = new Set(bootstrap);
-    const anchored = entries.filter((entry) => wanted.has(entry.name));
-    const present = new Set(anchored.map((entry) => entry.name));
-    const missing = bootstrap.filter((name) => !present.has(name));
+  private narrowTools(entries: readonly ShapedToolEntry[]): readonly ShapedToolEntry[] {
+    if (!this.minimalActive()) return entries;
+    const catalogue = this.minimalToolNames();
+    const wanted = new Set(catalogue);
+    const narrowed = entries.filter((entry) => wanted.has(entry.name));
+    const present = new Set(narrowed.map((entry) => entry.name));
+    const missing = catalogue.filter((name) => !present.has(name));
     if (missing.length > 0) {
-      this.warnAnchorDegraded(missing);
+      this.warnNarrowDegraded(missing);
       return entries;
     }
-    return anchored;
+    return narrowed;
   }
 
-  private anchorBootstrapNames(): readonly string[] {
-    return resolveAnchoredBootstrapToolNames(
-      this.profile.getModelCapabilities().anchored_bootstrap_tools,
+  private minimalToolNames(): readonly string[] {
+    return resolveMinimalModeToolNames(
+      this.profile.getModelCapabilities().minimal_mode_tools,
     );
   }
 
-  private anchorActive(): boolean {
-    const capabilities = this.profile.getModelCapabilities();
-    // Minimal mode is the anchored catalogue that never opens: the upstream
-    // preset it reproduces composes two tools for the whole session, so
-    // promotion is not merely deferred here, it does not exist.
-    if (capabilities.minimal_mode === true) return true;
-    if (capabilities.anchored_bootstrap !== true) return false;
-    return !this.anchorPromoted();
+  private minimalActive(): boolean {
+    return this.profile.getModelCapabilities().minimal_mode === true;
   }
 
-  private anchorPromoted(): boolean {
-    if (this.anchorPromotedLatch) return true;
-    if (!hasPromotionSignal(this.context.get())) return false;
-    this.anchorPromotedLatch = true;
-    return true;
-  }
-
-  private warnAnchorDegraded(missing: readonly string[]): void {
-    if (this.anchorDegradeWarned) return;
-    this.anchorDegradeWarned = true;
-    this.log?.warn('anchored bootstrap disabled: bootstrap tools unavailable', {
+  private warnNarrowDegraded(missing: readonly string[]): void {
+    if (this.narrowDegradeWarned) return;
+    this.narrowDegradeWarned = true;
+    this.log?.warn('minimal mode disabled: its tools are unavailable', {
       missing: [...missing],
     });
   }
@@ -252,9 +234,9 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private describeUnavailableTool(name: string): string | undefined {
-    if (this.anchorActive()) {
-      const bootstrap = this.anchorBootstrapNames();
-      if (!bootstrap.includes(name)) return anchoredToolClosedOutput(name, bootstrap);
+    if (this.minimalActive()) {
+      const catalogue = this.minimalToolNames();
+      if (!catalogue.includes(name)) return minimalToolUnavailableOutput(name, catalogue);
     }
     if (this.isInactiveLoadedTool(name)) return inactiveLoadedToolOutput(name);
     if (!this.shouldIntercept(name)) return undefined;
