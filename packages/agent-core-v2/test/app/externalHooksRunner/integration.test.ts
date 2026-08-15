@@ -27,6 +27,8 @@ import {
   hooksFromToml,
   hooksToToml,
 } from '#/agent/externalHooks/configSection';
+import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentExternalHooksService } from '#/agent/externalHooks/externalHooks';
 import { AgentExternalHooksService } from '#/agent/externalHooks/externalHooksService';
 import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
@@ -318,6 +320,9 @@ describe('IExternalHooksRunnerService integration', () => {
             hooks: createHooks(['onBeforeSubmitPrompt']),
           });
           reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
+          reg.definePartialInstance(IAgentProfileService, {
+            getModelCapabilities: () => UNKNOWN_CAPABILITY,
+          });
           reg.definePartialInstance(IAgentPermissionGate, {});
           reg.definePartialInstance(IAgentFullCompactionService, {
             hooks: createHooks(['onWillCompact']),
@@ -423,6 +428,9 @@ describe('IExternalHooksRunnerService integration', () => {
             hooks: createHooks(['onBeforeSubmitPrompt']),
           });
           reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
+          reg.definePartialInstance(IAgentProfileService, {
+            getModelCapabilities: () => UNKNOWN_CAPABILITY,
+          });
           reg.definePartialInstance(IAgentPermissionGate, {});
           reg.definePartialInstance(IAgentFullCompactionService, {
             hooks: createHooks(['onWillCompact']),
@@ -631,6 +639,9 @@ describe('IExternalHooksRunnerService integration', () => {
             hooks: createHooks(['onBeforeSubmitPrompt']),
           });
           reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
+          reg.definePartialInstance(IAgentProfileService, {
+            getModelCapabilities: () => UNKNOWN_CAPABILITY,
+          });
           reg.definePartialInstance(IAgentPermissionGate, {});
           reg.definePartialInstance(IAgentFullCompactionService, {
             hooks: createHooks(['onWillCompact']),
@@ -1161,6 +1172,9 @@ describe('IExternalHooksRunnerService integration', () => {
             hooks: createHooks(['onBeforeSubmitPrompt']),
           });
           reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
+          reg.definePartialInstance(IAgentProfileService, {
+            getModelCapabilities: () => UNKNOWN_CAPABILITY,
+          });
           reg.definePartialInstance(IAgentPermissionGate, {});
           reg.definePartialInstance(IAgentFullCompactionService, {
             hooks: createHooks(['onWillCompact']),

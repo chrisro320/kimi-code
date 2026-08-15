@@ -19,6 +19,8 @@
  * (`stopHookContinuationUsed`, the Stop-hook re-entry guard) is registered
  * into `agentState` (`IAgentStateService`) and read/written through it; the
  * hook listener registrations stay ordinary disposables on the instance.
+ * A `minimal_mode` model resolves the runner to a suppressed one, so no
+ * configured hook runs for that session.
  */
 
 import { IInstantiationService } from '#/_base/di/instantiation';
@@ -27,6 +29,8 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { isPlainRecord } from '#/_base/utils/canonical-args';
+import { Event } from '#/_base/event';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentTaskService, type AgentTaskInfo, type AgentTaskNotificationContext } from '#/agent/task/task';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -60,6 +64,17 @@ import {
   renderUserPromptHookResult,
 } from './user-prompt';
 
+/** Answers every hook event as "nothing configured" — see `runner`. */
+const SUPPRESSED_HOOKS_RUNNER: IExternalHooksRunnerService = {
+  _serviceBrand: undefined,
+  ready: Promise.resolve(),
+  onDidReload: Event.None as Event<void>,
+  trigger: async () => [],
+  triggerBlock: async () => undefined,
+  fireAndForgetTrigger: async () => [],
+  hasHooksFor: () => false,
+};
+
 export interface HookResultEvent {
   readonly type: 'hook.result';
   readonly turnId?: number;
@@ -83,7 +98,8 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
   declare readonly _serviceBrand: undefined;
 
   constructor(
-    @IExternalHooksRunnerService private readonly runner: IExternalHooksRunnerService,
+    @IExternalHooksRunnerService private readonly hooksRunner: IExternalHooksRunnerService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IEventBus private readonly eventBus: IEventBus,
     @IInstantiationService private readonly instantiation: IInstantiationService,
@@ -125,6 +141,24 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
 
   private set stopHookContinuationUsed(value: boolean) {
     this.states.set(externalHooksStopHookContinuationUsedKey, value);
+  }
+
+  /**
+   * A `minimal_mode` session runs no external hook at all. Configured hooks are
+   * the last thing left that can put text the mode dropped back in front of the
+   * model — `UserPromptSubmit` output is appended to the context verbatim, and
+   * `PreToolUse` can refuse a call the two-tool catalogue is supposed to allow.
+   * Swapping the runner rather than guarding each call site keeps a hook event
+   * added later from quietly reopening that channel.
+   *
+   * Session-lifecycle hooks (`SessionStart` / `SessionEnd` / `SubagentStart`)
+   * are not affected: they are fired by the Session-scoped adapter, before any
+   * model is bound, and their output is discarded rather than appended.
+   */
+  private get runner(): IExternalHooksRunnerService {
+    return this.profile.getModelCapabilities().minimal_mode === true
+      ? SUPPRESSED_HOOKS_RUNNER
+      : this.hooksRunner;
   }
 
   private fireAndForget(

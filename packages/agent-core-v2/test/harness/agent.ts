@@ -2613,6 +2613,7 @@ function capabilityNames(capabilities: ModelCapability | undefined): string[] {
     capabilities.tool_use ? 'tool_use' : undefined,
     capabilities.dynamically_loaded_tools ? 'dynamically_loaded_tools' : undefined,
     capabilities.remote_compaction ? 'remote_compaction' : undefined,
+    capabilities.minimal_mode ? 'minimal_mode' : undefined,
   ].filter((capability): capability is string => capability !== undefined);
 }
 
