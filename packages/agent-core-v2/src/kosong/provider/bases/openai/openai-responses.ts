@@ -73,6 +73,7 @@ import {
   resolveAuthBackedClient,
 } from '../request-auth';
 import { normalizeToolCallIdsForProvider, sanitizeOpenAIResponsesCallId } from '../tool-call-id';
+import { flattenRootToolSchemaUnion } from './tool-schema';
 
 function normalizeResponsesFinishReason(
   status: string | null | undefined,
@@ -695,7 +696,15 @@ function convertTool(tool: Tool): ResponseToolParam {
     type: 'function',
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters,
+    // A tool built from `z.union([...])` normalizes to a bare `{ anyOf: [...] }`
+    // with no root `type`, and the Responses API rejects the whole request:
+    // `Invalid schema for function 'TaskOutput': schema must be a JSON Schema of
+    // 'type: "object"', got 'type: null'`. Chat-completions already flattens
+    // this (see `tool-schema.ts`); the same rewrite is needed here, and it
+    // returns the same object reference when there is no root union, so the
+    // wire shape and the provider-side prompt cache stay byte-identical for
+    // every other tool.
+    parameters: flattenRootToolSchemaUnion(tool.parameters),
     strict: false,
   };
 }
