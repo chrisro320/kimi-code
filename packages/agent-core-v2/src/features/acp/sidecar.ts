@@ -82,10 +82,7 @@ export function ensureStableRefs(
   const newCounts = countStrings(digests);
   for (const [digest, oldRecords] of oldByDigest) {
     const newCount = newCounts.get(digest) ?? 0;
-    if (
-      newCount !== oldRecords.length &&
-      (oldRecords.length > 1 || newCount > 1)
-    ) {
+    if (newCount < oldRecords.length && oldRecords.length > 1) {
       throw new Error('ACP cannot safely remap an edited duplicate message sequence');
     }
   }

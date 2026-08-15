@@ -248,6 +248,25 @@ describe('AcpService', () => {
     expect(setup.store.values).toEqual(before);
   });
 
+  it('keeps refs stable when an identical message is appended', async () => {
+    const setup = createService('duplicate-growth');
+    owned.push(setup.disposables);
+    const duplicate = textMessage('same');
+
+    await transform(setup.requester.manager(), [duplicate]);
+    const messages = [duplicate, duplicate];
+    const result = await transform(setup.requester.manager(), messages);
+
+    expect(result.messages).toBe(messages);
+    expect(setup.service.status()).toMatchObject({ health: 'healthy', refs: 2 });
+    const sidecar = setup.store.values.get(
+      `sessions/ws/session/agents/duplicate-growth/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect(sidecar.refs.map((record) => record.ref)).toEqual(['m00001', 'm00002']);
+    expect(sidecar.refs[0]!.digest).toBe(sidecar.refs[1]!.digest);
+    expect(sidecar.liveSequence).toEqual(['m00001', 'm00002']);
+  });
+
   it('publishes the acp health slice on the agent event bus while the manager is active', async () => {
     const setup = createService('publish');
     owned.push(setup.disposables);
