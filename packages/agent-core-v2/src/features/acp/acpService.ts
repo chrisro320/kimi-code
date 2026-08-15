@@ -480,7 +480,7 @@ export class AcpService extends Service implements IAcpService {
         if (result.blocksCreated === 0 || result.errors.length > 0) {
           return {
             ok: false,
-            message: result.errors.join('; ') || 'ACP compression produced no block',
+            message: `${result.errors.join('; ') || 'ACP compression produced no block'} Retrying the same range(s) will fail again — widen the range(s) to cover more messages, or stop compressing.`,
           };
         }
         const nextSidecar = { ...view.sidecar, compressionState: state };

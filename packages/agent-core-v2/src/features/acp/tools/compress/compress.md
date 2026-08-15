@@ -5,3 +5,5 @@ Each entry in `content` cites stable message refs (`startId`/`endId`, e.g. "m000
 Write the summary for your future self: decisions made, files touched, errors hit, and where to resume — not a narrative. The summary replaces the originals in your context view; originals stay recoverable through decompress.
 
 Pass multiple ranges in one call's `content` array. The mutation is persisted before this call returns; on failure nothing is committed.
+
+A call is rejected when its ranges cover under ~5000 chars of compressible content in total. Widen the range to include more adjacent messages instead of retrying the same one — identical retries always fail again.
