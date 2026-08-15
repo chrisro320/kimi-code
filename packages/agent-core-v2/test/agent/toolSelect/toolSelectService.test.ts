@@ -9,7 +9,7 @@
  * executor tests use the real executor with telemetry and truncation stubs.
  * Run: ../../node_modules/.bin/vitest run test/toolSelect/toolSelectService.test.ts
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DisposableStore, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type ServiceRegistration, type TestInstantiationService } from '#/_base/di/test';
@@ -60,6 +60,7 @@ import { AgentToolSelectService } from '#/agent/toolSelect/toolSelectService';
 import { SelectToolsTool } from '#/agent/tools/select-tools/selectToolsTool';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IWireService } from '#/wire/wire';
+import { ILogService } from '#/_base/log/log';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry } from '../../app/telemetry/stubs';
 import { registerStateServices } from '../../state/stubs';
@@ -1354,6 +1355,22 @@ describe('AgentToolSelectService minimal mode', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.result.isError).toBeFalsy();
+  });
+
+  // An empty catalogue is a legal measurement setting but an unusable session,
+  // and nothing opens later to rescue it. A config typo must not reach that
+  // state silently.
+  it('warns when the configured catalogue is empty', () => {
+    capabilities = { ...makeCapabilities({ tool_use: true, minimal_mode: true }),
+      minimal_mode_tools: [] };
+    const h = createHarness();
+    registerMinimal(h);
+    const warn = vi.spyOn(h.ix.get(ILogService), 'warn');
+
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('minimal_mode_tools is empty'),
+    );
   });
 
   // Degrading has to be all-or-nothing. When `narrowTools` gives up it hands the

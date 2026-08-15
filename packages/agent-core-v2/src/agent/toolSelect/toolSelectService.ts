@@ -66,6 +66,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   declare readonly _serviceBrand: undefined;
 
   private narrowDegradeWarned = false;
+  private emptyCatalogueWarned = false;
   // Narrowing and the refusal gate must agree on whether minimal mode is live.
   // `narrowTools` gives up when a configured name is not in the catalogue, so the
   // gate has to give up with it — otherwise the session hands the model every tool
@@ -150,6 +151,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     if (!this.minimalActive()) return entries;
     const catalogue = this.minimalToolNames();
     const wanted = new Set(catalogue);
+    if (catalogue.length === 0) this.warnEmptyCatalogue();
     const narrowed = entries.filter((entry) => wanted.has(entry.name));
     const present = new Set(narrowed.map((entry) => entry.name));
     const missing = catalogue.filter((name) => !present.has(name));
@@ -169,6 +171,19 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
 
   private minimalActive(): boolean {
     return this.profile.getModelCapabilities().minimal_mode === true;
+  }
+
+  /**
+   * An empty `minimal_mode_tools` composes a catalogue of nothing. That is a
+   * deliberate measurement setting, but a model told to act and handed no tool
+   * emits tool-call syntax as plain text and the turn ends with that text shown
+   * to the user — and unlike the bootstrap catalogue this replaced, nothing
+   * opens on a later step. Say so once, so a config typo is not silent.
+   */
+  private warnEmptyCatalogue(): void {
+    if (this.emptyCatalogueWarned) return;
+    this.emptyCatalogueWarned = true;
+    this.log?.warn('minimal mode composes no tools: minimal_mode_tools is empty');
   }
 
   private warnNarrowDegraded(missing: readonly string[]): void {
