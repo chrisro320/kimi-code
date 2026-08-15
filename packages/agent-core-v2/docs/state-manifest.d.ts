@@ -1104,6 +1104,7 @@ export interface AgentStateSnapshot {
         readonly remote_compaction?: boolean;
         readonly anchored_bootstrap?: boolean;
         readonly anchored_bootstrap_tools?: readonly string[];
+        readonly minimal_mode?: boolean;
       };
       readonly maxOutputSize: number | undefined;
       readonly alwaysThinking: boolean | undefined;

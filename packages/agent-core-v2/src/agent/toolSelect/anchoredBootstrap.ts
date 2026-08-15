@@ -10,6 +10,10 @@
  * placeholder for the in-flight step by the time the request is assembled, so
  * a bare role test would open the catalogue on the very request it is meant to
  * anchor. Pure: holds no state and reaches no service.
+ *
+ * The same bootstrap set serves `minimal_mode`, where it is the session's whole
+ * catalogue and promotion never runs; `anchored_bootstrap_tools` overrides it
+ * for either capability.
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';

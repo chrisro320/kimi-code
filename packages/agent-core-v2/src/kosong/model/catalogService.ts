@@ -608,6 +608,7 @@ function resolveModelCapabilities(
     remote_compaction: declared.has('remote_compaction'),
     anchored_bootstrap: declared.has('anchored_bootstrap'),
     anchored_bootstrap_tools: anchoredBootstrapTools,
+    minimal_mode: declared.has('minimal_mode'),
   };
 }
 

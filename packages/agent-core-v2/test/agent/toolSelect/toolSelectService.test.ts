@@ -102,6 +102,7 @@ function makeCapabilities(overrides: {
   readonly tool_use?: boolean;
   readonly dynamically_loaded_tools?: boolean;
   readonly anchored_bootstrap?: boolean;
+  readonly minimal_mode?: boolean;
 } = {}): ModelCapability {
   return {
     image_in: false,
@@ -112,6 +113,7 @@ function makeCapabilities(overrides: {
     max_context_tokens: 128_000,
     dynamically_loaded_tools: overrides.dynamically_loaded_tools,
     anchored_bootstrap: overrides.anchored_bootstrap,
+    minimal_mode: overrides.minimal_mode,
   };
 }
 
@@ -1353,5 +1355,74 @@ describe('AgentToolSelectService anchored bootstrap', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.result.isError).toBeFalsy();
+  });
+});
+
+describe('AgentToolSelectService minimal mode', () => {
+  function registerBootstrap(h: Harness): void {
+    registerBuiltin(h, new EchoTool(BOOTSTRAP_SHELL));
+    registerBuiltin(h, new EchoTool(BOOTSTRAP_READ));
+  }
+
+  it('never promotes, however much the conversation has produced', () => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(
+      userMessage('go'),
+      assistantMessage('on it'),
+      userMessage('again'),
+      assistantMessage('still here'),
+    );
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([BOOTSTRAP_SHELL, BOOTSTRAP_READ]),
+    );
+  });
+
+  // Sensitivity check for the test above: the identical history promotes under
+  // `anchored_bootstrap`, so the assertion is reading the capability and not
+  // some unrelated reason the catalogue happened to stay narrow.
+  it('promotes on the same history when only anchored_bootstrap is declared', () => {
+    capabilities = makeCapabilities({ tool_use: true, anchored_bootstrap: true });
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(
+      userMessage('go'),
+      assistantMessage('on it'),
+      userMessage('again'),
+      assistantMessage('still here'),
+    );
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('holds the anchor without anchored_bootstrap being declared at all', () => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+    const h = createHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(shaped.map((entry) => entry.name)).not.toContain(OFF_BOOTSTRAP);
+  });
+
+  it('keeps refusing an off-catalogue tool on a later step', async () => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+    const h = createExecutorHarness();
+    registerBootstrap(h);
+    registerBuiltin(h, new EchoTool(OFF_BOOTSTRAP));
+    h.contextMemory.history.push(userMessage('go'), assistantMessage('on it'));
+
+    const results = await execute(h, toolCall('call-1', OFF_BOOTSTRAP));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBe(true);
   });
 });

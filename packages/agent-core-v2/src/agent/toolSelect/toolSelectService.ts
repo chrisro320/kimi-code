@@ -167,7 +167,12 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private anchorActive(): boolean {
-    if (this.profile.getModelCapabilities().anchored_bootstrap !== true) return false;
+    const capabilities = this.profile.getModelCapabilities();
+    // Minimal mode is the anchored catalogue that never opens: the upstream
+    // preset it reproduces composes two tools for the whole session, so
+    // promotion is not merely deferred here, it does not exist.
+    if (capabilities.minimal_mode === true) return true;
+    if (capabilities.anchored_bootstrap !== true) return false;
     return !this.anchorPromoted();
   }
 

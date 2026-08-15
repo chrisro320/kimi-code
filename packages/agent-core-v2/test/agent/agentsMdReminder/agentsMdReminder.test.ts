@@ -49,6 +49,7 @@ import { AgentToolDedupeService } from '#/agent/toolDedupe/toolDedupeService';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import type { PromptOrigin } from '#/agent/contextMemory/types';
 import { OrderedHookSlot } from '#/hooks';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IWireService } from '#/wire/wire';
 import type { ToolDidExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
@@ -102,6 +103,8 @@ function createHarness(
       readonly systemPrompt: string;
       readonly agentsMdPaths?: readonly string[];
     };
+    /** Binds a model whose capabilities declare `minimal_mode`. */
+    readonly minimalMode?: boolean;
   } = {},
 ): Harness {
   const telemetryEvents: TelemetryRecord[] = [];
@@ -137,10 +140,17 @@ function createHarness(
         seal: async () => {},
         restore: async () => {},
         flush: async () => {},
-        getModel: () =>
-          options.restoredProfile ?? { systemPrompt: '', agentsMdPaths: undefined },
+        getModel: () => ({
+          ...(options.restoredProfile ?? { systemPrompt: '', agentsMdPaths: undefined }),
+          modelAlias: options.minimalMode === true ? 'minimal/model' : 'plain/model',
+        }),
       } as unknown as IWireService;
       reg.defineInstance(IWireService, wire);
+      reg.definePartialInstance(IModelCatalog, {
+        get: (id: string) => ({
+          capabilities: { minimal_mode: id === 'minimal/model' },
+        }),
+      } as unknown as Partial<IModelCatalog>);
       reg.defineInstance(IBootstrapService, { homeDir } as unknown as IBootstrapService);
       reg.defineInstance(IAgentStateService, new AgentStateService());
       reg.defineInstance(IAgentSystemReminderService, {
@@ -273,6 +283,32 @@ describe('agentsMdReminder path-carrying tools', () => {
     const text = reminderText(h);
     expect(text).toContain(subAgentsMd);
     expect(text).not.toContain(rootAgentsMd);
+  });
+
+  // The reminder would re-inject exactly the workspace instructions a minimal
+  // prompt drops, and the pull sits on the wire's model alias rather than a
+  // push from `bind`, because a resumed session replays the wire and never
+  // binds — a live smoke caught that on turn 2, no unit test did.
+  it('stays silent while the bound model declares minimal_mode', async () => {
+    const h = createHarness({ minimalMode: true });
+    const subDir = join(workDir, 'packages', 'kap-server');
+    await writeAgentsMd(subDir);
+
+    await fire(h, didCtx('Read', { path: join(subDir, 'a.ts') }));
+
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  // Sensitivity check for the test above.
+  it('reminds on the same discovery when the model is not minimal', async () => {
+    const h = createHarness({ minimalMode: false });
+    const subDir = join(workDir, 'packages', 'kap-server');
+    const subAgentsMd = await writeAgentsMd(subDir);
+
+    await fire(h, didCtx('Read', { path: join(subDir, 'a.ts') }));
+
+    expect(h.reminders).toHaveLength(1);
+    expect(reminderText(h)).toContain(subAgentsMd);
   });
 
   it('reminds at most once per file', async () => {

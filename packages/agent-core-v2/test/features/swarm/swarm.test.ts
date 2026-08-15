@@ -45,6 +45,7 @@ import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
+import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import type { ToolCall } from '#/kosong/contract/message';
 import type { ExecutableToolContext } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
@@ -188,6 +189,7 @@ function stubCallerProfile(
   return {
     _serviceBrand: undefined,
     data: () => data ?? { profileName: undefined },
+    getModelCapabilities: () => UNKNOWN_CAPABILITY,
   } as unknown as IAgentProfileService;
 }
 
@@ -213,6 +215,7 @@ describe('AgentSwarmService', () => {
     ix.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
     ix.stub(IAgentLoopService, stubLoopWithHooks());
     ix.set(IAgentStateService, new AgentStateService());
+    ix.stub(IAgentProfileService, stubCallerProfile());
     ix.set(IAgentContextInjectorService, new SyncDescriptor(AgentContextInjectorService));
     ix.set(IAgentToolRegistryService, new SyncDescriptor(AgentToolRegistryService));
     ix.stub(IAgentLifecycleService, {});

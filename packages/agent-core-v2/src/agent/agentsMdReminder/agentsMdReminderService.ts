@@ -34,6 +34,7 @@ import {
   loadAgentsMdDetailed,
 } from '#/agent/profile/context';
 import { ProfileModel } from '#/agent/profile/profileOps';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
@@ -77,6 +78,7 @@ export class AgentAgentsMdReminderService
     @IBashParserService private readonly bashParser: IBashParserService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IWireService private readonly wire: IWireService,
+    @IModelCatalog private readonly models: IModelCatalog,
   ) {
     super();
     this.states.register(agentsMdReminderKnownKey);
@@ -96,6 +98,24 @@ export class AgentAgentsMdReminderService
       await next();
     };
     this._register(toolExecutor.hooks.onDidExecuteTool.register('agentsMdReminder', handler));
+  }
+
+  /**
+   * A `minimal_mode` prompt carries no workspace instructions, so the seed is
+   * empty and every AGENTS.md the agent walks past reads as newly discovered —
+   * the reminder would put back exactly the text the mode removes. Read from
+   * the wire rather than pushed in by `profile`: a session resume replays the
+   * wire straight into `ProfileModel` without ever calling `bind`, so anything
+   * pushed at bind time is simply absent on the second run of a session.
+   */
+  private get suppressed(): boolean {
+    const alias = this.wire.getModel(ProfileModel).modelAlias;
+    if (alias === undefined) return false;
+    try {
+      return this.models.get(alias)?.capabilities.minimal_mode === true;
+    } catch {
+      return false;
+    }
   }
 
   seedInjected(paths: readonly string[], cwd: string): void {
@@ -127,6 +147,7 @@ export class AgentAgentsMdReminderService
   }
 
   private async probeAndRemind(ctx: ToolDidExecuteContext): Promise<void> {
+    if (this.suppressed) return;
     if (ctx.outcome !== 'executed') return;
     const discovered: string[] = [];
     try {

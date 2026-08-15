@@ -1005,6 +1005,28 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     if (options?.additionalDirs !== undefined) {
       this.promptAdditionalDirs = options.additionalDirs;
     }
+    const minimalMode =
+      (options?.capabilities ?? this.getModelCapabilities()).minimal_mode === true;
+    // The renderers drop these on their own, but the context is also what the
+    // bind record and the AGENTS.md reminder read, so clear them at the source:
+    // a wire record listing instruction files a minimal prompt never carried
+    // would misreport the very thing this mode exists to measure.
+    if (minimalMode) {
+      return {
+        ...base,
+        minimalMode,
+        cwd: this.sessionContext.cwd,
+        cwdListing: '',
+        agentsMd: '',
+        agentsMdPaths: [],
+        agentsMdWarning: undefined,
+        additionalDirsInfo: '',
+        skills: '',
+        skillActive: false,
+        pluginSections: '',
+        productName,
+      };
+    }
     return {
       ...base,
       cwdListing: this.frozenCwdListing,
@@ -1019,8 +1041,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       skillActive,
       productName,
       replyStyleGuide: this.bootstrap.args.replyStyleGuide,
-      anchoredBootstrap:
-        (options?.capabilities ?? this.getModelCapabilities()).anchored_bootstrap === true,
+      minimalMode,
     };
   }
 

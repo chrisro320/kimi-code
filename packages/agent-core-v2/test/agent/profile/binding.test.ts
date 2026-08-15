@@ -15,6 +15,7 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { BuiltinAgentProfileLoaderService } from '#/app/agentProfileCatalog/builtinAgentProfileLoaderService';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
+import { MINIMAL_MODE_SYSTEM_PROMPT } from '#/app/agentProfileCatalog/profile-shared';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
 import { IHostClock } from '#/os/interface/hostClock';
@@ -335,7 +336,10 @@ describe('AgentProfileService.bind', () => {
     expect(svc.data().profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
   });
 
-  it('injects the reasoning-voice directive on the very bind that declares anchored_bootstrap', async () => {
+  // `bind` renders the prompt before the wire records the model alias, so a
+  // capability read through the bound model would come back unknown and the
+  // gated prompt shape would never apply. Assert on the very first bind.
+  it('collapses the system prompt on the very bind that declares minimal_mode', async () => {
     ctx = createTestAgent(
       {
         initialConfig: {
@@ -343,11 +347,11 @@ describe('AgentProfileService.bind', () => {
             kimi: { type: 'kimi', apiKey: 'test-key', baseUrl: 'https://api.example.test/v1' },
           },
           models: {
-            'anchored/model': {
+            'minimal/model': {
               provider: 'kimi',
-              model: 'anchored-model',
+              model: 'minimal-model',
               maxContextSize: 1_000_000,
-              capabilities: ['tool_use', 'anchored_bootstrap'],
+              capabilities: ['tool_use', 'minimal_mode'],
             },
           },
         },
@@ -356,17 +360,18 @@ describe('AgentProfileService.bind', () => {
     );
     const svc = ctx.get(IAgentProfileService);
 
-    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: 'anchored/model' });
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: 'minimal/model' });
 
-    expect(svc.getSystemPrompt()).toContain('# Reasoning Voice');
+    expect(svc.getSystemPrompt()).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
   });
 
-  it('leaves the reasoning-voice directive out for a model without the capability', async () => {
+  it('renders the full system prompt for a model without minimal_mode', async () => {
     const { profile: svc } = buildContext();
 
     await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
 
-    expect(svc.getSystemPrompt()).not.toContain('# Reasoning Voice');
+    expect(svc.getSystemPrompt()).not.toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(svc.getSystemPrompt()).toContain('# Ultimate Reminders');
   });
 
   it('rejects an unsupported thinking effort atomically before first bind', async () => {

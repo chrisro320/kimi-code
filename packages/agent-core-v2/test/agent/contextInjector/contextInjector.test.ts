@@ -25,6 +25,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
+import { UNKNOWN_CAPABILITY, type ModelCapability } from '#/kosong/contract/capability';
 import { AgentSystemReminderService } from '#/agent/systemReminder/systemReminderService';
 import { IEventBus } from '#/app/event/eventBus';
 import { IWireService } from '#/wire/wire';
@@ -70,14 +71,19 @@ describe('AgentContextInjectorService', () => {
   let ix: TestInstantiationService;
   let context: IAgentContextMemoryService;
   let loop: StubLoop;
+  let capabilities: ModelCapability;
 
   beforeEach(() => {
     disposables = new DisposableStore();
     loop = stubLoopWithHooks();
+    capabilities = UNKNOWN_CAPABILITY;
     ix = createServices(disposables, {
       base: [registerContextMemoryServices, registerLogServices],
       strict: true,
       additionalServices: (reg) => {
+        reg.definePartialInstance(IAgentProfileService, {
+          getModelCapabilities: () => capabilities,
+        });
         reg.defineInstance(IAgentLoopService, loop);
         reg.defineInstance(IWireService, stubWire());
         reg.defineInstance(IAgentStateService, new AgentStateService());
@@ -110,6 +116,39 @@ describe('AgentContextInjectorService', () => {
       messages: [...inserted],
     });
   }
+
+  it('runs no provider at all while the bound model is minimal', async () => {
+    capabilities = { ...UNKNOWN_CAPABILITY, tool_use: true, minimal_mode: true };
+    let calls = 0;
+
+    injector(ix).register('minimal_test', () => {
+      calls += 1;
+      return 'should never appear';
+    });
+
+    await runInjectionStep(true);
+    await runInjectionStep();
+
+    expect(calls).toBe(0);
+    expect(context.get()).toHaveLength(0);
+  });
+
+  // Sensitivity check: the same provider and the same two steps do inject once
+  // the capability is absent, so the assertion above is reading `minimal_mode`.
+  it('runs the same provider when the model is not minimal', async () => {
+    capabilities = { ...UNKNOWN_CAPABILITY, tool_use: true };
+    let calls = 0;
+
+    injector(ix).register('minimal_test', () => {
+      calls += 1;
+      return 'should appear';
+    });
+
+    await runInjectionStep(true);
+
+    expect(calls).toBe(1);
+    expect(lastText(context)).toContain('should appear');
+  });
 
   it('registers providers and appends injection messages with the provider variant', async () => {
     const seen: Array<number | null> = [];

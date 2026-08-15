@@ -44,6 +44,19 @@ export interface ModelCapability {
    * `anchored_bootstrap` is declared.
    */
   readonly anchored_bootstrap_tools?: readonly string[];
+  /**
+   * Reproduce the upstream `minimal` preset's regime: the system prompt is one
+   * sentence, no workspace instructions, runtime context, skill listing, or
+   * plugin sections reach it, no context injection ever fires, and the
+   * bootstrap tool set stays for the whole session instead of opening after the
+   * first assistant message. Declaration-only for the same reason as
+   * `anchored_bootstrap`, and independent of it: a session runs one regime or
+   * the other, never both, so declaring both is a configuration mistake that
+   * resolves in favour of `minimal_mode`. Strips the agent down far enough that
+   * it cannot use skills, cron, or MCP — a measurement instrument for the
+   * model's native reasoning register, not a working configuration.
+   */
+  readonly minimal_mode?: boolean;
 }
 
 const UNKNOWN_CAPABILITY_MARKER = Symbol.for('moonshot-ai.kosong.UNKNOWN_CAPABILITY');
@@ -60,6 +73,7 @@ export const UNKNOWN_CAPABILITY: ModelCapability = Object.freeze(
       dynamically_loaded_tools: false,
       remote_compaction: false,
       anchored_bootstrap: false,
+      minimal_mode: false,
     },
     UNKNOWN_CAPABILITY_MARKER,
     { value: true },
@@ -80,6 +94,7 @@ export function isUnknownCapability(capability: ModelCapability): boolean {
     capability.dynamically_loaded_tools !== true &&
     capability.remote_compaction !== true &&
     capability.anchored_bootstrap !== true &&
+    capability.minimal_mode !== true &&
     capability.max_context_tokens === 0
   );
 }

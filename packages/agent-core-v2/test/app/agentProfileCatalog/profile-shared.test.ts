@@ -23,6 +23,7 @@ import {
   registerAgentProfile,
 } from '#/app/agentProfileCatalog/contribution';
 import {
+  MINIMAL_MODE_SYSTEM_PROMPT,
   renderPromptTemplateResult,
   renderSystemPromptResult,
   systemPromptVars,
@@ -61,46 +62,47 @@ describe('systemPromptVars', () => {
     expect(vars['skills_section']).toContain('SKILLS');
   });
 
-  function voiceDirectiveTail(text: string): string {
-    return text.slice(text.indexOf('# Reasoning Voice')).trimEnd();
-  }
+  it('renders the whole builtin template when minimal mode is off', () => {
+    const { text, environment } = renderSystemPromptResult(
+      '',
+      { cwd: '/repo', now: '2026-08-15T00:00:00.000Z' },
+      { skillActive: true },
+    );
 
-  it('omits the reasoning-voice directive unless anchored bootstrap is declared', () => {
-    expect(systemPromptVars({}, { skillActive: true })['anchored_directive']).toBe('');
+    expect(text).toContain('# Ultimate Reminders');
+    expect(text.length).toBeGreaterThan(1000);
+    expect(environment.cwd).toBe('/repo');
+    expect(environment.date.disclosed).toBe(true);
+  });
+
+  it('collapses the system prompt to the single minimal-mode sentence', () => {
+    const { text, environment } = renderSystemPromptResult(
+      '',
+      { minimalMode: true, cwd: '/repo', agentsMd: 'AGENTS', skills: 'SKILLS' },
+      { skillActive: true },
+    );
+
+    expect(text).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(text).not.toContain('AGENTS');
+    expect(text).not.toContain('SKILLS');
+    expect(text).not.toContain('/repo');
+    expect(environment.cwd).toBe('');
+    expect(environment.date.disclosed).toBe(false);
+  });
+
+  it('collapses a user-owned template too when minimal mode is on', () => {
+    const template = '# Custom\n\n${agents_md}\n${cwd}';
+
     expect(
-      systemPromptVars({ anchoredBootstrap: false }, { skillActive: true })['anchored_directive'],
-    ).toBe('');
-  });
-
-  it('injects the reasoning-voice directive when anchored bootstrap is declared', () => {
-    const directive = systemPromptVars({ anchoredBootstrap: true }, { skillActive: true })[
-      'anchored_directive'
-    ];
-
-    expect(directive).toContain('# Reasoning Voice');
-    expect(directive).toContain('Think in ENGLISH');
-    expect(directive).toContain('"We need"');
-  });
-
-  it('places the reasoning-voice directive after every language rule it overrides', () => {
-    const { text } = renderSystemPromptResult('', { anchoredBootstrap: true }, { skillActive: true });
-
-    const voiceAt = text.indexOf('# Reasoning Voice');
-    const remindersAt = text.indexOf('# Ultimate Reminders');
-    const replyInUserLanguageAt = text.indexOf('Reply in the user\'s language');
-
-    expect(voiceAt).toBeGreaterThan(-1);
-    expect(remindersAt).toBeGreaterThan(-1);
-    expect(replyInUserLanguageAt).toBeGreaterThan(-1);
-    expect(voiceAt).toBeGreaterThan(remindersAt);
-    expect(voiceAt).toBeGreaterThan(replyInUserLanguageAt);
-    expect(text.trimEnd().endsWith(voiceDirectiveTail(text))).toBe(true);
-  });
-
-  it('keeps the default system prompt free of the directive', () => {
-    const { text } = renderSystemPromptResult('', {}, { skillActive: true });
-
-    expect(text).not.toContain('# Reasoning Voice');
+      renderPromptTemplateResult(template, { minimalMode: true, agentsMd: 'AGENTS', cwd: '/repo' }, {
+        skillActive: true,
+      }).text,
+    ).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(
+      renderPromptTemplateResult(template, { agentsMd: 'AGENTS', cwd: '/repo' }, {
+        skillActive: true,
+      }).text,
+    ).toContain('AGENTS');
   });
 
   it('renders missing context fields as empty strings and defaults ${now}', () => {

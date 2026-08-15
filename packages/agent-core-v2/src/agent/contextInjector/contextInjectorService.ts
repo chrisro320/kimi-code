@@ -7,7 +7,9 @@
  * new-turn flag for the next step. `reconcileWhenIdle` lets out-of-loop
  * callers (SDK RPC surfaces) refresh one provider immediately while the loop
  * is quiet. Writes reminders through `systemReminder` and reports provider
- * failures through `log`. Bound at Agent scope.
+ * failures through `log`. A `minimal_mode` model skips every provider at one
+ * gate in `inject`, so the mode's single-sentence prompt is the whole context
+ * the model ever sees. Bound at Agent scope.
  */
 
 import { toDisposable, type IDisposable } from "#/_base/di/lifecycle";
@@ -19,6 +21,7 @@ import { ILogService } from '#/_base/log/log';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { isCompactionSummaryMessage } from '#/agent/contextMemory/compactionHandoff';
 import { IAgentLoopService, type BeforeStepContext } from '#/agent/loop/loop';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IEventBus } from '#/app/event/eventBus';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -45,6 +48,7 @@ export class AgentContextInjectorService extends Service implements IAgentContex
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
     @IEventBus private readonly eventBus: IEventBus,
     @ILogService private readonly log: ILogService,
   ) {
@@ -111,6 +115,10 @@ export class AgentContextInjectorService extends Service implements IAgentContex
   }
 
   private async inject(isNewTurn: boolean): Promise<void> {
+    // One gate for every provider rather than a check inside each: a minimal
+    // model's prompt is a single sentence, and a provider added later would
+    // otherwise start leaking text into that context without anyone noticing.
+    if (this.profile.getModelCapabilities().minimal_mode === true) return;
     for (const entry of this.entries) {
       await this.injectEntry(entry, isNewTurn);
     }
