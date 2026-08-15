@@ -66,6 +66,11 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   declare readonly _serviceBrand: undefined;
 
   private narrowDegradeWarned = false;
+  // Narrowing and the refusal gate must agree on whether minimal mode is live.
+  // `narrowTools` gives up when a configured name is not in the catalogue, so the
+  // gate has to give up with it — otherwise the session hands the model every tool
+  // and then refuses each one it calls, quoting a catalogue that is not in effect.
+  private narrowDegraded = false;
 
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
@@ -148,6 +153,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     const narrowed = entries.filter((entry) => wanted.has(entry.name));
     const present = new Set(narrowed.map((entry) => entry.name));
     const missing = catalogue.filter((name) => !present.has(name));
+    this.narrowDegraded = missing.length > 0;
     if (missing.length > 0) {
       this.warnNarrowDegraded(missing);
       return entries;
@@ -234,7 +240,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private describeUnavailableTool(name: string): string | undefined {
-    if (this.minimalActive()) {
+    if (this.minimalActive() && !this.narrowDegraded) {
       const catalogue = this.minimalToolNames();
       if (!catalogue.includes(name)) return minimalToolUnavailableOutput(name, catalogue);
     }

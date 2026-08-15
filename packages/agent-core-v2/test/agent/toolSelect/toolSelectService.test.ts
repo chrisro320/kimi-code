@@ -1355,4 +1355,22 @@ describe('AgentToolSelectService minimal mode', () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.result.isError).toBeFalsy();
   });
+
+  // Degrading has to be all-or-nothing. When `narrowTools` gives up it hands the
+  // model the full catalogue, so the refusal gate must give up too — otherwise
+  // every tool is listed and every tool is refused, quoting a catalogue that is
+  // not in effect, and the model has no way out of the loop.
+  it('stops refusing once narrowing has degraded', async () => {
+    const h = createExecutorHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE, { payload: 'ok' }));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBeFalsy();
+  });
 });
