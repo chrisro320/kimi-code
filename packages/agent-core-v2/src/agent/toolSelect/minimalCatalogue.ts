@@ -15,7 +15,12 @@
 
 import { isUnknownCapability, type ModelCapability } from '#/kosong/contract/capability';
 
-export const MINIMAL_MODE_TOOL_NAMES = ['Bash', 'Read'] as const;
+export const MINIMAL_MODE_TOOL_NAMES = [
+  'mcp__lean-ctx__ctx_read',
+  'mcp__lean-ctx__ctx_search',
+  'mcp__lean-ctx__ctx_shell',
+  'mcp__lean-ctx__ctx_patch',
+] as const;
 
 export const LEAN_MODE_TOOL_NAMES = [
   'mcp__lean-ctx__ctx_read',
