@@ -247,7 +247,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     inputMode: 'prompt',
     swarmMode: false,
     leanMode: input.cliOptions.lean === true,
-    leanModeActive: false,
+    leanModeActive: input.cliOptions.lean === true,
     dispatchMode: 'auto',
     thinkingEffort: 'off',
     contextUsage: 0,
