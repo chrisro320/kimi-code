@@ -75,8 +75,10 @@ const MCP_ALPHA = 'mcp__srv__alpha';
 const MCP_BETA = 'mcp__srv__beta';
 const MCP_GAMMA = 'mcp__srv__gamma';
 const MCP_GONE = 'mcp__srv__gone';
-const MINIMAL_SHELL = 'Bash';
-const MINIMAL_READ = 'Read';
+const MINIMAL_SHELL = 'mcp__lean-ctx__ctx_shell';
+const MINIMAL_READ = 'mcp__lean-ctx__ctx_read';
+const MINIMAL_SEARCH = 'mcp__lean-ctx__ctx_search';
+const MINIMAL_PATCH = 'mcp__lean-ctx__ctx_patch';
 const OFF_CATALOGUE = 'Write';
 const USER_DEFERRED = 'dashboard_create';
 const USER_INLINE = 'echo_inline';
@@ -1320,6 +1322,8 @@ describe('AgentToolSelectService minimal mode', () => {
   function registerMinimal(h: Harness): void {
     registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
     registerBuiltin(h, new EchoTool(MINIMAL_READ));
+    registerBuiltin(h, new EchoTool(MINIMAL_SEARCH));
+    registerBuiltin(h, new EchoTool(MINIMAL_PATCH));
   }
 
   it('narrows the catalogue to the minimal tools', () => {
@@ -1331,7 +1335,7 @@ describe('AgentToolSelectService minimal mode', () => {
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([MINIMAL_SHELL, MINIMAL_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
     );
   });
 
@@ -1352,7 +1356,7 @@ describe('AgentToolSelectService minimal mode', () => {
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([MINIMAL_SHELL, MINIMAL_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
     );
   });
 
@@ -1369,7 +1373,7 @@ describe('AgentToolSelectService minimal mode', () => {
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([MINIMAL_SHELL, MINIMAL_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
     );
   });
 
@@ -1418,7 +1422,7 @@ describe('AgentToolSelectService minimal mode', () => {
     const shaped = h.sut.shapeTools(h.registry.list());
 
     expect(new Set(shaped.map((entry) => entry.name))).toEqual(
-      new Set([MINIMAL_SHELL, MINIMAL_READ]),
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
     );
   });
 
