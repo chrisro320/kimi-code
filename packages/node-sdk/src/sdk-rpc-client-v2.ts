@@ -992,6 +992,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       } as ResumedAgentState['permission'],
       plan: plan as ResumedAgentState['plan'],
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      leanMode: profile.leanMode,
       dispatchMode: agent.accessor.get(IAgentDispatchModeService).mode,
       usage: usage as ResumedAgentState['usage'],
       tools: tools as ResumedAgentState['tools'],
@@ -1143,11 +1144,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     if (
       input.model !== undefined ||
       input.thinking !== undefined ||
-      input.permission !== undefined
+      input.permission !== undefined ||
+      input.leanMode === true
     ) {
       const agent = await this.materializeMainAgent(handle, {
         model: input.model,
         thinking: input.thinking,
+        leanMode: input.leanMode,
       });
       if (input.permission !== undefined) {
         agent.accessor.get(IAgentPermissionModeService).setMode(input.permission);
@@ -1404,7 +1407,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   private async materializeMainAgent(
     session: ISessionScopeHandle,
-    binding?: { readonly model?: string; readonly thinking?: string },
+    binding?: {
+      readonly model?: string;
+      readonly thinking?: string;
+      readonly leanMode?: boolean;
+    },
   ): Promise<IAgentScopeHandle> {
     await this.modelReady;
     const agent = await ensureMainAgent(session);
@@ -1415,6 +1422,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
           profile: DEFAULT_AGENT_PROFILE_NAME,
           model: binding?.model,
           thinking: binding?.thinking,
+          leanMode: binding?.leanMode,
         });
       } catch (error) {
         if (
@@ -1561,6 +1569,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       permission: agent.accessor.get(IAgentPermissionModeService).mode,
       planMode: plan !== null,
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      leanMode: profile.leanMode,
       dispatchMode: agent.accessor.get(IAgentDispatchModeService).mode,
       contextTokens,
       maxContextTokens,

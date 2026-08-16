@@ -489,6 +489,7 @@ interface ProfileBindPayload {
   activeToolNames?: string[];
   disallowedTools: string[];
   subagents?: string[];
+  leanMode?: boolean;
 }
 
 /**

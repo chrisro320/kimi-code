@@ -65,6 +65,7 @@ import {
   handleTitleCommand,
 } from './session';
 import { handleDispatchCommand } from './dispatch-mode';
+import { handleLeanCommand } from './lean';
 import { handleSwarmCommand } from './swarm';
 import { handleUndoCommand } from './undo';
 import { handleWebCommand } from './web';
@@ -93,6 +94,7 @@ export {
   showSettingsSelector,
 } from './config';
 export { handleDispatchCommand } from './dispatch-mode';
+export { handleLeanCommand } from './lean';
 export { handleSwarmCommand } from './swarm';
 export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
 export { handlePluginsCommand } from './plugins';
@@ -486,6 +488,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'plan':
       await handlePlanCommand(host, args);
+      return;
+    case 'lean':
+      handleLeanCommand(host, args);
       return;
     case 'swarm':
       await handleSwarmCommand(host, args);

@@ -13,7 +13,10 @@
  * Independently of disclosure, a model declaring `minimal_mode` has its
  * catalogue narrowed to the minimal set for the whole session — there is no
  * promotion, so nothing here latches — and a session missing one of those tools
- * keeps the full catalogue rather than an unusable one. Reads live tools from
+ * keeps the full catalogue rather than an unusable one. A session-chosen lean
+ * mode narrows to the intersection instead and warns about the rest: it exists
+ * to keep the request prefix small, so handing back the full catalogue would
+ * defeat the only thing it does. Reads live tools from
  * `toolRegistry`, active-tool and capability state from `profile`, gates
  * through `flag`, hooks into `toolExecutor`, and listens to context
  * lifecycle events through `event`. The mutable load-tracking state
@@ -39,6 +42,7 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
 import {
+  isLeanComposedCapability,
   minimalToolUnavailableOutput,
   resolveMinimalModeToolNames,
 } from './minimalCatalogue';
@@ -67,6 +71,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
 
   private narrowDegradeWarned = false;
   private emptyCatalogueWarned = false;
+  private leanMissingWarned = false;
   // Narrowing and the refusal gate must agree on whether minimal mode is live.
   // `narrowTools` gives up when a configured name is not in the catalogue, so the
   // gate has to give up with it — otherwise the session hands the model every tool
@@ -80,7 +85,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IFlagService private readonly flags: IFlagService,
-    @IEventBus eventBus: IEventBus,
+    @IEventBus private readonly eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
     @ILogService private readonly log?: ILogService,
   ) {
@@ -155,6 +160,11 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     const narrowed = entries.filter((entry) => wanted.has(entry.name));
     const present = new Set(narrowed.map((entry) => entry.name));
     const missing = catalogue.filter((name) => !present.has(name));
+    if (isLeanComposedCapability(this.profile.getModelCapabilities())) {
+      this.narrowDegraded = false;
+      if (missing.length > 0) this.warnLeanCatalogueMissing(missing, narrowed.length === 0);
+      return narrowed;
+    }
     this.narrowDegraded = missing.length > 0;
     if (missing.length > 0) {
       this.warnNarrowDegraded(missing);
@@ -184,6 +194,20 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     if (this.emptyCatalogueWarned) return;
     this.emptyCatalogueWarned = true;
     this.log?.warn('minimal mode composes no tools: minimal_mode_tools is empty');
+  }
+
+  private warnLeanCatalogueMissing(missing: readonly string[], empty: boolean): void {
+    if (this.leanMissingWarned) return;
+    this.leanMissingWarned = true;
+    const message = empty
+      ? `Lean mode composed no tools: ${missing.join(', ')} are not available. ` +
+        'Check that the lean-ctx MCP server is connected.'
+      : `Lean mode is missing ${missing.join(', ')}; the session runs with the rest.`;
+    this.log?.warn(message, { missing: [...missing] });
+    try {
+      this.eventBus.publish({ type: 'warning', code: 'lean-mode-tools-unavailable', message });
+    } catch {
+    }
   }
 
   private warnNarrowDegraded(missing: readonly string[]): void {

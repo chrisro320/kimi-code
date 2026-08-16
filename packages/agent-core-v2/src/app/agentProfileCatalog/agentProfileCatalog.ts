@@ -69,6 +69,7 @@ export interface AgentProfileContext {
   readonly productName?: string;
   readonly replyStyleGuide?: string;
   readonly minimalMode?: boolean;
+  readonly leanMode?: boolean;
   readonly [key: string]: unknown;
 }
 

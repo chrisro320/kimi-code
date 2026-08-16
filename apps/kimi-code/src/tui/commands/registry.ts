@@ -181,6 +181,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: (args) => (args.trim().toLowerCase() === 'clear' ? 'idle-only' : 'always'),
   },
   {
+    name: 'lean',
+    aliases: [],
+    description: 'Toggle lean mode for the next session (one-line prompt, lean-ctx tools only)',
+    priority: 100,
+    argumentHint: '[on|off]',
+    availability: 'always',
+  },
+  {
     name: 'swarm',
     aliases: [],
     description: 'Toggle swarm mode or run one task in swarm mode',

@@ -23,6 +23,7 @@ export {
   showSettingsSelector,
 } from './config';
 export { handleSubagentCommand } from './subagent';
+export { handleLeanCommand } from './lean';
 export { handleSwarmCommand } from './swarm';
 export { handleDispatchCommand } from './dispatch-mode';
 export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';

@@ -10,9 +10,12 @@
  * state, so the effort is validated against the model's supported efforts and
  * the bind rejects up front when unsupported — internal spawns pass inherited
  * thinking without the flag, and a persisted effort that drifted out of the
- * model's support list clamps instead of breaking the spawn. The profile
- * contract also owns live status re-publication for consumers that attach to
- * an agent after its initial model binding.
+ * model's support list clamps instead of breaking the spawn. `bind()` also
+ * takes the session's optional `leanMode` choice, which composes the same
+ * stripped-down regime a `minimal_mode` model declares — decided once at bind
+ * because the prompt and the tool catalogue it strips are the request prefix.
+ * The profile contract also owns live status re-publication for consumers that
+ * attach to an agent after its initial model binding.
  */
 
 import type {
@@ -64,6 +67,7 @@ export interface SystemPromptContext extends AgentProfileContext {
 export type ResolvedAgentProfile = AgentProfile;
 
 export interface ProfileData extends AgentConfigData {
+  readonly leanMode?: boolean;
   readonly agentsMdPaths?: readonly string[];
   readonly activeToolNames?: readonly string[];
   readonly disallowedTools?: readonly string[];
@@ -124,6 +128,7 @@ export interface BindAgentInput {
   readonly model?: string;
   readonly thinking?: string;
   readonly strictThinking?: boolean;
+  readonly leanMode?: boolean;
 }
 
 export interface IAgentProfileService {

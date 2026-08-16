@@ -42,6 +42,7 @@ export interface CLIOptions {
   trust?: boolean;
   auto: boolean;
   plan: boolean;
+  lean?: boolean;
   model: string | undefined;
   /** `--effort`. Optional: ~25 option literals in tests construct CLIOptions. */
   effort?: string | undefined;

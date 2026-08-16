@@ -101,6 +101,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { UNKNOWN_CAPABILITY, type ModelCapability } from '#/kosong/contract/capability';
+import { composeLeanCapability } from '#/agent/toolSelect/minimalCatalogue';
 import { type SamplingOptions, type ThinkingEffort } from '#/kosong/contract/provider';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { type ModelOverrides } from '#/kosong/model/model.types';
@@ -435,7 +436,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     }
 
     await this.sessionToolPolicy.ready;
-    const context = await this.buildSystemPromptContext(profile, { capabilities: model.capabilities });
+    const context = await this.buildSystemPromptContext(profile, {
+      capabilities: model.capabilities,
+      leanMode: input.leanMode,
+    });
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
     const rendered = profile.renderSystemPrompt(context);
@@ -459,6 +463,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       activeToolNames: profile.tools,
       disallowedTools: profile.disallowedTools ?? [],
       subagents: profile.subagents,
+      leanMode: input.leanMode,
     }));
     this.afterConfigDispatch({
       modelAlias: alias,
@@ -610,6 +615,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     return {
       modelAlias: this.modelAlias,
       modelCapabilities: model?.capabilities ?? UNKNOWN_CAPABILITY,
+      leanMode: this.profileState.leanMode,
       profileName: this.profileName,
       thinkingLevel: this.thinkingLevel,
       systemPrompt: this.systemPrompt,
@@ -665,7 +671,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   getModelCapabilities(): ModelCapability {
-    return this.tryResolveRawModel()?.capabilities ?? UNKNOWN_CAPABILITY;
+    return composeLeanCapability(
+      this.tryResolveRawModel()?.capabilities ?? UNKNOWN_CAPABILITY,
+      this.profileState.leanMode,
+    );
   }
 
   getMaxOutputSize(): number | undefined {
@@ -980,7 +989,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
 
   private async buildSystemPromptContext(
     profile: ResolvedAgentProfile,
-    options?: ApplyProfileOptions & { readonly capabilities?: ModelCapability },
+    options?: ApplyProfileOptions & {
+      readonly capabilities?: ModelCapability;
+      readonly leanMode?: boolean;
+    },
   ): Promise<SystemPromptContext> {
     const preloadedAgentsMd = await this.workspaceInstructionsSnapshot();
     const additionalDirs = options?.additionalDirs ??
@@ -1005,8 +1017,12 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     if (options?.additionalDirs !== undefined) {
       this.promptAdditionalDirs = options.additionalDirs;
     }
+    const leanMode = options?.leanMode ?? this.profileState.leanMode === true;
     const minimalMode =
-      (options?.capabilities ?? this.getModelCapabilities()).minimal_mode === true;
+      composeLeanCapability(
+        options?.capabilities ?? this.getModelCapabilities(),
+        leanMode,
+      ).minimal_mode === true;
     // The renderers drop these on their own, but the context is also what the
     // bind record and the AGENTS.md reminder read, so clear them at the source:
     // a wire record listing instruction files a minimal prompt never carried
@@ -1015,6 +1031,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       return {
         ...base,
         minimalMode,
+        leanMode,
         cwd: this.sessionContext.cwd,
         cwdListing: '',
         agentsMd: '',

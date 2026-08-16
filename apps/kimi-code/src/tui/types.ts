@@ -48,6 +48,14 @@ export interface AppState {
   /** 'bash' when the editor is in `!` shell-command mode. */
   inputMode: 'prompt' | 'bash';
   swarmMode: boolean;
+  /**
+   * Lean mode is decided when a session is created — the prompt and tool
+   * catalogue it strips are the request prefix — so this is the value the next
+   * session will be created with, and `leanModeActive` is the live one.
+   */
+  leanMode?: boolean;
+  /** Whether the live session was actually created in lean mode. */
+  leanModeActive?: boolean;
   dispatchMode: DispatchMode;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');
    * mirrors the runtime. The single source of truth for the thinking state in

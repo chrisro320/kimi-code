@@ -105,6 +105,8 @@ function createHarness(
     };
     /** Binds a model whose capabilities declare `minimal_mode`. */
     readonly minimalMode?: boolean;
+    /** The session chose lean mode; the bound model declares nothing. */
+    readonly leanMode?: boolean;
   } = {},
 ): Harness {
   const telemetryEvents: TelemetryRecord[] = [];
@@ -143,6 +145,7 @@ function createHarness(
         getModel: () => ({
           ...(options.restoredProfile ?? { systemPrompt: '', agentsMdPaths: undefined }),
           modelAlias: options.minimalMode === true ? 'minimal/model' : 'plain/model',
+          leanMode: options.leanMode,
         }),
       } as unknown as IWireService;
       reg.defineInstance(IWireService, wire);
@@ -291,6 +294,19 @@ describe('agentsMdReminder path-carrying tools', () => {
   // binds — a live smoke caught that on turn 2, no unit test did.
   it('stays silent while the bound model declares minimal_mode', async () => {
     const h = createHarness({ minimalMode: true });
+    const subDir = join(workDir, 'packages', 'kap-server');
+    await writeAgentsMd(subDir);
+
+    await fire(h, didCtx('Read', { path: join(subDir, 'a.ts') }));
+
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  // A session-chosen lean mode drops the same workspace instructions, so it has
+  // to silence the same reminder — and this consumer reads the capability on
+  // its own path, not through `profile`, so the fold has to happen here too.
+  it('stays silent while the session runs in lean mode', async () => {
+    const h = createHarness({ leanMode: true });
     const subDir = join(workDir, 'packages', 'kap-server');
     await writeAgentsMd(subDir);
 

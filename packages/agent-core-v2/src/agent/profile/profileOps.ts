@@ -24,7 +24,11 @@
  * forcing is intentionally kept out of this Model so the Kimi-only value
  * cannot leak through model switches or agent forks.
  * `modelCapabilities` is intentionally NOT in the Model — it is
- * derived live at runtime so resume never pins stale capabilities.
+ * derived live at runtime so resume never pins stale capabilities. `leanMode`
+ * is in the Model for the opposite reason: it is not a property of the model
+ * but the session's own choice, fixed when the agent binds, so it belongs
+ * with `disallowedTools` / `subagents` and must replay on resume — the path
+ * where `bind()` never runs.
  * Each `apply` returns the same reference when nothing changes so the wire's
  * reference-equality gate stays quiet. The `agent.status.updated` emission is
  * NOT part of `apply`: it runs after
@@ -62,6 +66,7 @@ export interface ProfileModelState {
   readonly agentsMdPaths?: readonly string[];
   readonly disallowedTools?: readonly string[];
   readonly subagents?: readonly string[];
+  readonly leanMode?: boolean;
 }
 
 export const ProfileModel = defineModel<ProfileModelState>('profile', () => ({
@@ -82,6 +87,7 @@ export const profileBind = ProfileModel.defineOp('profile.bind', {
     activeToolNames: z.array(z.string()).readonly().optional(),
     disallowedTools: z.array(z.string()).readonly(),
     subagents: z.array(z.string()).readonly().optional(),
+    leanMode: z.boolean().optional(),
   }),
   apply: (s, p) => ({
     modelAlias: p.modelAlias ?? s.modelAlias,
@@ -93,6 +99,7 @@ export const profileBind = ProfileModel.defineOp('profile.bind', {
     agentsMdPaths: p.agentsMdPaths ?? s.agentsMdPaths,
     disallowedTools: p.disallowedTools,
     subagents: p.subagents,
+    leanMode: p.leanMode ?? s.leanMode,
   }),
 });
 

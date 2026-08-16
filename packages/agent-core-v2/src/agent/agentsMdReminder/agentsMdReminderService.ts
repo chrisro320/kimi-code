@@ -34,6 +34,7 @@ import {
   loadAgentsMdDetailed,
 } from '#/agent/profile/context';
 import { ProfileModel } from '#/agent/profile/profileOps';
+import { composeLeanCapability } from '#/agent/toolSelect/minimalCatalogue';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
@@ -106,13 +107,17 @@ export class AgentAgentsMdReminderService
    * the reminder would put back exactly the text the mode removes. Read from
    * the wire rather than pushed in by `profile`: a session resume replays the
    * wire straight into `ProfileModel` without ever calling `bind`, so anything
-   * pushed at bind time is simply absent on the second run of a session.
+   * pushed at bind time is simply absent on the second run of a session. The
+   * session's own `leanMode` choice rides the same Model for the same reason,
+   * and folds into the declared capability before the test.
    */
   private get suppressed(): boolean {
-    const alias = this.wire.getModel(ProfileModel).modelAlias;
-    if (alias === undefined) return false;
+    const state = this.wire.getModel(ProfileModel);
+    if (state.modelAlias === undefined) return false;
     try {
-      return this.models.get(alias)?.capabilities.minimal_mode === true;
+      const capabilities = this.models.get(state.modelAlias)?.capabilities;
+      if (capabilities === undefined) return false;
+      return composeLeanCapability(capabilities, state.leanMode).minimal_mode === true;
     } catch {
       return false;
     }

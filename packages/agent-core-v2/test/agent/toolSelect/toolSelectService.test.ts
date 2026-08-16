@@ -59,6 +59,10 @@ import { AgentToolSelectSchemasService } from '#/agent/toolSelect/toolSelectSche
 import { AgentToolSelectService } from '#/agent/toolSelect/toolSelectService';
 import { SelectToolsTool } from '#/agent/tools/select-tools/selectToolsTool';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import {
+  composeLeanCapability,
+  LEAN_MODE_TOOL_NAMES,
+} from '#/agent/toolSelect/minimalCatalogue';
 import { IWireService } from '#/wire/wire';
 import { ILogService } from '#/_base/log/log';
 import { registerLogServices } from '../../_base/log/stubs';
@@ -1208,6 +1212,103 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
     const h = createHarness();
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
     expect(await announce(h)).toBeUndefined();
+  });
+});
+
+// Lean mode is the same regime chosen per session rather than declared per
+// model. It exists to keep the request prefix small, so where the declared mode
+// hands back the full catalogue on a miss, this one must not: that would send
+// every tool while the user believes the session is lean.
+describe('AgentToolSelectService lean mode', () => {
+  const [LEAN_READ, LEAN_SEARCH, LEAN_SHELL, LEAN_PATCH] = LEAN_MODE_TOOL_NAMES;
+
+  beforeEach(() => {
+    capabilities = composeLeanCapability(makeCapabilities({ tool_use: true }), true);
+  });
+
+  function registerLean(h: Harness, names: readonly string[] = LEAN_MODE_TOOL_NAMES): void {
+    for (const name of names) registerBuiltin(h, new EchoTool(name));
+  }
+
+  it('narrows the catalogue to the lean-ctx tools', () => {
+    const h = createHarness();
+    registerLean(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(new Set(LEAN_MODE_TOOL_NAMES));
+  });
+
+  it('sends the intersection when one lean tool is missing', () => {
+    const h = createHarness();
+    registerLean(h, [LEAN_READ!, LEAN_SEARCH!, LEAN_SHELL!]);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([LEAN_READ, LEAN_SEARCH, LEAN_SHELL]),
+    );
+    expect(shaped.map((entry) => entry.name)).not.toContain(OFF_CATALOGUE);
+  });
+
+  it('warns once about the missing lean tools', () => {
+    const h = createHarness();
+    registerLean(h, [LEAN_READ!]);
+
+    h.sut.shapeTools(h.registry.list());
+    h.sut.shapeTools(h.registry.list());
+
+    const warnings = h.eventBus.published.filter(
+      (event) => event.type === 'warning' && event.code === 'lean-mode-tools-unavailable',
+    );
+    expect(warnings).toHaveLength(1);
+    expect((warnings[0] as { message: string }).message).toContain(LEAN_PATCH!);
+  });
+
+  // The refusal to fall back is the whole contract: with no lean tool present
+  // the session composes nothing and says so, rather than quietly shipping the
+  // full catalogue the mode exists to avoid.
+  it('composes nothing and warns when no lean tool is available', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const entries = h.registry.list();
+    const shaped = h.sut.shapeTools(entries);
+
+    expect(shaped).toEqual([]);
+    expect(shaped).not.toBe(entries);
+    const warning = h.eventBus.published.find(
+      (event) => event.type === 'warning' && event.code === 'lean-mode-tools-unavailable',
+    );
+    expect((warning as { message: string } | undefined)?.message).toContain('lean-ctx MCP server');
+  });
+
+  // Sensitivity check for every assertion above: without the session flag the
+  // same capability object narrows nothing.
+  it('leaves the catalogue untouched when lean is not composed', () => {
+    capabilities = composeLeanCapability(makeCapabilities({ tool_use: true }), false);
+    const h = createHarness();
+    registerLean(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  // A model that declares the capability keeps the old all-or-nothing degrade;
+  // only the session-chosen mode narrows to the intersection.
+  it('keeps the declared capability degrading to the full catalogue', () => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
   });
 });
 

@@ -132,6 +132,14 @@ export interface CreateSessionOptions {
   readonly thinking?: string | undefined;
   readonly permission?: PermissionMode | undefined;
   readonly planMode?: boolean;
+  /**
+   * Compose the session's whole lifetime in lean mode: a one-line prompt with
+   * no workspace instructions, runtime context, skills, or plugin sections, no
+   * context injection, no external hooks, and the lean-ctx catalogue instead of
+   * the full tool set. Decided here because those are the request prefix — it
+   * cannot be turned on later without rewriting it.
+   */
+  readonly leanMode?: boolean;
   readonly metadata?: JsonObject | undefined;
   readonly kaos?: Kaos | undefined;
   readonly persistenceKaos?: Kaos | undefined;
@@ -296,6 +304,7 @@ export interface SessionStatus {
   readonly permission: PermissionMode;
   readonly planMode: boolean;
   readonly swarmMode?: boolean | undefined;
+  readonly leanMode?: boolean | undefined;
   readonly dispatchMode?: DispatchMode;
   readonly contextTokens: number;
   readonly maxContextTokens: number;
