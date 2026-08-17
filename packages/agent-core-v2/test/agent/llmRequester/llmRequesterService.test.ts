@@ -1177,6 +1177,8 @@ describe('AgentLLMRequesterService tool call id normalization', () => {
           id: 'resp-1',
         } satisfies ModelRequestEvent;
       },
+      compactConversation: async () => ({ kind: 'unsupported' }),
+      compactionLineage: () => undefined,
     };
   }
 

@@ -75,6 +75,7 @@ function sessionMetadataAt(iso: string): ISessionMetadata {
     read: async () => ({ id: 'test-session', createdAt, updatedAt: createdAt, archived: false }),
     update: async () => {},
     setTitle: async () => {},
+    setGeneratedTitleIfUncustomized: async () => false,
     setArchived: async () => {},
     registerAgent: async () => {},
   };

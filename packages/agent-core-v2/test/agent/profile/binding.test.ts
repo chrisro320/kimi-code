@@ -84,6 +84,7 @@ function sessionMetadataAt(iso: string): ISessionMetadata {
     }),
     update: async () => {},
     setTitle: async () => {},
+    setGeneratedTitleIfUncustomized: async () => false,
     setArchived: async () => {},
     registerAgent: async () => {},
   };
