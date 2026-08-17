@@ -274,6 +274,7 @@ describe('AgentProfileService.applyProfile', () => {
       },
       update: async () => {},
       setTitle: async () => {},
+      setGeneratedTitleIfUncustomized: async () => false,
       setArchived: async () => {},
       registerAgent: async () => {},
     };

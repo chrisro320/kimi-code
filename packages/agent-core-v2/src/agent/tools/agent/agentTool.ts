@@ -505,6 +505,7 @@ export class SubagentTool implements ISubagentTool {
     return {
       agentId,
       profileName,
+      parentToolCallId: toolCallId,
       model: displayModel,
       thinkingEffort,
       completion: completion.then(

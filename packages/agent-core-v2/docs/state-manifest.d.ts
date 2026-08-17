@@ -62,7 +62,7 @@
 //     agentsMdReminder.known                          src/agent/agentsMdReminder/agentsMdReminderService.ts
 //     agentsMdReminder.seeded                         src/agent/agentsMdReminder/agentsMdReminderService.ts
 //     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
-//     dateChange.seed                                 src/agent/dateChange/dateChangeService.ts
+//     dateChange.seed                                 src/features/dateChange/dateChangeService.ts
 //     externalHooks.stopHookContinuationUsed          src/agent/externalHooks/externalHooksService.ts
 //     fullCompaction.activeTurnId                     src/agent/fullCompaction/fullCompactionService.ts
 //     fullCompaction.compactionCountInTurn            src/agent/fullCompaction/fullCompactionService.ts
@@ -451,7 +451,7 @@ export interface SessionStateSnapshot {
     readonly id: string;
     readonly version?: number;
     readonly title?: string;
-    readonly isCustomTitle?: boolean;
+    readonly titleKind?: 'replaceable' | 'generated' | 'custom';
     readonly lastPrompt?: string;
     readonly createdAt: number;
     readonly updatedAt: number;
@@ -1052,12 +1052,6 @@ export interface AgentStateSnapshot {
   'agentsMdReminder.seeded': boolean;
   // src/agent/contextProjector/contextProjectorService.ts
   'contextProjector.lastRepairSignature': string | null;
-  // src/agent/dateChange/dateChangeService.ts
-  'dateChange.seed': /* DateDisclosure — packages/agent-core-v2/src/agent/dateChange/dateChangeService.ts */ {
-    readonly localDate: string;
-    readonly timeZone: string;
-    readonly renderGeneration: number;
-  } | undefined;
   // src/agent/externalHooks/externalHooksService.ts
   'externalHooks.stopHookContinuationUsed': boolean;
   // src/agent/fullCompaction/fullCompactionService.ts
@@ -1205,6 +1199,7 @@ export interface AgentStateSnapshot {
       readonly requestedScope: readonly string[];
       readonly paths: readonly string[];
     };
+    readonly parentToolCallId?: string;
     readonly model?: string;
     readonly thinkingEffort?: string;
     readonly taskId: string;
@@ -1254,6 +1249,12 @@ export interface AgentStateSnapshot {
     inputCacheCreation: number;
   } | undefined;
   'usage.currentTurnId': number | undefined;
+  // src/features/dateChange/dateChangeService.ts
+  'dateChange.seed': /* DateDisclosure — packages/agent-core-v2/src/features/dateChange/dateChangeService.ts */ {
+    readonly localDate: string;
+    readonly timeZone: string;
+    readonly renderGeneration: number;
+  } | undefined;
   // src/features/plan/injection/planModeInjection.ts
   'plan.wasActive': boolean;
 }
