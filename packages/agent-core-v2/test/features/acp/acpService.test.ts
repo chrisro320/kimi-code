@@ -21,6 +21,11 @@ import type { ContentPart, Message } from '#/kosong/contract/message';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 
+vi.mock('acp-kernel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('acp-kernel')>();
+  return { ...actual, prune: vi.fn(actual.prune) };
+});
+
 interface StoreHarness {
   readonly values: Map<string, unknown>;
   readonly get: Mock<(scope: string, key: string) => Promise<unknown>>;
@@ -1320,5 +1325,75 @@ describe('AcpService', () => {
       `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`,
     ) as AcpSidecar;
     expect((sidecar.compressionState as { blocks: unknown[] }).blocks).toHaveLength(1);
+  });
+
+  it('feeds the kernel the folded token count after compression', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    expect(folded.ok).toBe(true);
+    const core = (setup.service as unknown as { core: { processTurn: (input: { tokenCount: number }) => unknown } }).core;
+    const spy = vi.spyOn(core, 'processTurn');
+    const next = await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    expect(next.accounting).toBe('transformed');
+    const received = spy.mock.calls[0]![0].tokenCount;
+    expect(received).toBeGreaterThan(0);
+    expect(received).toBeLessThan(90_000);
+    expect(setup.service.status().contextUsage).toBe(received / 100_000);
+  });
+
+  it('passes the host token count through when no block is folded', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = [textMessage('one'), textMessage('two')];
+    setup.env.history = messages;
+    const core = (setup.service as unknown as { core: { processTurn: (input: { tokenCount: number }) => unknown } }).core;
+    const spy = vi.spyOn(core, 'processTurn');
+    const next = await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 85_000,
+      maxContextTokens: 100_000,
+    });
+    expect(next.accounting).toBe('transformed');
+    expect(spy.mock.calls[0]![0].tokenCount).toBe(85_000);
+    expect(setup.service.status().contextUsage).toBe(0.85);
+  });
+
+  it('falls back to the host token count when folding fails', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    expect(folded.ok).toBe(true);
+    const { prune } = await import('acp-kernel');
+    vi.mocked(prune).mockImplementationOnce(() => {
+      throw new Error('fold failed');
+    });
+    const core = (setup.service as unknown as { core: { processTurn: (input: { tokenCount: number }) => unknown } }).core;
+    const spy = vi.spyOn(core, 'processTurn');
+    const next = await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    expect(next.accounting).toBe('transformed');
+    expect(spy.mock.calls[0]![0].tokenCount).toBe(90_000);
+    expect(setup.service.status().health).toBe('healthy');
   });
 });
