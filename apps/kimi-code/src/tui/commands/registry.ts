@@ -331,6 +331,19 @@ export const BUILTIN_SLASH_COMMANDS = [
     argumentHint: '<instruction>',
   },
   {
+    name: 'acp',
+    aliases: [],
+    description: 'Manage the ACP context manager',
+    priority: 60,
+    argumentHint: '[status|enable|disable|reset]',
+    // status is read-only; enable/disable/reset mutate engine state and stay
+    // idle-only so they cannot interleave with an in-flight turn.
+    availability: (args) => {
+      const trimmed = args.trim();
+      return trimmed === '' || trimmed === 'status' ? 'always' : 'idle-only';
+    },
+  },
+  {
     name: 'goal',
     aliases: [],
     description: 'Start or manage an autonomous goal',

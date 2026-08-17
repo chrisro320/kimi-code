@@ -1,10 +1,17 @@
 /**
  * `fullCompaction` domain — `IAgentFullCompactionService` implementation.
  *
- * Runs full-history compaction: reserves the per-turn compaction slot, drives
- * the compaction LLM round (with overflow / truncation shrink retries),
- * applies the summary back into context memory, and recovers the loop from
+ * Runs full-history compaction: reserves the per-turn compaction slot, runs
+ * `hooks.onWillCompact` (PreCompact) exactly once, then either hands the
+ * round to the active context manager's `onWillCompact` delegate (whose
+ * `handled: true` return must already carry its durable wire mutation — the
+ * result is only a receipt) or drives the built-in compaction LLM round
+ * (with overflow / truncation shrink retries), and finishes both through
+ * one common envelope (prompt refresh → token counts → completion → settle
+ * last). Also recovers the loop from
  * context-overflow failures by blocking the turn on the in-flight job. The
+ * built-in round's remote and local requests share the orchestrator's
+ * single `LlmRequestContext` manager snapshot. The
  * mutable plain-data state (`compactionCountInTurn`,
  * `observedMaxContextTokensByModel`, `lastCompactedTokenCount`,
  * `consecutiveOverflowCompactions`, `activeTurnId`) is registered into
@@ -34,11 +41,11 @@ import { buildCompactionSummaryText, isRealUserInput } from '#/agent/contextMemo
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
-import { IAgentLLMRequesterService, type AgentLLMRequestFinish } from '#/agent/llmRequester/llmRequester';
+import { IAgentLLMRequesterService, type AgentLLMRequestFinish, type LlmRequestContext } from '#/agent/llmRequester/llmRequester';
 import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import { retryBackoffDelays, sleepForRetry } from '#/_base/utils/retry';
 import { IAgentLoopService, type LoopErrorContext } from '#/agent/loop/loop';
-import { isAbortError } from '#/_base/utils/abort';
+import { abortable, isAbortError } from '#/_base/utils/abort';
 import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
@@ -103,7 +110,6 @@ type CompactionTelemetryProperties = Pick<
 >;
 
 interface ActiveCompaction extends FullCompactionTask {
-  readonly originTurnId?: number;
   readonly quiescence?: IDisposable;
   trace?: LLMRequestTrace;
   blockedByTurn: boolean;
@@ -370,7 +376,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         () => this.cancelActive(active.task),
         { once: true },
       );
-      void this.compactionWorker(active.task, data).then(active.resolve, active.reject);
+      void this.compactionOrchestrator(active.task, data).then(active.resolve, active.reject);
       void active.task.promise.catch(() => undefined);
       return true;
     } catch (error) {
@@ -579,12 +585,32 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     );
   }
 
-  private async compactionWorker(
+  /**
+   * `originalHistory` is captured before PreCompact: messages a hook handler
+   * appends while compacting must stay out of the summarizer's history (and a
+   * changed prefix still cancels the round), exactly as when the hook ran
+   * inside the round after the snapshot. PreCompact runs exactly once, before
+   * the delegate/built-in branch. One manager snapshot covers the whole
+   * compaction: the built-in path's remote and local requests share this
+   * exact instance, and the delegate is invoked on the same resolved manager.
+   * The common envelope runs in a fixed order — settling task.promise stays
+   * with the begin() .then chain, which runs after this function (including
+   * the finally block) completes.
+   */
+  private async compactionOrchestrator(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
   ): Promise<CompactionResult> {
     try {
-      const result = await this.compactionRound(active, data);
+      const signal = active.abortController.signal;
+      signal.throwIfAborted();
+      const originalHistory = [...this.context.get()];
+      await this.hooks.onWillCompact.run(active);
+      const requestContext: LlmRequestContext = {
+        manager: this.llmRequester.getActiveContextManager(),
+        transform: 'apply',
+      };
+      const result = await this.runCompaction(active, data, requestContext, originalHistory, signal);
       if (this._compacting !== active) throw compactionCancelledReason(active);
       this.profile.requestSystemPromptRefresh();
       this.lastCompactedTokenCount = result.tokensAfter;
@@ -598,7 +624,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     } catch (error) {
       if (active.abortController.signal.aborted || isAbortError(error)) {
         this.cancelActive(active);
-        throw error;
+        throw isAbortError(error) ? error : compactionCancelledReason(active);
       }
       const blockedByTurn = this._compacting === active && active.blockedByTurn;
       if (this._compacting === active) {
@@ -619,6 +645,34 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         active.quiescence?.dispose();
       }
     }
+  }
+
+  /**
+   * The abort race keeps task.promise settling with an AbortError even when a
+   * delegate ignores the signal; the manager's own promise keeps running in
+   * the background and its late outcome is discarded. Delegate contract: the
+   * durable mutation (wire op) already landed before a handled return — the
+   * result is only a receipt.
+   */
+  private async runCompaction(
+    active: ActiveCompaction,
+    data: Readonly<CompactionBeginData>,
+    requestContext: LlmRequestContext,
+    originalHistory: readonly ContextMessage[],
+    signal: AbortSignal,
+  ): Promise<CompactionResult> {
+    const manager = requestContext.manager;
+    if (manager?.onWillCompact !== undefined) {
+      signal.throwIfAborted();
+      const delegation = await abortable(
+        Promise.resolve(manager.onWillCompact({ task: active, input: data, signal })),
+        signal,
+      );
+      if (delegation.handled) {
+        return delegation.result;
+      }
+    }
+    return this.compactionRound(active, data, requestContext, originalHistory);
   }
 
   /**
@@ -643,6 +697,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
     shapedHistory: readonly ContextMessage[],
+    requestContext: LlmRequestContext,
     signal: AbortSignal,
   ): Promise<
     { readonly checkpoint: CompactionCheckpoint; readonly usage: TokenUsage | null } | undefined
@@ -650,7 +705,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     if (this.profile.resolveModelContext().modelCapabilities.remote_compaction !== true) {
       return undefined;
     }
-    const outcome = await this.llmRequester.compact(
+    const outcome = await this.llmRequester.compactInternal(
+      requestContext,
       {
         history: shapedHistory,
         source: {
@@ -679,9 +735,10 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
   private async compactionRound(
     active: ActiveCompaction,
     data: Readonly<CompactionBeginData>,
+    requestContext: LlmRequestContext,
+    originalHistory: readonly ContextMessage[],
   ): Promise<CompactionResult> {
     const startedAt = Date.now();
-    const originalHistory = [...this.context.get()];
     const tokensBefore = this.requestTokens(originalHistory);
     let retryCount = 0;
     let thinkingEffort = this.profile.data().thinkingLevel;
@@ -689,8 +746,6 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     try {
       const signal = active.abortController.signal;
       signal.throwIfAborted();
-
-      await this.hooks.onWillCompact.run(active);
 
       const resolvedModel = this.profile.resolveModelContext();
       thinkingEffort = resolvedModel.thinkingLevel;
@@ -724,22 +779,27 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
-      // Remote compaction first when the model opted in (B4-G): the checkpoint
-      // preserves model-native state the text summary cannot, but it is never
-      // required — anything short of success falls through to the summarizer
-      // below, which runs either way (its output is the only portable record
-      // of the fold). The remote attempt sees the unshrunk history, and its
-      // failure does not consume the loop's retry/shrink budget.
-      //
-      // Both paths reach the same turn-aligned shape, by different routes: the
-      // summarizer goes through `llmRequester.start()` → `runRequest`, which
-      // shapes for it, while `compact()` never touches `runRequest` and so has
-      // to be handed a shaped history here. Tools already agree — `compact()`
-      // builds them with the same `shapeTools` call the turn uses.
+      /**
+       * Remote compaction first when the model opted in (B4-G): the checkpoint
+       * preserves model-native state the text summary cannot, but it is never
+       * required — anything short of success falls through to the summarizer
+       * below, which runs either way (its output is the only portable record
+       * of the fold). The remote attempt sees the unshrunk history, and its
+       * failure does not consume the loop's retry/shrink budget.
+       *
+       * Both paths reach the same turn-aligned shape, by different routes: the
+       * summarizer goes through `llmRequester.startInternal()` → `runRequest`,
+       * which shapes for it, while `compactInternal()` never touches
+       * `runRequest` and so has to be handed a shaped history here. Tools
+       * already agree — `compactInternal()` builds them with the same
+       * `shapeTools` call the turn uses. Both requests share the
+       * orchestrator's single `LlmRequestContext` snapshot.
+       */
       const remote = await this.tryRemoteCompaction(
         active,
         data,
         this.toolSelect.shapeHistory(originalHistory),
+        requestContext,
         signal,
       );
       const checkpoint = remote?.checkpoint;
@@ -749,7 +809,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         const estimatedCompactionRequestTokens = this.requestTokens(messages);
 
         try {
-          const request = this.llmRequester.start(
+          const request = this.llmRequester.startInternal(
+            requestContext,
             {
               messages,
               maxOutputSize: compactionMaxOutputSize,
@@ -1057,8 +1118,14 @@ function usageTelemetry(usage: TokenUsage | null): CompactionTelemetryProperties
 
 function compactionCancelledReason(active: ActiveCompaction | null): Error {
   const reason = active?.abortController.signal.reason;
-  if (reason instanceof Error) return reason;
-  const error = new Error('Compaction cancelled.');
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  let message = 'Compaction cancelled.';
+  if (reason instanceof Error) {
+    message = reason.message;
+  } else if (typeof reason === 'string' && reason !== '') {
+    message = reason;
+  }
+  const error = new Error(message);
   error.name = 'AbortError';
   return error;
 }

@@ -25,6 +25,7 @@ import type { Kaos } from '@moonshot-ai/kaos';
 
 import type { ApprovalHandler, QuestionHandler } from '#/events';
 import type {
+  AcpStatusInfo,
   AddAdditionalDirInput,
   AddAdditionalDirResult,
   AgentCommandInfo,
@@ -615,6 +616,34 @@ export abstract class SDKRpcClientBase {
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
     });
+  }
+
+  async acpStatus(_input: SessionIdRpcInput): Promise<AcpStatusInfo> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support the ACP context manager.',
+    );
+  }
+
+  async acpEnable(_input: SessionIdRpcInput): Promise<void> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support the ACP context manager.',
+    );
+  }
+
+  async acpDisable(_input: SessionIdRpcInput): Promise<void> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support the ACP context manager.',
+    );
+  }
+
+  async acpReset(_input: SessionIdRpcInput): Promise<void> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support the ACP context manager.',
+    );
   }
 
   async undoHistory(input: SessionIdRpcInput & { count: number }): Promise<void> {

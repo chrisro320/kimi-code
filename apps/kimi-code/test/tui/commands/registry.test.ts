@@ -143,12 +143,24 @@ describe('built-in slash command registry', () => {
     expect(resolveSlashCommandAvailability(goal!, 'replace Ship feature Y')).toBe('idle-only');
   });
 
+  it('registers acp with status always available and mutations idle-only', () => {
+    const acp = findBuiltInSlashCommand('acp');
+    expect(acp).toBeDefined();
+    expect(resolveSlashCommandAvailability(acp!, '')).toBe('always');
+    expect(resolveSlashCommandAvailability(acp!, 'status')).toBe('always');
+    expect(resolveSlashCommandAvailability(acp!, 'enable')).toBe('idle-only');
+    expect(resolveSlashCommandAvailability(acp!, 'disable')).toBe('idle-only');
+    expect(resolveSlashCommandAvailability(acp!, 'reset')).toBe('idle-only');
+    expect(resolveSlashCommandAvailability(acp!, 'bogus')).toBe('idle-only');
+  });
+
   it('contains the expected command names once', () => {
     const names = BUILTIN_SLASH_COMMANDS.map((command) => command.name);
 
     expect(new Set(names).size).toBe(names.length);
     expect(names).toEqual(
       expect.arrayContaining([
+        'acp',
         'add-dir',
         'compact',
         'btw',

@@ -291,6 +291,9 @@ export * from '#/app/flag/flagService';
 
 export * from '#/agent/activityView/activityView';
 import '#/agent/activityView/activityViewService';
+export * from '#/features/acp/acp';
+export * from '#/features/acp/acpService';
+import '#/features/acp/acpFeature';
 export * from '#/features/btw/btw';
 export * from '#/features/btw/btwService';
 import '#/features/btw/btwFeature';

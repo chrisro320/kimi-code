@@ -18,6 +18,8 @@ const promptContext: AgentProfileContext = {
 
 const GOAL_TOOLS = ['CreateGoal', 'GetGoal', 'SetGoalBudget', 'UpdateGoal'] as const;
 
+const ACP_TOOLS = ['compress', 'decompress', 'search_context', 'acp_status'] as const;
+
 const SUBAGENT_PROFILES = [
   'coder',
   'coder-ex',
@@ -55,6 +57,16 @@ describe('builtin agent profiles', () => {
       const tools = profileByName(name).tools ?? [];
       for (const goalTool of GOAL_TOOLS) {
         expect(tools, `${name} must not expose ${goalTool}`).not.toContain(goalTool);
+      }
+    }
+  });
+
+  it('lists ACP tools on the agent profile but not on subagent profiles', () => {
+    expect(profileByName('agent').tools).toEqual(expect.arrayContaining([...ACP_TOOLS]));
+    for (const name of SUBAGENT_PROFILES) {
+      const tools = profileByName(name).tools ?? [];
+      for (const acpTool of ACP_TOOLS) {
+        expect(tools, `${name} must not expose ${acpTool}`).not.toContain(acpTool);
       }
     }
   });

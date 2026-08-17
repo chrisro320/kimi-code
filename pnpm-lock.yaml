@@ -649,6 +649,9 @@ importers:
       '@mozilla/readability':
         specifier: ^0.6.0
         version: 0.6.0
+      acp-kernel:
+        specifier: 0.0.18
+        version: 0.0.18
       ajv:
         specifier: ^8.18.0
         version: 8.18.0
@@ -4766,6 +4769,10 @@ packages:
     resolution: {integrity: sha512-xRQbDb9BnwDafYNn6Vwl839DYVjqXYb1XVGtWAZ1kcDc6iwAL4hg3B1dZlRiuENFeO2H53gFG3in621AdERVAg==}
     engines: {node: '>=0.4.0'}
     hasBin: true
+
+  acp-kernel@0.0.18:
+    resolution: {integrity: sha512-V9QLaUvutOr3eSYuDMPfjkK3jUKexueiLsU2kEFpXUu6jeALjHACPZbYSYDxxpE1OkRDaD1XXxcjV+Q/t6v4NQ==}
+    engines: {node: '>=20'}
 
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
@@ -13576,6 +13583,8 @@ snapshots:
       negotiator: 1.0.0
 
   acorn@8.17.0: {}
+
+  acp-kernel@0.0.18: {}
 
   agent-base@7.1.4: {}
 

@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   agentEventSchema,
+  agentStatusUpdatedEventSchema,
   assistantDeltaEventSchema,
   eventSchema,
   shellCompletedEventSchema,
@@ -104,6 +105,18 @@ describe('events / display re-exports', () => {
         type: 'unknown.event',
         turnId: 1,
       }).success,
+    ).toBe(false);
+  });
+
+  it('preserves the acp health field on agent.status.updated', () => {
+    for (const acp of ['healthy', 'degraded'] as const) {
+      expect(agentStatusUpdatedEventSchema.parse({ type: 'agent.status.updated', acp })).toEqual({
+        type: 'agent.status.updated',
+        acp,
+      });
+    }
+    expect(
+      agentStatusUpdatedEventSchema.safeParse({ type: 'agent.status.updated', acp: 'off' }).success,
     ).toBe(false);
   });
 

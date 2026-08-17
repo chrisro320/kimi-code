@@ -25,7 +25,12 @@ import {
 } from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterService';
-import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
+import {
+  IAgentLLMRequesterService,
+  type ContextManager,
+  type TransformResult,
+} from '#/agent/llmRequester/llmRequester';
+import { CONTEXT_MANAGER_SECTION } from '#/agent/llmRequester/configSection';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -130,6 +135,19 @@ function createRequester(
 
 let disposables: DisposableStore;
 
+function yieldUsage(requester: ModelRequester): ModelRequester {
+  const base = requester.request.bind(requester);
+  requester.request = async function* (input, signal, options) {
+    yield {
+      type: 'usage',
+      usage: { inputOther: 40, output: 2, inputCacheRead: 0, inputCacheCreation: 0 },
+      model: 'wire-model',
+    };
+    yield* base(input, signal, options);
+  };
+  return requester;
+}
+
 beforeEach(() => {
   disposables = new DisposableStore();
 });
@@ -154,6 +172,8 @@ function createService(
     readonly capabilitiesOverride?: ModelCapability;
     readonly historyOverride?: readonly ContextMessage[];
     readonly contextMessages?: Message[];
+    readonly configValues?: Record<string, unknown>;
+    readonly tokenCounts?: { readonly size: number; readonly measured: number; readonly estimated: number };
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
@@ -180,10 +200,12 @@ function createService(
     }),
   };
   const measuredCalls: { readonly messages: number; readonly usage: TokenUsage }[] = [];
+  const measuredSnapshots: (readonly Message[])[] = [];
   const tokenCounting = {
-    get: () => ({ size: 0, measured: 0, estimated: 0 }),
+    get: () => options.tokenCounts ?? { size: 0, measured: 0, estimated: 0 },
     measured: (input: readonly Message[], _output: readonly Message[], usage: TokenUsage) => {
       measuredCalls.push({ messages: input.length, usage });
+      measuredSnapshots.push(input);
     },
   };
   const usage = { record: () => undefined, status: () => ({}) };
@@ -192,9 +214,18 @@ function createService(
   };
   const tools = { list: () => [] };
   const config: Partial<IConfigService> = {
-    get: (() => undefined) as IConfigService['get'],
+    get: ((section: string) => options.configValues?.[section]) as IConfigService['get'],
   };
-  const log = { info: () => undefined, warn: () => undefined };
+  const warnings: { readonly message: string; readonly payload: unknown }[] = [];
+  const infos: { readonly message: string; readonly payload: unknown }[] = [];
+  const log = {
+    info: (message: string, payload?: unknown) => {
+      infos.push({ message, payload });
+    },
+    warn: (message: string, payload?: unknown) => {
+      warnings.push({ message, payload });
+    },
+  };
   const telemetryRecords: TelemetryRecord[] = [];
   const telemetry = recordingTelemetry(telemetryRecords);
   const toolSelect: Partial<IAgentToolSelectService> = {
@@ -257,6 +288,9 @@ function createService(
     events,
     telemetryRecords,
     measuredCalls,
+    measuredSnapshots,
+    warnings,
+    infos,
   };
 }
 
@@ -1129,6 +1163,728 @@ describe('AgentLLMRequesterService compact', () => {
     await service.compact({ retainedMessages: retained });
 
     expect(captured.input!.retainedMessages).toEqual(retained);
+  });
+
+  it('passes the compact history through the active manager transform', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        transformCalls += 1;
+        return {
+          accounting: 'transformed',
+          messages: messages.map((message) => ({
+            ...message,
+            content: [{ type: 'text' as const, text: 'compressed' }],
+          })),
+        };
+      },
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(manager);
+
+    const plain: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }], toolCalls: [] },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply' }], toolCalls: [] },
+    ];
+    await service.compact({ history: plain });
+
+    expect(transformCalls).toBe(1);
+    expect(captured.input!.history.length).toBeGreaterThan(0);
+    expect(
+      captured.input!.history.every(
+        (item) =>
+          item.kind === 'checkpoint' ||
+          item.message.content.every(
+            (part) =>
+              (part as { type: string }).type !== 'text' ||
+              (part as { text?: string }).text === 'compressed',
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it('skips the transform for a bypass request context', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        transformCalls += 1;
+        return { messages, accounting: 'transformed' };
+      },
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(manager);
+
+    await service.compactInternal(
+      { manager: undefined, transform: 'bypass' },
+      { history: historyWithCheckpoint(checkpoint()) },
+    );
+
+    expect(transformCalls).toBe(0);
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+  });
+
+  it('accepts a transform that preserves the checkpoint carrier', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const preserving: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) =>
+          message.content.some((part) => (part as { type: string }).type === 'compaction')
+            ? message
+            : { ...message, content: [{ type: 'text' as const, text: 'compressed' }] },
+        ),
+      }),
+    };
+    const { service } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(preserving);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'compressed' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+  });
+
+  it('falls back to the original messages when the transform loses the carrier', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const dropping: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.filter(
+          (message) =>
+            !message.content.some((part) => (part as { type: string }).type === 'compaction'),
+        ),
+      }),
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(dropping);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'kept' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
+  });
+
+  it('falls back when a transform moves a carrier into another message envelope', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const moving: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        const carrierMessage = messages.find((message) =>
+          message.content.some((part) => (part as { type: string }).type === 'compaction'),
+        )!;
+        const carrier = carrierMessage.content.find(
+          (part) => (part as { type: string }).type === 'compaction',
+        )!;
+        return {
+          accounting: 'transformed',
+          messages: [
+            { ...messages[0]!, content: [...messages[0]!.content, carrier] },
+            { ...carrierMessage, content: [] },
+          ],
+        };
+      },
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(moving);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
+  });
+
+  it('falls back to the original messages when the transform rewrites a carrier in place', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const mutating: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => {
+        const carrier = messages
+          .flatMap((message) => message.content)
+          .find((part) => (part as { type: string }).type === 'compaction') as
+          | ({ encrypted: string } & { type: string })
+          | undefined;
+        if (carrier !== undefined) carrier.encrypted = 'rewritten-in-place';
+        return { messages, accounting: 'transformed' };
+      },
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(mutating);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    const replayed = captured.input!.history[1];
+    expect(replayed).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(replayed!.kind === 'checkpoint' ? replayed!.checkpoint.encrypted : undefined).toBe(
+      'opaque-payload',
+    );
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(true);
+  });
+
+  it('accepts a transform whose carrier property insertion order differs', async () => {
+    const captured: { input?: ModelCompactionInput } = {};
+    const requester = compactCapableRequester(captured, OK_OUTCOME);
+    const reordering: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) => {
+          if (
+            !message.content.some((part) => (part as { type: string }).type === 'compaction')
+          ) {
+            return { ...message, content: [{ type: 'text' as const, text: 'compressed' }] };
+          }
+          return {
+            ...message,
+            content: message.content.map((part) => {
+              const carrier = part as unknown as { type: 'compaction' } & CompactionCheckpoint;
+              if (carrier.type !== 'compaction') return part;
+              const { type, ...checkpoint } = carrier;
+              return { ...checkpoint, type } as unknown as Message['content'][number];
+            }),
+          };
+        }),
+      }),
+    };
+    const { service, warnings } = createService(requester, undefined, {
+      capabilitiesOverride: { ...capabilities, remote_compaction: true },
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(reordering);
+    const cp = checkpoint();
+
+    await service.compact({ history: historyWithCheckpoint(cp) });
+
+    expect(captured.input!.history.map((item) => item.kind)).toEqual(['message', 'checkpoint']);
+    expect(captured.input!.history[0]).toMatchObject({
+      kind: 'message',
+      message: { content: [{ type: 'text', text: 'compressed' }] },
+    });
+    expect(captured.input!.history[1]).toEqual({ kind: 'checkpoint', checkpoint: cp });
+    expect(warnings.some((entry) => entry.message.includes('compaction carriers'))).toBe(false);
+  });
+});
+
+describe('AgentLLMRequesterService context manager registration', () => {
+  function stubManager(id: string): ContextManager {
+    return {
+      id,
+      version: '1',
+      transformMessages: (input) => ({ messages: input.messages, accounting: 'raw-equivalent' }),
+    };
+  }
+
+  it('throws on a duplicate registration and restores the slot on dispose', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+
+    const registration = service.registerContextManager(stubManager('alpha'));
+    expect(() => service.registerContextManager(stubManager('beta'))).toThrow(
+      /already registered/,
+    );
+
+    registration.dispose();
+    expect(service.getActiveContextManager()).toBeUndefined();
+
+    const replacement = service.registerContextManager(stubManager('alpha'));
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    replacement.dispose();
+  });
+
+  it('resolves the manager only when the config section names its id', () => {
+    const { service: disabled } = createService(createRequester({ value: 0 }), undefined);
+    disabled.registerContextManager(stubManager('alpha'));
+    expect(disabled.getActiveContextManager()).toBeUndefined();
+
+    const { service: enabled } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+    const manager = stubManager('alpha');
+    enabled.registerContextManager(manager);
+    expect(enabled.getActiveContextManager()).toBe(manager);
+  });
+
+  it('warns once on first resolution when the configured id has no matching registration', () => {
+    const { service, warnings } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'ghost' },
+    });
+
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+
+    service.registerContextManager(stubManager('other'));
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+  });
+
+  it('logs once on the first successful activation and stays silent afterwards', () => {
+    const { service, infos } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+
+    service.registerContextManager(stubManager('alpha'));
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(infos.filter((entry) => entry.message.includes('"alpha"'))).toHaveLength(1);
+
+    const { service: quiet } = createService(createRequester({ value: 0 }), undefined);
+    quiet.registerContextManager(stubManager('alpha'));
+    expect(quiet.getActiveContextManager()).toBeUndefined();
+  });
+});
+
+describe('AgentLLMRequesterService context transform pipeline', () => {
+  const enabledConfig = { [CONTEXT_MANAGER_SECTION]: 'pipe' };
+  const sentinel: Message[] = [
+    { role: 'user', content: [{ type: 'text', text: 'sentinel' }], toolCalls: [] },
+  ];
+  const sentinelProjector = {
+    project: () => sentinel,
+    projectStrict: () => sentinel,
+  };
+
+  it('keeps both disabled cases byte-identical, reference-identical, and manager-free', async () => {
+    const baselineCaptured: ModelRequestInput[] = [];
+    const baseline = createService(
+      createRequester({ value: 0 }, null, [], baselineCaptured),
+      sentinelProjector,
+    );
+    await baseline.service.request();
+
+    let transformCalls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        transformCalls += 1;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const registeredCaptured: ModelRequestInput[] = [];
+    const registered = createService(
+      createRequester({ value: 0 }, null, [], registeredCaptured),
+      sentinelProjector,
+    );
+    registered.service.registerContextManager(manager);
+    await registered.service.request();
+
+    expect(transformCalls).toBe(0);
+    expect(baselineCaptured).toHaveLength(1);
+    expect(registeredCaptured).toHaveLength(1);
+    expect(registeredCaptured[0]).toEqual(baselineCaptured[0]);
+    expect(baselineCaptured[0]!.messages).toBe(sentinel);
+    expect(registeredCaptured[0]!.messages).toBe(sentinel);
+  });
+
+  it('does not poison the transform queue after a rejection', async () => {
+    let calls = 0;
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) throw new Error('transform boom');
+        return { messages: input.messages, accounting: 'transformed' };
+      },
+    };
+    const captured: ModelRequestInput[] = [];
+    const { service } = createService(createRequester({ value: 0 }, null, [], captured), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    await expect(service.request()).rejects.toThrow('transform boom');
+    await service.request();
+
+    expect(calls).toBe(2);
+    expect(captured).toHaveLength(1);
+  });
+
+  it('aborts only the cancelled queue entry', async () => {
+    let calls = 0;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<TransformResult>((_resolve, reject) => {
+            firstStarted();
+            input.signal.addEventListener('abort', () => reject(input.signal.reason), {
+              once: true,
+            });
+          });
+        }
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const controller = new AbortController();
+    const first = service.request({}, undefined, controller.signal);
+    await started;
+    const second = service.request();
+    controller.abort();
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await second;
+    expect(calls).toBe(2);
+  });
+
+  it('aborts an in-flight transform when the service is disposed', async () => {
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) =>
+        new Promise<TransformResult>((_resolve, reject) => {
+          transformStarted();
+          input.signal.addEventListener('abort', () => reject(input.signal.reason), {
+            once: true,
+          });
+        }),
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const pending = service.request();
+    await started;
+    (service as unknown as { dispose(): void }).dispose();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('unblocks the transform queue when a manager ignores the abort signal', async () => {
+    let calls = 0;
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        if (calls === 1) {
+          transformStarted();
+          return new Promise<TransformResult>(() => {});
+        }
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const controller = new AbortController();
+    const first = service.request({}, undefined, controller.signal);
+    await started;
+    controller.abort();
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await service.request();
+    expect(calls).toBe(2);
+  });
+
+  it('settles an in-flight transform on dispose even when the manager ignores the signal', async () => {
+    let transformStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      transformStarted = resolve;
+    });
+    const manager: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: () => {
+        transformStarted();
+        return new Promise<TransformResult>(() => {});
+      },
+    };
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: enabledConfig,
+    });
+    service.registerContextManager(manager);
+
+    const pending = service.request();
+    await started;
+    (service as unknown as { dispose(): void }).dispose();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('AgentLLMRequesterService identity and test transformers', () => {
+  it('identity manager: manager runs yet the payload stays byte-identical to disabled', async () => {
+    const baselineCaptured: ModelRequestInput[] = [];
+    const baseline = createService(
+      createRequester({ value: 0 }, null, [], baselineCaptured),
+      undefined,
+    );
+    await baseline.service.request();
+
+    let calls = 0;
+    const identity: ContextManager = {
+      id: 'identity',
+      version: '1',
+      transformMessages: (input) => {
+        calls += 1;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+    const captured: ModelRequestInput[] = [];
+    const { service, measuredCalls } = createService(
+      yieldUsage(createRequester({ value: 0 }, null, [], captured)),
+      undefined,
+      { configValues: { [CONTEXT_MANAGER_SECTION]: 'identity' } },
+    );
+    service.registerContextManager(identity);
+    await service.request();
+
+    expect(calls).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(JSON.stringify(captured[0])).toBe(JSON.stringify(baselineCaptured[0]));
+    expect(measuredCalls).toHaveLength(1);
+  });
+
+  it('test transformer: replacement lands while adjacency, think, and toolCallId stay legal', async () => {
+    const toolHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'run the tool' }], toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: 'thinking…', encrypted: 'enc-blob' },
+          { type: 'text', text: 'calling the tool' },
+        ],
+        toolCalls: [{ type: 'function', id: 'call-1', name: 'Lookup', arguments: '{"q":"x"}' }],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: 'x'.repeat(500) }],
+        toolCalls: [],
+        toolCallId: 'call-1',
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'final answer' }], toolCalls: [] },
+    ];
+    const truncating: ContextManager = {
+      id: 'trunc',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) =>
+          message.role === 'tool'
+            ? { ...message, content: [{ type: 'text' as const, text: '[truncated]' }] }
+            : message,
+        ),
+      }),
+    };
+    const captured: ModelRequestInput[] = [];
+    const passthrough = {
+      project: (messages: readonly ContextMessage[]) => [...messages],
+      projectStrict: (messages: readonly ContextMessage[]) => [...messages],
+    };
+    const { service } = createService(
+      createRequester({ value: 0 }, null, [], captured),
+      passthrough,
+      {
+        historyOverride: toolHistory,
+        configValues: { [CONTEXT_MANAGER_SECTION]: 'trunc' },
+      },
+    );
+    service.registerContextManager(truncating);
+    await service.request();
+
+    expect(captured).toHaveLength(1);
+    const messages = captured[0]!.messages;
+    const assistant = messages[1]!;
+    const tool = messages[2]!;
+    expect(assistant.role).toBe('assistant');
+    expect(assistant.toolCalls.map((call) => call.id)).toEqual(['call-1']);
+    expect(tool.role).toBe('tool');
+    expect(tool.toolCallId).toBe('call-1');
+    expect(assistant.content[0]).toEqual({
+      type: 'think',
+      think: 'thinking…',
+      encrypted: 'enc-blob',
+    });
+    expect(tool.content).toEqual([{ type: 'text', text: '[truncated]' }]);
+    expect(JSON.stringify(messages)).not.toContain('x'.repeat(500));
+  });
+});
+
+describe('AgentLLMRequesterService transform accounting', () => {
+  const ACCOUNTING_LINEAGE = { provider: 'p', model: 'wire-model', baseUrl: 'https://example.test' };
+
+  function accountingCheckpoint(): CompactionCheckpoint {
+    return {
+      encrypted: 'opaque-payload',
+      itemType: 'compaction',
+      lineage: { ...ACCOUNTING_LINEAGE },
+      replayInputTokens: { kind: 'unknown' },
+    };
+  }
+
+  function identityManager(id: string, captured?: { usedContextTokens?: number }): ContextManager {
+    return {
+      id,
+      version: '1',
+      transformMessages: (input) => {
+        if (captured !== undefined) captured.usedContextTokens = input.usedContextTokens;
+        return { messages: input.messages, accounting: 'raw-equivalent' };
+      },
+    };
+  }
+
+  it('writes no raw-context anchor when the call reports transformed', async () => {
+    const transforming: ContextManager = {
+      id: 'pipe',
+      version: '1',
+      transformMessages: ({ messages }) => ({
+        accounting: 'transformed',
+        messages: messages.map((message) => ({ ...message })),
+      }),
+    };
+    const { service, measuredCalls } = createService(
+      yieldUsage(createRequester({ value: 0 }, null)),
+      undefined,
+      { configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' } },
+    );
+    service.registerContextManager(transforming);
+
+    await service.request();
+
+    expect(measuredCalls).toHaveLength(0);
+  });
+
+  it('passes tokenCounting.get().size as usedContextTokens, not the measured floor', async () => {
+    const captured: { usedContextTokens?: number } = {};
+    const { service } = createService(createRequester({ value: 0 }, null), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+      tokenCounts: { size: 777, measured: 100, estimated: 677 },
+    });
+    service.registerContextManager(identityManager('pipe', captured));
+
+    await service.request();
+
+    expect(captured.usedContextTokens).toBe(777);
+  });
+
+  it('anchors against the pre-shaping snapshot even when the projector merges adjacent user messages', async () => {
+    const history: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'user', content: [{ type: 'text', text: 'second' }], toolCalls: [], origin: { kind: 'user' } },
+    ];
+    const captured: ModelRequestInput[] = [];
+    const { service, measuredSnapshots } = createService(
+      yieldUsage(createRequester({ value: 0 }, null, [], captured)),
+      undefined,
+      {
+        historyOverride: history,
+        configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+      },
+    );
+    service.registerContextManager(identityManager('pipe'));
+
+    await service.request();
+
+    expect(captured[0]!.messages).toHaveLength(1);
+    expect(measuredSnapshots).toHaveLength(1);
+    expect(measuredSnapshots[0]).toHaveLength(2);
+    expect(measuredSnapshots[0]![0]).toBe(history[0]);
+    expect(measuredSnapshots[0]![1]).toBe(history[1]);
+  });
+
+  it('anchors against the pre-projection snapshot around checkpoint replay', async () => {
+    const cp = accountingCheckpoint();
+    const history: ContextMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'kept' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'readable summary' }],
+        toolCalls: [],
+        origin: { kind: 'compaction_summary', checkpoint: cp },
+      },
+    ];
+    const captured: ModelRequestInput[] = [];
+    const requester = yieldUsage(createRequester({ value: 0 }, null, [], captured));
+    requester.compactionLineage = () => ({ ...ACCOUNTING_LINEAGE });
+    const { service, measuredSnapshots } = createService(requester, undefined, {
+      historyOverride: history,
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'pipe' },
+    });
+    service.registerContextManager(identityManager('pipe'));
+
+    await service.request();
+
+    const parts = captured[0]!.messages.flatMap((message) => message.content);
+    expect(parts.some((part) => (part as { type: string }).type === 'compaction')).toBe(true);
+    expect(measuredSnapshots).toHaveLength(1);
+    expect(measuredSnapshots[0]).toHaveLength(2);
+    expect(measuredSnapshots[0]![0]).toBe(history[0]);
+    expect(measuredSnapshots[0]![1]).toBe(history[1]);
   });
 });
 

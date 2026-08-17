@@ -56,6 +56,7 @@ export interface AppState {
   leanMode?: boolean;
   /** Whether the live session was actually created in lean mode. */
   leanModeActive?: boolean;
+  acp?: 'healthy' | 'degraded';
   dispatchMode: DispatchMode;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');
    * mirrors the runtime. The single source of truth for the thinking state in

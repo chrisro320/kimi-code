@@ -31,6 +31,7 @@ export interface AgentStatusUpdatedEvent {
   readonly permission?: PermissionMode;
   readonly usage?: UsageStatus;
   readonly phase?: AgentPhase;
+  readonly acp?: 'healthy' | 'degraded';
 }
 
 export interface AgentCreatedEvent {

@@ -20,6 +20,7 @@ import type {
   TranscriptEntry,
 } from '../types';
 import { formatErrorMessage } from '../utils/event-payload';
+import { handleAcpCommand } from './acp';
 import { handleLoginCommand, handleLogoutCommand } from './auth';
 import { handleBtwCommand } from './btw';
 import { handleCopyCommand } from './copy';
@@ -336,6 +337,7 @@ async function ensureSessionForCommand(host: SlashCommandHost): Promise<Session 
 
 /** Builtin commands that need an active session; lazy-created on first use. */
 const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set([
+  'acp',
   'btw',
   'compact',
   'export-debug-zip',
@@ -500,6 +502,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'compact':
       await handleCompactCommand(host, args);
+      return;
+    case 'acp':
+      await handleAcpCommand(host, args);
       return;
     case 'goal':
       await handleGoalCommand(host, args);

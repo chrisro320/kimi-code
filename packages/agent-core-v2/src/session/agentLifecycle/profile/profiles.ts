@@ -48,6 +48,10 @@ const AGENT_TOOLS = [
   'GetGoal',
   'SetGoalBudget',
   'UpdateGoal',
+  'compress',
+  'decompress',
+  'search_context',
+  'acp_status',
   'mcp__*',
 ] as const;
 

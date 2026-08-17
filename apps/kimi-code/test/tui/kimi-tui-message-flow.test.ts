@@ -15,6 +15,7 @@ import type {
   Event,
   GoalSnapshot,
 } from '@moonshot-ai/kimi-code-sdk';
+import { ErrorCodes, KimiError } from '@moonshot-ai/kimi-code-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel';
@@ -204,6 +205,15 @@ function makeSession(overrides: Record<string, unknown> = {}) {
       contextUsage: 0,
     })),
     getGoal: vi.fn(async () => ({ goal: null })),
+    acpStatus: vi.fn(async () => ({
+      enabled: false,
+      managerId: 'acp-kernel',
+      managerVersion: '0.1.0',
+      health: 'healthy' as const,
+      refs: 0,
+      blocks: 0,
+      activeBlocks: 0,
+    })),
     updateMetadata: vi.fn(async () => {}),
     setApprovalHandler: vi.fn(),
     setQuestionHandler: vi.fn(),
@@ -1154,6 +1164,40 @@ describe('KimiTUI message flow', () => {
       expect(driver.state.appState.model).toBe('');
     });
     expect(driver.state.appState.maxContextTokens).toBe(0);
+  });
+
+  it('hydrates the ACP badge from the session status on activation (v2 engine)', async () => {
+    const session = makeSession({
+      acpStatus: vi.fn(async () => ({
+        enabled: true,
+        managerId: 'acp-kernel',
+        managerVersion: '0.1.0',
+        health: 'degraded' as const,
+        reason: 'sidecar corrupt',
+        refs: 3,
+        blocks: 1,
+        activeBlocks: 1,
+      })),
+    });
+
+    const { driver } = await makeDriver(session);
+
+    expect(driver.state.appState.acp).toBe('degraded');
+  });
+
+  it('leaves the ACP badge unset when the session does not support ACP', async () => {
+    const session = makeSession({
+      acpStatus: vi.fn(async () => {
+        throw new KimiError(
+          ErrorCodes.NOT_IMPLEMENTED,
+          'This SDK client does not support the ACP context manager.',
+        );
+      }),
+    });
+
+    const { driver } = await makeDriver(session);
+
+    expect(driver.state.appState.acp).toBeUndefined();
   });
 
   it('does not re-enter plan mode on /plan on when config already applied it (v2 engine)', async () => {
@@ -4224,6 +4268,48 @@ command = "vim"
 
     expect(driver.state.appState.model).toBe('turbo');
     expect(driver.state.appState.thinkingEffort).toBe('mid');
+  });
+
+  it('applies the acp health slice from status updates', async () => {
+    const { driver } = await makeDriver();
+
+    expect(driver.state.appState.acp).toBeUndefined();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        acp: 'healthy',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('healthy');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        acp: 'degraded',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('degraded');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        model: 'turbo',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.acp).toBe('degraded');
   });
 
   it('renders swarm mode markers from /swarm commands, not tool-triggered status updates', async () => {

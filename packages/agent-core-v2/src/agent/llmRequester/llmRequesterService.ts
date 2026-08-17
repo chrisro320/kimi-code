@@ -26,14 +26,19 @@
  * warnings through `eventBus`, records durable request-trace Ops
  * through `wire`, reports each request's `x-trace-id` to its caller, and
  * reports provider failures through `telemetry`. The mutable request state
- * (`lastConfigLogSignature`, `turnConfigs`, `mediaDegradedTurns`,
- * `mediaStrippedTurns`, `emittedThinkingEffortWarnings`) is registered into
- * `agentState` (`IAgentStateService`) and read/written through it. Bound at
- * Agent scope.
+ * `turnConfigs`, `mediaDegradedTurns`, `mediaStrippedTurns`,
+ * `emittedThinkingEffortWarnings`, `contextManagerMismatchWarnings`) is
+ * registered into `agentState` (`IAgentStateService`) and read/written
+ * through it. The opt-in request-time context manager
+ * (`ContextManager`, registered per agent and activated through the
+ * engine-internal `contextManager` config section) threads through every
+ * request/compaction as an `LlmRequestContext`; unregistered or
+ * unconfigured means zero-cost passthrough. Bound at Agent scope.
  */
 
 import { createHash } from 'node:crypto';
 import { LifecycleScope } from '#/app/scopes';
+import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -63,6 +68,7 @@ import { isToolCall, type Message, type StreamedMessagePart } from '#/kosong/con
 import {
   type CompactionCheckpoint,
   type ModelHistoryItem,
+  type ReplayInputTokenEstimate,
 } from '#/kosong/contract/compaction';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
@@ -97,8 +103,13 @@ import {
   type AgentLLMRequestPartHandler,
   type AgentLLMRequestSource,
   type AgentLLMRequestTask,
+  type ContextManager,
+  type LlmRequestContext,
   type PreparedTurnRequestConfig,
+  type TransformAccounting,
+  type TransformResult,
 } from './llmRequester';
+import { CONTEXT_MANAGER_SECTION } from './configSection';
 import {
   projectModelHistory,
   type CheckpointTarget,
@@ -114,7 +125,7 @@ import {
   llmToolsSnapshot,
   type LlmRequestToolSchema,
 } from './llmRequestOps';
-import { isAbortError } from '#/_base/utils/abort';
+import { abortable, isAbortError } from '#/_base/utils/abort';
 import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
 import { retryErrorFields } from '#/_base/utils/retry';
 
@@ -179,6 +190,14 @@ export const llmRequesterEmittedThinkingEffortWarningsKey = defineState<Set<stri
   'llmRequester.emittedThinkingEffortWarnings',
   () => new Set(),
 );
+export const llmRequesterContextManagerMismatchWarningsKey = defineState<Set<string>>(
+  'llmRequester.contextManagerMismatchWarnings',
+  () => new Set(),
+);
+export const llmRequesterContextManagerActivatedKey = defineState<Set<string>>(
+  'llmRequester.contextManagerActivated',
+  () => new Set(),
+);
 
 export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   declare readonly _serviceBrand: undefined;
@@ -208,6 +227,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.states.register(llmRequesterMediaDegradedTurnsKey);
     this.states.register(llmRequesterMediaStrippedTurnsKey);
     this.states.register(llmRequesterEmittedThinkingEffortWarningsKey);
+    this.states.register(llmRequesterContextManagerMismatchWarningsKey);
+    this.states.register(llmRequesterContextManagerActivatedKey);
+  }
+
+  private registeredContextManager: ContextManager | undefined;
+
+  private transformQueue: Promise<void> = Promise.resolve();
+
+  private readonly transformLifetime = new AbortController();
+
+  dispose(): void {
+    this.transformLifetime.abort();
   }
 
   private get lastConfigLogSignature(): string | undefined {
@@ -234,6 +265,129 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return this.states.get(llmRequesterEmittedThinkingEffortWarningsKey);
   }
 
+  private get contextManagerMismatchWarnings(): Set<string> {
+    return this.states.get(llmRequesterContextManagerMismatchWarningsKey);
+  }
+
+  private get contextManagerActivated(): Set<string> {
+    return this.states.get(llmRequesterContextManagerActivatedKey);
+  }
+
+  registerContextManager(manager: ContextManager): IDisposable {
+    if (this.registeredContextManager !== undefined) {
+      throw new Error(
+        `A context manager is already registered: '${this.registeredContextManager.id}'.`,
+      );
+    }
+    this.registeredContextManager = manager;
+    return toDisposable(() => {
+      if (this.registeredContextManager === manager) {
+        this.registeredContextManager = undefined;
+      }
+    });
+  }
+
+  /**
+   * Config naming a manager that has no (matching) registration warns once
+   * per configured id — at first resolution, not at config load, because an
+   * Agent-scope registration does not exist yet when config is read.
+   */
+  getActiveContextManager(): ContextManager | undefined {
+    const configuredId = this.config.get<string>(CONTEXT_MANAGER_SECTION);
+    if (configuredId === undefined) return undefined;
+    const manager = this.registeredContextManager;
+    if (manager !== undefined && manager.id === configuredId) {
+      // Activation is otherwise silent: log the first successful match per id
+      // so an operator can tell a manager actually took over, mirroring the
+      // once-per-id mismatch warning below.
+      if (!this.contextManagerActivated.has(configuredId)) {
+        this.contextManagerActivated.add(configuredId);
+        this.log.info(`Context manager "${configuredId}" activated.`, {
+          contextManager: configuredId,
+          version: manager.version,
+        });
+      }
+      return manager;
+    }
+    if (!this.contextManagerMismatchWarnings.has(configuredId)) {
+      this.contextManagerMismatchWarnings.add(configuredId);
+      this.log.warn(`Context manager "${configuredId}" is configured but not registered.`, {
+        contextManager: configuredId,
+        registered: manager?.id,
+      });
+    }
+    return undefined;
+  }
+
+  private defaultRequestContext(): LlmRequestContext {
+    return { manager: this.getActiveContextManager(), transform: 'apply' };
+  }
+
+  private applyContextTransform(
+    manager: ContextManager,
+    messages: readonly Message[],
+    meta: { readonly source: AgentLLMRequestSource | undefined; readonly maxContextTokens: number },
+    signal: AbortSignal | undefined,
+  ): Promise<TransformResult> {
+    return this.enqueueTransform(manager, structuredClone(messages), meta, signal).then((result) =>
+      this.validateCarriers(messages, result),
+    );
+  }
+
+  private validateCarriers(
+    input: readonly Message[],
+    result: TransformResult,
+  ): TransformResult {
+    const before = compactionCarrierEnvelopesOf(input);
+    const after = compactionCarrierEnvelopesOf(result.messages);
+    const intact =
+      before.length === after.length &&
+      before.every((envelope, index) => carrierEnvelopesEqual(envelope, after[index]!));
+    if (intact) return result;
+    this.log.warn(
+      'context manager transform dropped, rewrote, or reordered compaction carriers; falling back to the original messages',
+      { carriersBefore: before.length, carriersAfter: after.length },
+    );
+    return { messages: input, accounting: 'raw-equivalent' };
+  }
+
+  /**
+   * Per-agent serialization: the entry runs only after the queue tail
+   * settles, and the tail swallows this entry's outcome so one rejection
+   * never poisons later requests.
+   */
+  private enqueueTransform(
+    manager: ContextManager,
+    messages: readonly Message[],
+    meta: { readonly source: AgentLLMRequestSource | undefined; readonly maxContextTokens: number },
+    signal: AbortSignal | undefined,
+  ): Promise<TransformResult> {
+    const entry = async (): Promise<TransformResult> => {
+      const linked = AbortSignal.any(
+        signal === undefined ? [this.transformLifetime.signal] : [this.transformLifetime.signal, signal],
+      );
+      linked.throwIfAborted();
+      return abortable(
+        Promise.resolve(
+          manager.transformMessages({
+            messages,
+            source: meta.source,
+            usedContextTokens: this.tokenCounting.get().size,
+            maxContextTokens: meta.maxContextTokens,
+            signal: linked,
+          }),
+        ),
+        linked,
+      );
+    };
+    const result = this.transformQueue.then(entry, entry);
+    this.transformQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   prepareTurnConfig(turnId: number): PreparedTurnRequestConfig | undefined {
     if (!this.profile.hasProvider()) return undefined;
     const config = this.getOrCreateTurnConfig(turnId);
@@ -253,14 +407,35 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     onPart: AgentLLMRequestPartHandler = noopOnPart,
     signal?: AbortSignal,
   ): AgentLLMRequestTask {
+    return this.startInternal(this.defaultRequestContext(), overrides, onPart, signal);
+  }
+
+  startInternal(
+    context: LlmRequestContext,
+    overrides: AgentLLMRequestOverrides = {},
+    onPart: AgentLLMRequestPartHandler = noopOnPart,
+    signal?: AbortSignal,
+  ): AgentLLMRequestTask {
     const trace = new MutableLLMRequestTrace();
     return {
       trace,
-      result: this.requestWithTrace(trace, overrides, onPart, signal),
+      result: this.requestWithTrace(trace, context, overrides, onPart, signal),
     };
   }
 
   async compact(
+    input: AgentCompactionInput = {},
+    signal?: AbortSignal,
+  ): Promise<ModelCompactionOutcome> {
+    return this.compactInternal(this.defaultRequestContext(), input, signal);
+  }
+
+  /**
+   * The compaction request path passes through the same transform seam as
+   * ordinary requests; bypass contexts skip it entirely.
+   */
+  async compactInternal(
+    context: LlmRequestContext,
     input: AgentCompactionInput = {},
     signal?: AbortSignal,
   ): Promise<ModelCompactionOutcome> {
@@ -294,17 +469,32 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         : { supportsCheckpointReplay: false };
     const history = this.toolSelect.shapeHistory(input.history ?? this.context.get());
     const checkpointAware = projectModelHistory(history, target);
-    const projected = checkpointAware.some((item) => item.kind === 'checkpoint')
-      ? this.projector
-          .project(
-            checkpointAware.map((item) =>
-              item.kind === 'checkpoint'
-                ? checkpointReplayMessage(item.checkpoint)
-                : item.message,
-            ),
-          )
-          .map(modelHistoryItemFromProjectedMessage)
-      : this.projector.project(history).map((message) => ({ kind: 'message' as const, message }));
+    const replayed = checkpointAware.some((item) => item.kind === 'checkpoint')
+      ? this.projector.project(
+          checkpointAware.map((item) =>
+            item.kind === 'checkpoint'
+              ? checkpointReplayMessage(item.checkpoint)
+              : item.message,
+          ),
+        )
+      : this.projector.project(history);
+    let messages: readonly Message[] = replayed;
+    if (context.manager !== undefined && context.transform === 'apply') {
+      const transformed = await this.applyContextTransform(
+        context.manager,
+        replayed,
+        {
+          source: input.source,
+          maxContextTokens:
+            resolved.modelCapabilities.max_input_tokens ??
+            resolved.modelCapabilities.max_context_tokens ??
+            0,
+        },
+        signal,
+      );
+      messages = transformed.messages;
+    }
+    const projected = messages.map(modelHistoryItemFromProjectedMessage);
     this.log.info('llm compact request', {
       ...logFieldsForSource(input.source),
       model: resolved.modelAlias ?? 'unknown',
@@ -359,6 +549,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private async requestWithTrace(
     trace: MutableLLMRequestTrace,
+    context: LlmRequestContext,
     overrides: AgentLLMRequestOverrides,
     onPart: AgentLLMRequestPartHandler,
     signal: AbortSignal | undefined,
@@ -369,6 +560,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     try {
       return await this.runRequest(
         this.resolveRequest(overrides),
+        context,
         onPart,
         signal,
         (traceId) => {
@@ -443,6 +635,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private async runRequest(
     request: ResolvedLLMRequest,
+    context: LlmRequestContext,
     onPart: AgentLLMRequestPartHandler,
     signal: AbortSignal | undefined,
     onRequestTrace: (traceId: string | undefined) => void,
@@ -480,16 +673,34 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       };
     };
 
+    /**
+     * The disabled / bypass guard stays synchronous: no manager call and no
+     * extra async boundary on the default path.
+     */
     const run = async (projection: RequestProjection): Promise<AgentLLMRequestFinish> => {
       onRequestTrace(undefined);
       const projected = requestInput(projection);
+      let messages = projected.messages;
+      let transformAccounting: TransformAccounting | undefined;
+      if (context.manager !== undefined && context.transform === 'apply') {
+        const transformed = await this.applyContextTransform(
+          context.manager,
+          messages,
+          {
+            source: request.source,
+            maxContextTokens:
+              request.model.capabilities.max_input_tokens ??
+              request.model.capabilities.max_context_tokens ??
+              0,
+          },
+          signal,
+        );
+        messages = [...transformed.messages];
+        transformAccounting = transformed.accounting;
+      }
       const input = {
         ...projected,
-        messages: await this.videoResolver.resolve(
-          projected.messages,
-          request.requester,
-          signal,
-        ),
+        messages: await this.videoResolver.resolve(messages, request.requester, signal),
       };
       const fields =
         projection === 'normal'
@@ -574,7 +785,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       // Only a stream that actually reported usage may write a measured
       // anchor — recording emptyUsage() zeros would zero the context size and
       // silence compaction for providers without usage reporting.
-      if (usage !== undefined) {
+      if (usage !== undefined && transformAccounting !== 'transformed') {
         this.tokenCounting.measured(request.messages, [message], usage);
       }
       this.logResponse(request.logFields, usage ?? emptyUsage(), timing);
@@ -946,6 +1157,88 @@ function checkpointReplayMessage(checkpoint: CompactionCheckpoint): Message {
     content: [{ type: 'compaction', ...checkpoint }] as unknown as Message['content'],
     toolCalls: [],
   };
+}
+
+interface CompactionCarrierEnvelope {
+  readonly messageIndex: number;
+  readonly contentIndex: number;
+  readonly message: Message;
+  readonly carrier: CheckpointReplayPart;
+}
+
+function compactionCarrierEnvelopesOf(messages: readonly Message[]): CompactionCarrierEnvelope[] {
+  const carriers: CompactionCarrierEnvelope[] = [];
+  for (const [messageIndex, message] of messages.entries()) {
+    for (const [contentIndex, part] of message.content.entries()) {
+      const candidate = part as unknown as CheckpointReplayPart;
+      if (candidate.type === 'compaction') {
+        carriers.push({ messageIndex, contentIndex, message, carrier: candidate });
+      }
+    }
+  }
+  return carriers;
+}
+
+function carrierEnvelopesEqual(
+  a: CompactionCarrierEnvelope,
+  b: CompactionCarrierEnvelope,
+): boolean {
+  return (
+    a.messageIndex === b.messageIndex &&
+    a.contentIndex === b.contentIndex &&
+    a.message.role === b.message.role &&
+    a.message.name === b.message.name &&
+    a.message.toolCallId === b.message.toolCallId &&
+    a.message.partial === b.message.partial &&
+    deepEqual(a.message.tools, b.message.tools) &&
+    deepEqual(a.message.toolCalls, b.message.toolCalls) &&
+    a.message.content.length === b.message.content.length &&
+    a.message.content.every((part, index) =>
+      index === a.contentIndex
+        ? carriersEqual(a.carrier, b.carrier)
+        : deepEqual(part, b.message.content[index]),
+    )
+  );
+}
+
+function carriersEqual(a: CheckpointReplayPart, b: CheckpointReplayPart): boolean {
+  return (
+    a.type === b.type &&
+    a.encrypted === b.encrypted &&
+    a.itemType === b.itemType &&
+    a.itemId === b.itemId &&
+    a.lineage.provider === b.lineage.provider &&
+    a.lineage.model === b.lineage.model &&
+    a.lineage.baseUrl === b.lineage.baseUrl &&
+    replayTokensEqual(a.replayInputTokens, b.replayInputTokens)
+  );
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((value, index) => deepEqual(value, b[index]))
+    );
+  }
+  const aRecord = a as Record<string, unknown>;
+  const bRecord = b as Record<string, unknown>;
+  const aKeys = Object.keys(aRecord).sort();
+  const bKeys = Object.keys(bRecord).sort();
+  return (
+    aKeys.length === bKeys.length &&
+    aKeys.every((key, index) => key === bKeys[index] && deepEqual(aRecord[key], bRecord[key]))
+  );
+}
+
+function replayTokensEqual(a: ReplayInputTokenEstimate, b: ReplayInputTokenEstimate): boolean {
+  if (a.kind === 'unknown' && b.kind === 'unknown') return true;
+  if (a.kind === 'measured' && b.kind === 'measured') return a.tokens === b.tokens;
+  return false;
 }
 
 function modelHistoryItemFromProjectedMessage(message: Message): ModelHistoryItem {

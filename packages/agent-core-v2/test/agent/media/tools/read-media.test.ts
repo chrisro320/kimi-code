@@ -38,6 +38,7 @@ import {
 } from '#/tool/toolContract';
 import { EventBusService } from '#/app/event/eventBusService';
 import { OrderedHookSlot } from '#/hooks';
+import { stubLog } from '../../../_base/log/stubs';
 import type { IAgentProfileService } from '#/agent/profile/profile';
 import type { IModelCatalog } from '#/kosong/model/catalog';
 import type { ModelRequester } from '#/kosong/model/modelRequester';
@@ -858,6 +859,7 @@ describe('AgentMediaToolsRegistrar', () => {
       createTestEnv(),
       workspaceCtx,
       recordingTelemetry([]),
+      stubLog(),
       new AgentStateService(),
       wire,
     );

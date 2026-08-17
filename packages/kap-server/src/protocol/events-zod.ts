@@ -552,6 +552,7 @@ export const agentStatusUpdatedEventSchema = z.object({
   permission: permissionModeSchema.optional(),
   usage: usageStatusSchema.optional(),
   phase: agentPhaseSchema.optional(),
+  acp: z.enum(['healthy', 'degraded']).optional(),
 });
 
 export const sessionMetaUpdatedEventSchema = z.object({

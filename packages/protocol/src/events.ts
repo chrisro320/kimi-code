@@ -542,6 +542,7 @@ export interface AgentStatusUpdatedEvent {
   readonly permission?: PermissionMode;
   readonly usage?: UsageStatus;
   readonly phase?: AgentPhase;
+  readonly acp?: 'healthy' | 'degraded';
 }
 
 export interface SessionMetaUpdatedEvent {
@@ -1556,6 +1557,7 @@ export const agentStatusUpdatedEventSchema = z.object({
   permission: permissionModeSchema.optional(),
   usage: usageStatusSchema.optional(),
   phase: agentPhaseSchema.optional(),
+  acp: z.enum(['healthy', 'degraded']).optional(),
 }) satisfies z.ZodType<AgentStatusUpdatedEvent>;
 
 export const sessionMetaUpdatedEventSchema = z.object({
