@@ -105,7 +105,8 @@ describe('facade routing', () => {
       supported: true,
       state: 'partial',
       steps: [{ id: 'permissions', state: 'missing' }],
-      install: { running: false },
+      // The completed-install note survives the contract parse (not stripped).
+      install: { running: false, note: 'user-skill-migrated' },
     };
     channel.result = [status];
 
@@ -513,6 +514,37 @@ describe('event hub', () => {
     expect(channel.subscriptions[0]?.dispose).not.toHaveBeenCalled();
     subB.dispose();
     expect(channel.subscriptions[0]?.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('delivers session.metaUpdated when the patch carries no lastPrompt', async () => {
+    const channel = new FakeChannel();
+    const klient = createKlientFromChannel(channel);
+    const seen: unknown[] = [];
+    const errors: Error[] = [];
+    klient.events.onError((error) => {
+      errors.push(error);
+    });
+
+    klient.events.on('session.metaUpdated', (event) => seen.push(event));
+    channel.emit(0, {
+      type: 'session.meta.updated',
+      payload: {
+        agentId: 'main',
+        sessionId: 's1',
+        title: 'generated title',
+        patch: { title: 'generated title', isCustomTitle: false },
+      },
+    });
+    await tick();
+    expect(seen).toEqual([
+      {
+        agentId: 'main',
+        sessionId: 's1',
+        title: 'generated title',
+        patch: { title: 'generated title', isCustomTitle: false },
+      },
+    ]);
+    expect(errors).toHaveLength(0);
   });
 
   it('disposes the emitter subscription when the last listener detaches', async () => {

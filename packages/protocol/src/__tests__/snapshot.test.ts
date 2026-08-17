@@ -183,10 +183,13 @@ describe('events — volatile classification', () => {
       'shell.completed',
       'agent.status.updated',
       'subagent.progress',
+      'event.capability.changed',
     ]) {
       expect(isVolatileEventType(type)).toBe(true);
     }
-    expect(VOLATILE_EVENT_TYPES).toHaveLength(8);
+    // 10, not upstream's 9: the fork adds `subagent.progress` on top of the
+    // upstream list (see VOLATILE_EVENT_TYPES in ../events.ts).
+    expect(VOLATILE_EVENT_TYPES).toHaveLength(10);
   });
 
   it('keeps timeline-bearing events durable', () => {
