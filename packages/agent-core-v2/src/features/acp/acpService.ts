@@ -754,31 +754,32 @@ export class AcpService extends Service implements IAcpService {
   statusSnapshot(): Promise<AcpStatus> {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
-      let loaded: AcpSidecar;
+      const current = this.currentStatus;
+      let view: AcpToolView;
       try {
-        loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+        view = await this.toolView();
       } catch (error) {
         const reason = errorMessage(error);
         this.degrade(reason, this.currentStatus.refs);
         return this.currentStatus;
       }
-      const blocks = isCompressionState(loaded.compressionState)
-        ? loaded.compressionState.blocks
-        : [];
-      const corrupt = loaded.compressionState !== null && !isCompressionState(loaded.compressionState);
-      if (corrupt) {
-        this.degrade('ACP sidecar compression state is corrupt', loaded.refs.length);
-        return this.currentStatus;
-      }
-      const current = this.currentStatus;
+      if (!view.ok) return this.currentStatus;
+      const visible = this.visibleTokenCount(
+        view.projection.messages,
+        view.state,
+        this.usageFallback(),
+      );
       return {
         managerId: ACP_MANAGER_ID,
         managerVersion: ACP_MANAGER_VERSION,
         health: current.health,
-        refs: loaded.refs.length,
-        blocks: blocks.length,
-        activeBlocks: blocks.filter((block) => block.active).length,
-        contextUsage: current.contextUsage,
+        refs: view.sidecar.refs.length,
+        blocks: view.state.blocks.length,
+        activeBlocks: view.state.blocks.filter((block) => block.active).length,
+        contextUsage:
+          visible === undefined || this.lastUsage.maxContextTokens <= 0
+            ? current.contextUsage
+            : visible / this.lastUsage.maxContextTokens,
         ...(current.reason === undefined ? {} : { reason: current.reason }),
       };
     });
