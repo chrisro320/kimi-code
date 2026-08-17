@@ -471,17 +471,12 @@ describe('ACP message adapter', () => {
     ]);
   });
 
-  it('rejects checkpoint carriers, media, partial, and tool declarations', () => {
+  it('rejects checkpoint carriers, partial messages, and tool declarations', () => {
     const checkpoint = {
       role: 'user',
       content: [{ type: 'compaction', id: 'cp' }],
       toolCalls: [],
     } as unknown as Message;
-    const image: Message = {
-      role: 'user',
-      content: [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,AA==' } }],
-      toolCalls: [],
-    };
     const partial: Message = {
       role: 'assistant',
       content: [{ type: 'text', text: 'unfinished' }],
@@ -499,10 +494,6 @@ describe('ACP message adapter', () => {
       ok: false,
       reason: 'ACP cannot safely transform a compaction checkpoint carrier',
     });
-    expect(projectAcpMessages([image], () => 'image')).toEqual({
-      ok: false,
-      reason: 'ACP cannot safely transform image_url content',
-    });
     expect(projectAcpMessages([partial], () => 'partial')).toEqual({
       ok: false,
       reason: 'ACP cannot safely transform a partial message',
@@ -511,5 +502,39 @@ describe('ACP message adapter', () => {
       ok: false,
       reason: 'ACP cannot safely transform a tool-declaration-only message',
     });
+  });
+
+  // A history containing an image must not make the whole projection fail
+  // (2026-08-17 incident: one image anywhere in history permanently degraded
+  // all four ACP tools for the rest of the session). The kernel never sees
+  // media — `textOf` only reads `text` parts — but it must round-trip
+  // untouched through rebuild, mirroring the reference host's `extractText`
+  // (which silently skips non-text parts with no rejection at all).
+  it('round-trips a message containing image content verbatim (kernel never sees it)', () => {
+    const image: Message = {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this screenshot' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AA==' } },
+      ],
+      toolCalls: [],
+    };
+
+    const result = projectAcpMessages([image], () => 'image');
+    expect(result.ok).toBe(true);
+
+    const projection = project([image]);
+    expect(rebuild(projection.messages, projection)).toEqual([image]);
+  });
+
+  it('round-trips an image-only message (no text part at all)', () => {
+    const image: Message = {
+      role: 'user',
+      content: [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,AA==' } }],
+      toolCalls: [],
+    };
+
+    const projection = project([image]);
+    expect(rebuild(projection.messages, projection)).toEqual([image]);
   });
 });

@@ -15,7 +15,8 @@ import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { ACP_MANAGER_ID, IAcpService } from '#/features/acp/acp';
-import { AcpService } from '#/features/acp/acpService';
+import { AcpService, renderTurnNudge } from '#/features/acp/acpService';
+import type { NudgeBreakdown, ProcessTurnResult } from 'acp-kernel';
 import { ACP_SIDECAR_KEY, type AcpSidecar } from '#/features/acp/sidecar';
 import type { ContentPart, Message } from '#/kosong/contract/message';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
@@ -228,6 +229,49 @@ describe('AcpService', () => {
     expect(JSON.stringify(sidecar)).not.toContain('one');
     expect(JSON.stringify(sidecar)).not.toContain('two');
     expect(setup.service.status()).toMatchObject({ health: 'healthy', refs: 2 });
+  });
+
+  // 2026-08-17 incident: one image anywhere in history made projectAcpMessages
+  // reject the whole history, which made every ACP tool fail identically and
+  // permanently for the rest of the session (transformMessages itself failed
+  // open, but the four tools below did not). Fixed by no longer rejecting
+  // non-text/non-think parts in messageAdapter's unsupportedPart.
+  it('keeps transformMessages and all four tools working when history contains an image', async () => {
+    const setup = createService('image-history');
+    owned.push(setup.disposables);
+    const image: Message = {
+      role: 'user',
+      content: [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,AA==' } }],
+      toolCalls: [],
+    };
+    // image + one big message make up the compress range; six more big
+    // messages sit after it so the range falls outside the kernel's
+    // protected zone (last 5 messages / trailing 5000 tokens).
+    const messages = [image, ...bigMessages(7)];
+    setup.env.history = messages;
+
+    const result = await transform(setup.requester.manager(), messages);
+    expect(result).toEqual({ messages, accounting: 'raw-equivalent' });
+    expect(setup.service.status()).toMatchObject({ health: 'healthy' });
+
+    const status = await setup.service.statusReport();
+    expect(status.ok).toBe(true);
+
+    const search = await setup.service.search({ query: 'MARKER-1' });
+    expect(search.ok).toBe(true);
+
+    const decompressed = await setup.service.decompress({ blockId: 'b1' });
+    expect(decompressed.ok).toBe(false);
+    expect(decompressed.message).not.toContain('cannot safely transform');
+
+    const sidecar = setup.store.values.get(
+      `sessions/ws/session/agents/image-history/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    const [firstRef, , thirdRef] = sidecar.refs.map((record) => record.ref);
+    const compressed = await setup.service.compress({
+      ranges: [{ startRef: firstRef!, endRef: thirdRef!, summary: SUMMARY }],
+    });
+    expect(compressed.ok).toBe(true);
   });
 
   it('fails open instead of transferring refs after an ambiguous duplicate edit', async () => {
@@ -704,6 +748,58 @@ describe('AcpService', () => {
     const nudge = outcome.messages[messages.length]!;
     expect(nudge.role).toBe('system');
     expect(messageText(nudge)).toContain('Context limit reached');
+  });
+
+  // 2026-08-17: an unfiltered nudge could recommend a range under
+  // billion-context-kit's VIABLE_RANGE_MIN_TOKENS (200), which the kernel's
+  // own minCompressRange gate (5000 chars, checked across a call's ranges in
+  // total) would then reject on its own — sending the model into a
+  // recommend-then-reject retry loop. renderTurnNudge must filter those out
+  // before rendering (mirrors billion-context-pi's `viableRanges` call).
+  it('filters non-viable (sub-200-token) ranges out of the rendered nudge', () => {
+    const breakdown: NudgeBreakdown = {
+      usage: 0.5,
+      growth: 0,
+      growthReference: 0,
+      effectiveThreshold: 0.45,
+      nudgeGrowthTokens: 0,
+      growthFloor: 0,
+      hasPendingNudge: 0,
+      emergencyOverride: 0,
+      pendingT1: 0,
+      pendingT2: 0,
+      pendingT3: 0,
+    };
+    const turn: ProcessTurnResult = {
+      messages: [],
+      state: {
+        blocks: [],
+        messageRefs: { byRaw: {}, byRef: {} },
+        nudge: { lastPerMessageNudgeTokens: 0, lastNudgeShownTokens: 0, baselineTokens: 0, anchors: {} },
+        stats: { tokensCompressed: 0, compressionCount: 0 },
+        nextBlockId: 1,
+        nextRunId: 1,
+      } as unknown as ProcessTurnResult['state'],
+      nudge: {
+        shouldInject: true,
+        reason: 'growth threshold reached',
+        contextUsage: 0.5,
+        tier: null,
+        breakdown,
+        compressibleRanges: [
+          { startRef: 'm00001', endRef: 'm00002', count: 1, tokens: 50, toolPct: 0, textPct: 1 },
+          { startRef: 'm00010', endRef: 'm00020', count: 5, tokens: 4000, toolPct: 0, textPct: 1 },
+        ],
+      },
+    };
+
+    const nudge = renderTurnNudge(turn);
+    expect(nudge).toBeDefined();
+    const text = messageText(nudge!);
+    expect(text).not.toContain('m00001');
+    expect(text).not.toContain('m00002');
+    expect(text).toContain('m00010');
+    expect(text).toContain('m00020');
   });
 
   it('never folds compress tool metadata into a block', async () => {

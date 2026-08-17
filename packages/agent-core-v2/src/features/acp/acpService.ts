@@ -104,6 +104,7 @@ import {
   type CoreMessage,
   type ProcessTurnResult,
 } from 'acp-kernel';
+import { viableRanges } from 'billion-context-kit';
 
 import { Service } from '#/_base/di/service';
 import { renderPrompt } from '#/_base/utils/render-prompt';
@@ -791,12 +792,23 @@ type AcpToolView =
     }
   | { readonly ok: false; readonly reason: string };
 
-function renderTurnNudge(turn: ProcessTurnResult): Message | undefined {
+/**
+ * Drops compressible-range suggestions the kernel itself would reject on
+ * their own (`billion-context-pi/src/index.ts` does the same before
+ * rendering) — a solo `compress` call against a fragment under
+ * `minCompressRange` (5000 chars, checked as the call's *total* across
+ * ranges) always fails, so surfacing it as a recommendation only sets the
+ * model up for a retry loop. Rendering (`renderNudgeText`, in the kernel
+ * core) never filters this itself — filtering compressible-range
+ * suggestions is the adapter's job, not the core's.
+ */
+export function renderTurnNudge(turn: ProcessTurnResult): Message | undefined {
   const decision = turn.nudge;
   if (decision?.shouldInject !== true) return undefined;
+  const viable = { ...decision, compressibleRanges: viableRanges(decision.compressibleRanges) };
   return {
     role: 'system',
-    content: [{ type: 'text', text: renderNudgeText(decision).text }],
+    content: [{ type: 'text', text: renderNudgeText(viable).text }],
     toolCalls: [],
   };
 }

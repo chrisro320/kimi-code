@@ -143,7 +143,11 @@ const FIXTURES: readonly ProviderFixture[] = [
     reject: 'ACP cannot safely transform a partial message',
   },
   {
-    name: 'openai-responses: opaque media carrier',
+    // Media round-trips verbatim rather than failing the whole projection
+    // (2026-08-17 fix) — the kernel never sees it (`textOf` reads only `text`
+    // parts), mirroring how the reference host's `extractText` silently skips
+    // non-text parts with no rejection at all.
+    name: 'openai-responses: opaque media carrier (round-trips untouched)',
     messages: [
       user('Describe the screenshot.'),
       {
@@ -152,7 +156,6 @@ const FIXTURES: readonly ProviderFixture[] = [
         toolCalls: [],
       } as Message,
     ],
-    reject: 'ACP cannot safely transform image_url content',
   },
   {
     name: 'any: compaction checkpoint carrier',

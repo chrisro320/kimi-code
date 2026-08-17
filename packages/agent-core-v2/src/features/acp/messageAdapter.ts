@@ -3,9 +3,13 @@
  * ACP kernel messages.
  *
  * Preserves Kimi-only content on the original message while exposing text and
- * tool-call bodies to the kernel. Rejects opaque carriers and media so callers
- * can fail open before a lossy transform reaches the provider. No scoped state
- * or I/O.
+ * tool-call bodies to the kernel. Non-text/non-think parts (media, etc.) are
+ * invisible to the kernel — `textOf` only reads `text` parts — but survive
+ * rebuild verbatim via `rebuildContent`'s untouched-part fallback, mirroring
+ * how the reference host (`acp-kernel`'s Pi adapter) treats them: never fed
+ * to the kernel, never dropped from the provider payload. Rejects only the
+ * `compaction` checkpoint carrier so callers can fail open before a lossy
+ * transform reaches the provider. No scoped state or I/O.
  */
 
 import type { CoreMessage } from 'acp-kernel';
@@ -449,9 +453,6 @@ function toolInteractionSplitAt(
 function unsupportedPart(parts: readonly ContentPart[]): string | undefined {
   for (const part of parts as readonly { readonly type: string }[]) {
     if (part.type === 'compaction') return 'ACP cannot safely transform a compaction checkpoint carrier';
-    if (part.type !== 'text' && part.type !== 'think') {
-      return `ACP cannot safely transform ${part.type} content`;
-    }
   }
   return undefined;
 }
