@@ -1,3 +1,4 @@
+import { defaultCountTokens } from 'acp-kernel';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
@@ -541,25 +542,83 @@ describe('AcpService', () => {
     expect(restored.message).not.toContain('MARKER-1');
     expect(restored.message).toContain('b1');
     expect(restored.message).toContain('3 item(s)');
+    const decompressCall: Message = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Unfolding the block.' }],
+      toolCalls: [
+        { type: 'function', id: 'call_d1', name: 'decompress', arguments: '{"blockId":"b1"}' },
+      ],
+    };
+    const decompressResult: Message = {
+      role: 'tool',
+      toolCallId: 'call_d1',
+      name: 'decompress',
+      content: [{ type: 'text', text: restored.message }],
+      toolCalls: [],
+    };
+    setup.env.history = [...messages, decompressCall, decompressResult];
+    const next = await transform(setup.requester.manager(), setup.env.history);
+    expect(next.accounting).toBe('raw-equivalent');
+    const body = next.messages.map(messageText).join('\n');
+    expect(body.match(/SENTINEL_BLOCK_BODY/g) ?? []).toHaveLength(1);
   });
 
-  it('keeps restored content out of the decompress result when full is set', async () => {
-    const setup = createService();
-    owned.push(setup.disposables);
+  it('restores different depths for shallow and full decompress of a distilled block', async () => {
     const messages = bigMessages(10);
-    messages[1] = textMessage(`SENTINEL_BLOCK_BODY ${'x'.repeat(3000)}`);
-    setup.env.history = messages;
-    await transform(setup.requester.manager(), messages);
-    const folded = await setup.service.compress({
-      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    const key = `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`;
+    const distill = (service: IAcpService) =>
+      service.compress({
+        ranges: [
+          {
+            startRef: 'b1',
+            endRef: 'b1',
+            summary: 'Distilled the tier-one opening fold into a single denser tier-two summary block.',
+            topic: 'distilled opening',
+          },
+        ],
+      });
+
+    const shallow = createService();
+    owned.push(shallow.disposables);
+    shallow.env.history = messages;
+    await transform(shallow.requester.manager(), messages);
+    const first = await shallow.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY, topic: 'opening' }],
     });
-    expect(folded.ok).toBe(true);
-    const restored = await setup.service.decompress({ blockId: 'b1', full: true });
-    expect(restored.ok).toBe(true);
-    expect(restored.message).not.toContain('SENTINEL_BLOCK_BODY');
-    expect(restored.message).not.toContain('MARKER-1');
-    expect(restored.message).toContain('b1');
-    expect(restored.message).toContain('3 item(s)');
+    expect(first.ok).toBe(true);
+    expect((await distill(shallow.service)).ok).toBe(true);
+    const shallowRestored = await shallow.service.decompress({ blockId: 'b2' });
+    expect(shallowRestored.ok).toBe(true);
+    const afterShallow = shallow.store.values.get(key) as AcpSidecar;
+    expect(
+      (afterShallow.compressionState as { blocks: { blockId: string }[] }).blocks.map(
+        (block) => block.blockId,
+      ),
+    ).toEqual(['b1']);
+    const refolded = await transform(shallow.requester.manager(), messages);
+    expect(refolded.accounting).toBe('transformed');
+    const refoldedBody = refolded.messages.map(messageText).join('\n');
+    expect(refoldedBody).toContain('[Compressed conversation section]');
+    expect(refoldedBody).not.toContain('MARKER-2');
+
+    const full = createService();
+    owned.push(full.disposables);
+    full.env.history = messages;
+    await transform(full.requester.manager(), messages);
+    const second = await full.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY, topic: 'opening' }],
+    });
+    expect(second.ok).toBe(true);
+    expect((await distill(full.service)).ok).toBe(true);
+    const fullRestored = await full.service.decompress({ blockId: 'b2', full: true });
+    expect(fullRestored.ok).toBe(true);
+    const afterFull = full.store.values.get(key) as AcpSidecar;
+    expect((afterFull.compressionState as { blocks: unknown[] }).blocks).toHaveLength(0);
+    const unwound = await transform(full.requester.manager(), messages);
+    expect(unwound.accounting).toBe('raw-equivalent');
+    const unwoundBody = unwound.messages.map(messageText).join('\n');
+    expect(unwoundBody).toContain('MARKER-2');
+    expect(unwoundBody).not.toContain('[Compressed conversation section]');
   });
 
   it('reports no-restorable-text wording when the block content is gone from the view', async () => {
@@ -690,6 +749,66 @@ describe('AcpService', () => {
       blocks: 1,
       activeBlocks: 1,
     });
+  });
+
+  it('reflects a fresh folded usage in status snapshots right after compression', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    expect(setup.service.status().contextUsage).toBe(0.9);
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY, topic: 'opening' }],
+    });
+    expect(folded.ok).toBe(true);
+    const expectedFolded = [
+      `[Compressed conversation section] — opening\n${SUMMARY}`,
+      ...[1, 4, 5, 6, 7, 8, 9, 10].map((marker) => `MARKER-${marker} ${'x'.repeat(3000)}`),
+    ].reduce((total, text) => total + defaultCountTokens(text), 0);
+    const first = await setup.service.statusSnapshot();
+    expect(first.contextUsage).toBeLessThan(0.9);
+    expect(first.contextUsage).toBe(expectedFolded / 100_000);
+    const second = await setup.service.statusSnapshot();
+    expect(second.contextUsage).toBe(expectedFolded / 100_000);
+  });
+
+  it('does not report a raw host count as folded after a degraded transform recovers', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY, topic: 'opening' }],
+    });
+    expect(folded.ok).toBe(true);
+    const key = `sessions/ws/session/agents/main/acp/${ACP_SIDECAR_KEY}`;
+    const valid = setup.store.values.get(key) as AcpSidecar;
+    setup.store.values.set(key, { ...valid, compressionState: { garbage: true } });
+    const degraded = await transform(setup.requester.manager(), messages, undefined, {
+      usedContextTokens: 90_000,
+      maxContextTokens: 100_000,
+    });
+    expect(degraded.accounting).toBe('raw-equivalent');
+    setup.store.values.set(key, valid);
+    const expectedFolded = [
+      `[Compressed conversation section] — opening\n${SUMMARY}`,
+      ...[1, 4, 5, 6, 7, 8, 9, 10].map((marker) => `MARKER-${marker} ${'x'.repeat(3000)}`),
+    ].reduce((total, text) => total + defaultCountTokens(text), 0);
+    const report = await setup.service.statusReport();
+    expect(report.ok).toBe(true);
+    expect(report.message).not.toContain('90.0%');
+    expect(report.message).not.toContain('90000');
+    expect(report.message).toContain(`${((expectedFolded / 100_000) * 100).toFixed(1)}%`);
+    const snapshot = await setup.service.statusSnapshot();
+    expect(snapshot.contextUsage).toBe(expectedFolded / 100_000);
   });
 
   it('reports degraded when the persisted compression state is corrupt', async () => {
@@ -1327,19 +1446,46 @@ describe('AcpService', () => {
     expect((sidecar.compressionState as { blocks: unknown[] }).blocks).toHaveLength(1);
   });
 
-  it('feeds the kernel the folded token count after compression', async () => {
+  it('feeds the kernel the exact folded token count after compression', async () => {
     const setup = createService();
     owned.push(setup.disposables);
-    const messages = bigMessages(10);
+    const calls: Message = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'CALL 查詢資料' }],
+      toolCalls: [
+        { type: 'function', id: 'call_t1', name: 'lookup', arguments: '{"query":"中文關鍵字"}' },
+      ],
+    };
+    const results: Message = {
+      role: 'tool',
+      toolCallId: 'call_t1',
+      name: 'lookup',
+      content: [{ type: 'text', text: 'RESULT 結果是四十二' }],
+      toolCalls: [],
+    };
+    const firstText = `FIRST 你好世界 開頭訊息 ${'x'.repeat(3000)}`;
+    const secondText = `SECOND 第二條訊息 ${'x'.repeat(3000)}`;
+    const thirdText = `THIRD 第三條訊息 ${'x'.repeat(3000)}`;
+    const tailTexts = ['BIG-A', 'BIG-B', 'BIG-C', 'BIG-D', 'BIG-E', 'BIG-F', 'BIG-G'].map(
+      (marker) => `${marker} ${'x'.repeat(3000)}`,
+    );
+    const messages = [
+      textMessage(firstText),
+      textMessage(secondText),
+      textMessage(thirdText),
+      calls,
+      results,
+      ...tailTexts.map(textMessage),
+    ];
     setup.env.history = messages;
     await transform(setup.requester.manager(), messages, undefined, {
       usedContextTokens: 90_000,
       maxContextTokens: 100_000,
     });
     const folded = await setup.service.compress({
-      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY, topic: 'opening' }],
     });
-    expect(folded.ok).toBe(true);
+    expect(folded.ok, folded.message).toBe(true);
     const core = (setup.service as unknown as { core: { processTurn: (input: { tokenCount: number }) => unknown } }).core;
     const spy = vi.spyOn(core, 'processTurn');
     const next = await transform(setup.requester.manager(), messages, undefined, {
@@ -1347,10 +1493,17 @@ describe('AcpService', () => {
       maxContextTokens: 100_000,
     });
     expect(next.accounting).toBe('transformed');
-    const received = spy.mock.calls[0]![0].tokenCount;
-    expect(received).toBeGreaterThan(0);
-    expect(received).toBeLessThan(90_000);
-    expect(setup.service.status().contextUsage).toBe(received / 100_000);
+    const visible = [
+      `[Compressed conversation section] — opening\n${SUMMARY}`,
+      firstText,
+      'CALL 查詢資料',
+      '{"query":"中文關鍵字"}',
+      'RESULT 結果是四十二',
+      ...tailTexts,
+    ];
+    const expected = visible.reduce((total, text) => total + defaultCountTokens(text), 0);
+    expect(spy.mock.calls[0]![0].tokenCount).toBe(expected);
+    expect(setup.service.status().contextUsage).toBe(expected / 100_000);
   });
 
   it('passes the host token count through when no block is folded', async () => {
@@ -1383,6 +1536,7 @@ describe('AcpService', () => {
     });
     expect(folded.ok).toBe(true);
     const { prune } = await import('acp-kernel');
+    vi.mocked(prune).mockClear();
     vi.mocked(prune).mockImplementationOnce(() => {
       throw new Error('fold failed');
     });
@@ -1393,7 +1547,9 @@ describe('AcpService', () => {
       maxContextTokens: 100_000,
     });
     expect(next.accounting).toBe('transformed');
+    expect(vi.mocked(prune)).toHaveBeenCalledOnce();
     expect(spy.mock.calls[0]![0].tokenCount).toBe(90_000);
     expect(setup.service.status().health).toBe('healthy');
+    expect(setup.service.status().contextUsage).toBe(0.9);
   });
 });
