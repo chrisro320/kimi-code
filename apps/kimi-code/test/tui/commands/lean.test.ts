@@ -4,13 +4,19 @@ import { handleLeanCommand } from '#/tui/commands/index';
 import type { SlashCommandHost } from '#/tui/commands/dispatch';
 
 function makeHost(
-  overrides: { hasSession?: boolean; leanMode?: boolean; leanModeActive?: boolean } = {},
+  overrides: {
+    hasSession?: boolean;
+    leanMode?: boolean;
+    leanModeActive?: boolean;
+    acp?: 'healthy' | 'degraded';
+  } = {},
 ) {
   const host = {
     state: {
       appState: {
         leanMode: overrides.leanMode ?? false,
         leanModeActive: overrides.leanModeActive ?? false,
+        acp: overrides.acp,
       },
     },
     session: overrides.hasSession === true ? {} : undefined,
@@ -53,6 +59,24 @@ describe('handleLeanCommand', () => {
 
     expect(host.state.appState.leanMode).toBe(false);
     expect(host.state.appState.leanModeActive).toBe(false);
+  });
+
+  it('refuses to turn on while ACP is enabled', () => {
+    const host = makeHost({ acp: 'healthy' });
+
+    handleLeanCommand(host, 'on');
+
+    expect(host.setAppState).not.toHaveBeenCalled();
+    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining('Lean mode conflicts with ACP'));
+  });
+
+  it('still allows turning off while ACP is enabled', () => {
+    const host = makeHost({ leanMode: true, leanModeActive: true, acp: 'healthy' });
+
+    handleLeanCommand(host, 'off');
+
+    expect(host.state.appState.leanMode).toBe(false);
+    expect(host.showError).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown argument without touching the state', () => {

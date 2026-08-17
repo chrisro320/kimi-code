@@ -17,6 +17,12 @@ export function handleLeanCommand(host: SlashCommandHost, args: string): void {
     return;
   }
   const next = arg === '' ? !host.state.appState.leanMode : arg === 'on';
+  if (next && host.state.appState.acp !== undefined) {
+    host.showError(
+      'Lean mode conflicts with ACP: ACP manages long-running context, which lean mode is not built for. Run /acp disable first.',
+    );
+    return;
+  }
   // With no session yet, the pending choice IS the live one — the next session
   // is the first one — so the footer must show it now rather than after the
   // first message creates the session and the status sync catches up.

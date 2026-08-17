@@ -115,6 +115,26 @@ describe('handleAcpCommand', () => {
     );
   });
 
+  it('refuses to enable while lean mode is pending', async () => {
+    const { host, session } = makeHost();
+    host.state.appState.leanMode = true;
+
+    await handleAcpCommand(host, 'enable');
+
+    expect(session.acpEnable).not.toHaveBeenCalled();
+    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining('ACP conflicts with lean mode'));
+  });
+
+  it('refuses to enable while lean mode is live', async () => {
+    const { host, session } = makeHost();
+    host.state.appState.leanModeActive = true;
+
+    await handleAcpCommand(host, 'enable');
+
+    expect(session.acpEnable).not.toHaveBeenCalled();
+    expect(host.showError).toHaveBeenCalledWith(expect.stringContaining('ACP conflicts with lean mode'));
+  });
+
   it('marks the badge degraded when the service is still degraded after enable', async () => {
     const { host, session } = makeHost({
       acpStatus: { health: 'degraded', reason: 'store offline' },

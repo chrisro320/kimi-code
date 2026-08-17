@@ -2144,6 +2144,21 @@ export class KimiTUI {
       session.getGoal(),
       this.acpBadgeState(session),
     ]);
+    const leanModeActive = status.leanMode === true;
+    // Lean and ACP are opposite session shapes — lean composes only the
+    // lean-ctx tools and injects no context, which starves ACP's long-context
+    // management. A lean session can still inherit ACP "enabled" from durable
+    // per-agent state set in an earlier, non-lean session; the /acp and /lean
+    // commands guard the interactive toggle order, but hydration needs its own
+    // check for that inherited case. Lean wins: disable ACP for this session.
+    const resolvedAcp = leanModeActive && acp !== undefined ? undefined : acp;
+    if (leanModeActive && acp !== undefined) {
+      await session.acpDisable().catch(() => {});
+      this.showStatus(
+        'ACP conflicts with lean mode — disabled ACP for this session.',
+        'warning',
+      );
+    }
     this.setAppState({
       sessionId: session.id,
       model: status.model ?? '',
@@ -2151,14 +2166,14 @@ export class KimiTUI {
       permissionMode: status.permission,
       planMode: status.planMode,
       swarmMode: status.swarmMode ?? false,
-      leanModeActive: status.leanMode === true,
+      leanModeActive,
       dispatchMode: status.dispatchMode ?? 'auto',
       contextTokens: status.contextTokens,
       maxContextTokens: status.maxContextTokens,
       contextUsage: status.contextUsage,
       sessionTitle: session.summary?.title ?? null,
       goal: goalResult.goal,
-      acp,
+      acp: resolvedAcp,
     });
     this.syncAdditionalDirs(session);
   }

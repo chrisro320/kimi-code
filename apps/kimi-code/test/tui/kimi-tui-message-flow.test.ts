@@ -214,6 +214,7 @@ function makeSession(overrides: Record<string, unknown> = {}) {
       blocks: 0,
       activeBlocks: 0,
     })),
+    acpDisable: vi.fn(async () => {}),
     updateMetadata: vi.fn(async () => {}),
     setApprovalHandler: vi.fn(),
     setQuestionHandler: vi.fn(),
@@ -1198,6 +1199,38 @@ describe('KimiTUI message flow', () => {
     const { driver } = await makeDriver(session);
 
     expect(driver.state.appState.acp).toBeUndefined();
+  });
+
+  it('disables an inherited-enabled ACP manager when hydrating a lean session', async () => {
+    const acpDisable = vi.fn(async () => {});
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: 'k2',
+        thinkingEffort: 'off',
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 0,
+        maxContextTokens: 100,
+        contextUsage: 0,
+        leanMode: true,
+      })),
+      acpStatus: vi.fn(async () => ({
+        enabled: true,
+        managerId: 'acp-kernel',
+        managerVersion: '0.1.0',
+        health: 'healthy' as const,
+        refs: 0,
+        blocks: 0,
+        activeBlocks: 0,
+      })),
+      acpDisable,
+    });
+
+    const { driver } = await makeDriver(session);
+
+    expect(driver.state.appState.leanModeActive).toBe(true);
+    expect(driver.state.appState.acp).toBeUndefined();
+    expect(acpDisable).toHaveBeenCalled();
   });
 
   it('does not re-enter plan mode on /plan on when config already applied it (v2 engine)', async () => {
