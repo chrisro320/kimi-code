@@ -485,8 +485,10 @@ describe('AcpService', () => {
 
     const restored = await second.service.decompress({ blockId: 'b1' });
     expect(restored.ok).toBe(true);
-    expect(restored.message).toContain('MARKER-1');
-    expect(restored.message).toContain('MARKER-3');
+    expect(restored.message).toContain('b1');
+    expect(restored.message).toContain('3 item(s)');
+    expect(restored.message).not.toContain('MARKER-1');
+    expect(restored.message).not.toContain('MARKER-3');
 
     const identity = await transform(second.requester.manager(), messages);
     expect(identity.accounting).toBe('raw-equivalent');
@@ -515,6 +517,60 @@ describe('AcpService', () => {
     expect(result.ok).toBe(true);
     expect(result.message).toContain('m00002');
     expect(result.message).toContain('b1');
+  });
+
+  it('does not embed restored content in the decompress result', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    messages[1] = textMessage(`SENTINEL_BLOCK_BODY ${'x'.repeat(3000)}`);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    expect(folded.ok).toBe(true);
+    const restored = await setup.service.decompress({ blockId: 'b1' });
+    expect(restored.ok).toBe(true);
+    expect(restored.message).not.toContain('SENTINEL_BLOCK_BODY');
+    expect(restored.message).not.toContain('MARKER-1');
+    expect(restored.message).toContain('b1');
+    expect(restored.message).toContain('3 item(s)');
+  });
+
+  it('keeps restored content out of the decompress result when full is set', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    messages[1] = textMessage(`SENTINEL_BLOCK_BODY ${'x'.repeat(3000)}`);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00003', summary: SUMMARY }],
+    });
+    expect(folded.ok).toBe(true);
+    const restored = await setup.service.decompress({ blockId: 'b1', full: true });
+    expect(restored.ok).toBe(true);
+    expect(restored.message).not.toContain('SENTINEL_BLOCK_BODY');
+    expect(restored.message).not.toContain('MARKER-1');
+    expect(restored.message).toContain('b1');
+    expect(restored.message).toContain('3 item(s)');
+  });
+
+  it('reports no-restorable-text wording when the block content is gone from the view', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    const folded = await setup.service.compress({
+      ranges: [{ startRef: 'm00003', endRef: 'm00005', summary: SUMMARY }],
+    });
+    expect(folded.ok).toBe(true);
+    setup.env.history = [textMessage('only one remains')];
+    const restored = await setup.service.decompress({ blockId: 'b1' });
+    expect(restored.ok).toBe(true);
+    expect(restored.message).toContain('(no restorable text content)');
   });
 
   it('keeps durable state untouched when the post-compression save fails', async () => {

@@ -581,16 +581,15 @@ export class AcpService extends Service implements IAcpService {
           activeBlocks: next.blocks.filter((entry) => entry.active).length,
           contextUsage: this.currentStatus.contextUsage,
         });
-        const { text, count } = collectBlockContent(
+        const { count } = collectBlockContent(
           view.state,
           block,
           [...view.projection.messages],
           { full },
         );
-        const body = count === 0 ? '(no restorable text content)' : text;
         return {
           ok: true,
-          message: `Restored ACP block ${block.blockId} (${count} item(s)); the originals rejoin the context view on the next request.\n\n${body}`,
+          message: `Restored ACP block ${block.blockId} (${count === 0 ? 'no restorable text content' : `${count} item(s)`}); the originals rejoin the context view on the next request.`,
         };
       } catch (error) {
         const reason = errorMessage(error);
