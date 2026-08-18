@@ -1483,6 +1483,78 @@ describe('AgentLLMRequesterService context manager registration', () => {
     quiet.registerContextManager(stubManager('alpha'));
     expect(quiet.getActiveContextManager()).toBeUndefined();
   });
+
+  // The override exists so a session-scoped choice never has to be written to
+  // the shared config file. Each case below pins one row of the precedence
+  // table; swapping the two reads in getActiveContextManager must redden at
+  // least one of them.
+  it('activates from the override with no config section set', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined);
+    const manager = stubManager('alpha');
+    service.registerContextManager(manager);
+
+    expect(service.getActiveContextManager()).toBeUndefined();
+
+    service.setContextManagerOverride('alpha');
+    expect(service.getActiveContextManager()).toBe(manager);
+  });
+
+  it('opts out on a null override even while the config section names the manager', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+    const manager = stubManager('alpha');
+    service.registerContextManager(manager);
+    expect(service.getActiveContextManager()).toBe(manager);
+
+    service.setContextManagerOverride(null);
+    expect(service.getActiveContextManager()).toBeUndefined();
+  });
+
+  it('defers to the config section while the override is unset', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'alpha' },
+    });
+    const manager = stubManager('alpha');
+    service.registerContextManager(manager);
+
+    // `undefined` is the absence of a choice, not an opt-out: the section
+    // still decides, so existing config-only setups keep working unchanged.
+    service.setContextManagerOverride(undefined);
+    expect(service.getActiveContextManager()).toBe(manager);
+  });
+
+  it('outranks a config section naming a different manager', () => {
+    const { service } = createService(createRequester({ value: 0 }), undefined, {
+      configValues: { [CONTEXT_MANAGER_SECTION]: 'beta' },
+    });
+    const manager = stubManager('alpha');
+    service.registerContextManager(manager);
+    expect(service.getActiveContextManager()).toBeUndefined();
+
+    service.setContextManagerOverride('alpha');
+    expect(service.getActiveContextManager()).toBe(manager);
+  });
+
+  it('keeps the once-per-id activation log deduped for an override-resolved id', () => {
+    const { service, infos } = createService(createRequester({ value: 0 }), undefined);
+    service.registerContextManager(stubManager('alpha'));
+    service.setContextManagerOverride('alpha');
+
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(service.getActiveContextManager()?.id).toBe('alpha');
+    expect(infos.filter((entry) => entry.message.includes('"alpha"'))).toHaveLength(1);
+  });
+
+  it('warns once when the override names a manager that is not registered', () => {
+    const { service, warnings } = createService(createRequester({ value: 0 }), undefined);
+    service.registerContextManager(stubManager('alpha'));
+    service.setContextManagerOverride('ghost');
+
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(service.getActiveContextManager()).toBeUndefined();
+    expect(warnings.filter((entry) => entry.message.includes('"ghost"'))).toHaveLength(1);
+  });
 });
 
 describe('AgentLLMRequesterService context transform pipeline', () => {

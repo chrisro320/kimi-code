@@ -123,7 +123,20 @@ export function createProgram(
     .addOption(new Option('--yes').hideHelp().default(false))
     .addOption(new Option('--auto-approve').hideHelp().default(false))
     .option('--plan', 'Start in plan mode.', false)
-    .option('--lean', 'Start in lean mode: a one-line prompt and the lean-ctx tools only.', false);
+    .option('--lean', 'Start in lean mode: a one-line prompt and the lean-ctx tools only.', false)
+    // Refused here rather than at session hydration: the hydration guard
+    // resolves the same conflict by calling `session.acpDisable()`, which
+    // writes the machine-wide `contextManager` config section — turning ACP
+    // off for every other session on the box. Rejecting an illegal flag pair
+    // must not have a side effect, least of all a global one.
+    .addOption(
+      new Option(
+        '--acp-context',
+        'Start with the ACP context manager enabled for this session only (never written to config).',
+      )
+        .conflicts('lean')
+        .default(false),
+    );
 
   registerExportCommand(program);
   registerProviderCommand(program);
@@ -170,6 +183,7 @@ export function createProgram(
       auto: autoValue,
       plan: raw['plan'] as boolean,
       lean: raw['lean'] as boolean,
+      acpContext: raw['acpContext'] as boolean,
       model: raw['model'] as string | undefined,
       effort: raw['effort'] as string | undefined,
       outputFormat: raw['outputFormat'] as CLIOptions['outputFormat'],

@@ -43,6 +43,8 @@ export interface CLIOptions {
   auto: boolean;
   plan: boolean;
   lean?: boolean;
+  /** `--acp-context`: session-scoped ACP, never written to the config file. */
+  acpContext?: boolean;
   model: string | undefined;
   /** `--effort`. Optional: ~25 option literals in tests construct CLIOptions. */
   effort?: string | undefined;

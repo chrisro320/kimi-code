@@ -56,6 +56,13 @@ export interface AppState {
   leanMode?: boolean;
   /** Whether the live session was actually created in lean mode. */
   leanModeActive?: boolean;
+  /**
+   * `--acp-context`: create every session of this run under the ACP context
+   * manager, this process only. Session-creation-time for the same reason as
+   * `leanMode`, and deliberately not mirrored back from the runtime — `acp`
+   * below already carries the live state.
+   */
+  acpContext?: boolean;
   acp?: 'healthy' | 'degraded';
   dispatchMode: DispatchMode;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');

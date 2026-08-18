@@ -254,6 +254,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     swarmMode: false,
     leanMode: input.cliOptions.lean === true,
     leanModeActive: input.cliOptions.lean === true,
+    acpContext: input.cliOptions.acpContext === true,
     dispatchMode: 'auto',
     thinkingEffort: 'off',
     contextUsage: 0,
@@ -2037,6 +2038,7 @@ export class KimiTUI {
       permission: this.state.appState.permissionMode,
       planMode: explicitPlanMode ? true : undefined,
       leanMode: this.state.appState.leanMode ? true : undefined,
+      acpContext: this.state.appState.acpContext ? true : undefined,
       metadata,
     };
     if (metadata === undefined) delete options.metadata;
