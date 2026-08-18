@@ -417,6 +417,7 @@ function sessionMetadataStub(agents: Readonly<Record<string, AgentMeta>>): ISess
     }),
     update: async () => {},
     setTitle: async () => {},
+    setGeneratedTitleIfUncustomized: async () => false,
     setArchived: async () => {},
     registerAgent: async () => {},
   };
@@ -3132,6 +3133,69 @@ describe('Agent tools', () => {
         ['PostToolUseFailure', 'Bash', 1],
       ]);
       expect(JSON.stringify(context.get())).toContain('blocked by PreToolUse');
+    });
+  });
+
+  // The arm above is the sensitivity check for this one: identical hook config,
+  // identical prompt, and the only difference is the bound model's capability.
+  describe('minimal mode runs no hook at all', () => {
+    let exec: ReturnType<typeof vi.fn>;
+    let triggered: Array<[string, string, number]>;
+
+    beforeEach(async () => {
+      exec = vi.fn<ISessionProcessRunner['exec']>();
+      triggered = [];
+      const hookEngine = makeHookRunner(
+        [
+          {
+            event: 'PreToolUse',
+            matcher: 'Bash',
+            command: "echo 'blocked by PreToolUse' >&2; exit 2",
+          },
+          {
+            event: 'UserPromptSubmit',
+            command: "echo 'injected by UserPromptSubmit'",
+          },
+        ],
+        {
+          onTriggered: (event, target, count) => {
+            triggered.push([event, target, count]);
+          },
+        },
+      );
+      ctx = createTestAgent(
+        execEnvServices({ processRunner: createCommandRunner('hook-output') }),
+        externalHookServices(hookEngine),
+      );
+      ctx.configure({
+        tools: ['Bash', 'Read'],
+        modelCapabilities: {
+          image_in: false,
+          video_in: false,
+          audio_in: false,
+          thinking: false,
+          tool_use: true,
+          max_context_tokens: 1_000_000,
+          minimal_mode: true,
+        },
+      });
+      context = ctx.get(IAgentContextMemoryService);
+      profile = ctx.get(IAgentProfileService);
+      await ctx.rpc.setPermission({ mode: 'auto' });
+    });
+
+    it('neither blocks the tool nor appends prompt-hook output', async () => {
+      ctx.mockNextResponse({ type: 'text', text: 'I will run Bash.' }, bashCall());
+      ctx.mockNextResponse({ type: 'text', text: 'Bash returned hook-output.' });
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Try Bash' }] });
+
+      await ctx.untilTurnEnd();
+
+      expect(triggered).toEqual([]);
+      const transcript = JSON.stringify(context.get());
+      expect(transcript).not.toContain('blocked by PreToolUse');
+      expect(transcript).not.toContain('injected by UserPromptSubmit');
+      expect(transcript).not.toContain('hook_result');
     });
   });
 

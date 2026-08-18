@@ -23,6 +23,7 @@ import {
   registerAgentProfile,
 } from '#/app/agentProfileCatalog/contribution';
 import {
+  MINIMAL_MODE_SYSTEM_PROMPT,
   renderPromptTemplateResult,
   renderSystemPromptResult,
   systemPromptVars,
@@ -59,6 +60,49 @@ describe('systemPromptVars', () => {
     expect(vars['additional_dirs_section']).toContain('/extra');
     expect(vars['skills_section']).toContain('# Skills');
     expect(vars['skills_section']).toContain('SKILLS');
+  });
+
+  it('renders the whole builtin template when minimal mode is off', () => {
+    const { text, environment } = renderSystemPromptResult(
+      '',
+      { cwd: '/repo', now: '2026-08-15T00:00:00.000Z' },
+      { skillActive: true },
+    );
+
+    expect(text).toContain('# Ultimate Reminders');
+    expect(text.length).toBeGreaterThan(1000);
+    expect(environment.cwd).toBe('/repo');
+    expect(environment.date.disclosed).toBe(true);
+  });
+
+  it('collapses the system prompt to the single minimal-mode sentence', () => {
+    const { text, environment } = renderSystemPromptResult(
+      '',
+      { minimalMode: true, cwd: '/repo', agentsMd: 'AGENTS', skills: 'SKILLS' },
+      { skillActive: true },
+    );
+
+    expect(text).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(text).not.toContain('AGENTS');
+    expect(text).not.toContain('SKILLS');
+    expect(text).not.toContain('/repo');
+    expect(environment.cwd).toBe('');
+    expect(environment.date.disclosed).toBe(false);
+  });
+
+  it('collapses a user-owned template too when minimal mode is on', () => {
+    const template = '# Custom\n\n${agents_md}\n${cwd}';
+
+    expect(
+      renderPromptTemplateResult(template, { minimalMode: true, agentsMd: 'AGENTS', cwd: '/repo' }, {
+        skillActive: true,
+      }).text,
+    ).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(
+      renderPromptTemplateResult(template, { agentsMd: 'AGENTS', cwd: '/repo' }, {
+        skillActive: true,
+      }).text,
+    ).toContain('AGENTS');
   });
 
   it('renders missing context fields as empty strings and defaults ${now}', () => {

@@ -386,6 +386,7 @@ export class ModelCatalog extends Disposable implements IModelCatalog {
       explainedCapability.capability,
       model.maxContextSize,
       model.maxInputSize,
+      model.minimalModeTools,
     );
     const providerOptions = buildProtocolProviderOptions(
       model,
@@ -586,6 +587,7 @@ function resolveModelCapabilities(
   detected: ModelCapability,
   maxContextSize: number,
   maxInputSize: number | undefined,
+  minimalModeTools: readonly string[] | undefined,
 ): ModelCapability {
   const declared = new Set((declaredCapabilities ?? []).map((c) => c.trim().toLowerCase()));
   return {
@@ -604,6 +606,8 @@ function resolveModelCapabilities(
     // serves `/responses/compact`, so a detected value would be a guess, and
     // guessing wrong costs a failed request on every compaction.
     remote_compaction: declared.has('remote_compaction'),
+    minimal_mode: declared.has('minimal_mode'),
+    minimal_mode_tools: minimalModeTools,
   };
 }
 

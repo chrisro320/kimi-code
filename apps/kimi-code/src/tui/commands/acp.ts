@@ -28,6 +28,12 @@ export async function handleAcpCommand(host: SlashCommandHost, args: string): Pr
       return;
     }
     case 'enable': {
+      if (host.state.appState.leanMode === true || host.state.appState.leanModeActive === true) {
+        host.showError(
+          'ACP conflicts with lean mode: lean composes only the lean-ctx tools and injects no context, which defeats ACP\'s long-context management. Run /lean off first.',
+        );
+        return;
+      }
       await session.acpEnable();
       const status = await session.acpStatus();
       host.setAppState({ acp: status.enabled ? status.health : undefined });

@@ -10,7 +10,13 @@
  * conversation, while compaction's replacement splice keeps them, so the
  * declaration still lands at the post-compaction boundary. Deferred schemas
  * cover MCP, deferred user tools, and the selected low-frequency builtins.
- * Reads live tools from
+ * Independently of disclosure, a model declaring `minimal_mode` has its
+ * catalogue narrowed to the minimal set for the whole session — there is no
+ * promotion, so nothing here latches — and a session missing one of those tools
+ * keeps the full catalogue rather than an unusable one. A session-chosen lean
+ * mode narrows to the intersection instead and warns about the rest: it exists
+ * to keep the request prefix small, so handing back the full catalogue would
+ * defeat the only thing it does. Reads live tools from
  * `toolRegistry`, active-tool and capability state from `profile`, gates
  * through `flag`, hooks into `toolExecutor`, and listens to context
  * lifecycle events through `event`. The mutable load-tracking state
@@ -18,6 +24,7 @@
  * and read/written through it. Bound at Agent scope.
  */
 
+import { ILogService } from '#/_base/log/log';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -34,6 +41,11 @@ import { isMcpToolName, type ToolInfo } from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
+import {
+  isLeanComposedCapability,
+  minimalToolUnavailableOutput,
+  resolveMinimalModeToolNames,
+} from './minimalCatalogue';
 import { isDeferredBuiltinToolName } from './deferredBuiltins';
 import {
   collectLoadedDynamicToolNames,
@@ -57,6 +69,15 @@ export const toolSelectPendingLoadedKey = defineState<Set<string>>(
 export class AgentToolSelectService extends Service implements IAgentToolSelectService {
   declare readonly _serviceBrand: undefined;
 
+  private narrowDegradeWarned = false;
+  private emptyCatalogueWarned = false;
+  private leanMissingWarned = false;
+  // Narrowing and the refusal gate must agree on whether minimal mode is live.
+  // `narrowTools` gives up when a configured name is not in the catalogue, so the
+  // gate has to give up with it — otherwise the session hands the model every tool
+  // and then refuses each one it calls, quoting a catalogue that is not in effect.
+  private narrowDegraded = false;
+
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
@@ -64,8 +85,9 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IFlagService private readonly flags: IFlagService,
-    @IEventBus eventBus: IEventBus,
+    @IEventBus private readonly eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
+    @ILogService private readonly log?: ILogService,
   ) {
     super();
     this.states.register(toolSelectPendingLoadedKey);
@@ -112,7 +134,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   shapeTools(entries: readonly ToolInfo[]): readonly ShapedToolEntry[] {
     const disclosure = this.enabled();
     const activeEntries = this.activeEntries(entries, disclosure);
-    if (!disclosure) return activeEntries;
+    if (!disclosure) return this.narrowTools(activeEntries);
     const loaded = this.loadedToolNames();
     const shaped: ShapedToolEntry[] = [];
     for (const entry of activeEntries) {
@@ -127,7 +149,73 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       if (!loaded.has(entry.name)) continue;
       shaped.push({ ...entry, deferred: true });
     }
-    return shaped;
+    return this.narrowTools(shaped);
+  }
+
+  private narrowTools(entries: readonly ShapedToolEntry[]): readonly ShapedToolEntry[] {
+    if (!this.minimalActive()) return entries;
+    const catalogue = this.minimalToolNames();
+    const wanted = new Set(catalogue);
+    if (catalogue.length === 0) this.warnEmptyCatalogue();
+    const narrowed = entries.filter((entry) => wanted.has(entry.name));
+    const present = new Set(narrowed.map((entry) => entry.name));
+    const missing = catalogue.filter((name) => !present.has(name));
+    if (isLeanComposedCapability(this.profile.getModelCapabilities())) {
+      this.narrowDegraded = false;
+      if (missing.length > 0) this.warnLeanCatalogueMissing(missing, narrowed.length === 0);
+      return narrowed;
+    }
+    this.narrowDegraded = missing.length > 0;
+    if (missing.length > 0) {
+      this.warnNarrowDegraded(missing);
+      return entries;
+    }
+    return narrowed;
+  }
+
+  private minimalToolNames(): readonly string[] {
+    return resolveMinimalModeToolNames(
+      this.profile.getModelCapabilities().minimal_mode_tools,
+    );
+  }
+
+  private minimalActive(): boolean {
+    return this.profile.getModelCapabilities().minimal_mode === true;
+  }
+
+  /**
+   * An empty `minimal_mode_tools` composes a catalogue of nothing. That is a
+   * deliberate measurement setting, but a model told to act and handed no tool
+   * emits tool-call syntax as plain text and the turn ends with that text shown
+   * to the user — and unlike the bootstrap catalogue this replaced, nothing
+   * opens on a later step. Say so once, so a config typo is not silent.
+   */
+  private warnEmptyCatalogue(): void {
+    if (this.emptyCatalogueWarned) return;
+    this.emptyCatalogueWarned = true;
+    this.log?.warn('minimal mode composes no tools: minimal_mode_tools is empty');
+  }
+
+  private warnLeanCatalogueMissing(missing: readonly string[], empty: boolean): void {
+    if (this.leanMissingWarned) return;
+    this.leanMissingWarned = true;
+    const message = empty
+      ? `Lean mode composed no tools: ${missing.join(', ')} are not available. ` +
+        'Check that the lean-ctx MCP server is connected.'
+      : `Lean mode is missing ${missing.join(', ')}; the session runs with the rest.`;
+    this.log?.warn(message, { missing: [...missing] });
+    try {
+      this.eventBus.publish({ type: 'warning', code: 'lean-mode-tools-unavailable', message });
+    } catch {
+    }
+  }
+
+  private warnNarrowDegraded(missing: readonly string[]): void {
+    if (this.narrowDegradeWarned) return;
+    this.narrowDegradeWarned = true;
+    this.log?.warn('minimal mode disabled: its tools are unavailable', {
+      missing: [...missing],
+    });
   }
 
   shapeHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
@@ -191,6 +279,10 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private describeUnavailableTool(name: string): string | undefined {
+    if (this.minimalActive() && !this.narrowDegraded) {
+      const catalogue = this.minimalToolNames();
+      if (!catalogue.includes(name)) return minimalToolUnavailableOutput(name, catalogue);
+    }
     if (this.isInactiveLoadedTool(name)) return inactiveLoadedToolOutput(name);
     if (!this.shouldIntercept(name)) return undefined;
     return notLoadedToolOutput(name);

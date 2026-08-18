@@ -390,6 +390,7 @@ async function resolveNativeSession(
       profile: agentProfileName ?? 'agent',
       model,
       thinking: opts.effort,
+      leanMode: opts.lean === true ? true : undefined,
     },
   });
   const agent = await ensureMainAgent(session);

@@ -9,7 +9,7 @@
  * executor tests use the real executor with telemetry and truncation stubs.
  * Run: ../../node_modules/.bin/vitest run test/toolSelect/toolSelectService.test.ts
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DisposableStore, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type ServiceRegistration, type TestInstantiationService } from '#/_base/di/test';
@@ -18,6 +18,7 @@ import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ToolCall } from '#/kosong/contract/message';
+import { createCompactionSummaryMessage } from '#/agent/contextMemory/compactionHandoff';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { UndoCut } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -58,7 +59,12 @@ import { AgentToolSelectSchemasService } from '#/agent/toolSelect/toolSelectSche
 import { AgentToolSelectService } from '#/agent/toolSelect/toolSelectService';
 import { SelectToolsTool } from '#/agent/tools/select-tools/selectToolsTool';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import {
+  composeLeanCapability,
+  LEAN_MODE_TOOL_NAMES,
+} from '#/agent/toolSelect/minimalCatalogue';
 import { IWireService } from '#/wire/wire';
+import { ILogService } from '#/_base/log/log';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry } from '../../app/telemetry/stubs';
 import { registerStateServices } from '../../state/stubs';
@@ -69,6 +75,11 @@ const MCP_ALPHA = 'mcp__srv__alpha';
 const MCP_BETA = 'mcp__srv__beta';
 const MCP_GAMMA = 'mcp__srv__gamma';
 const MCP_GONE = 'mcp__srv__gone';
+const MINIMAL_SHELL = 'mcp__lean-ctx__ctx_shell';
+const MINIMAL_READ = 'mcp__lean-ctx__ctx_read';
+const MINIMAL_SEARCH = 'mcp__lean-ctx__ctx_search';
+const MINIMAL_PATCH = 'mcp__lean-ctx__ctx_patch';
+const OFF_CATALOGUE = 'Write';
 const USER_DEFERRED = 'dashboard_create';
 const USER_INLINE = 'echo_inline';
 const REQUIRED_PAYLOAD_PARAMETERS = {
@@ -97,6 +108,7 @@ afterEach(() => disposables.dispose());
 function makeCapabilities(overrides: {
   readonly tool_use?: boolean;
   readonly dynamically_loaded_tools?: boolean;
+  readonly minimal_mode?: boolean;
 } = {}): ModelCapability {
   return {
     image_in: false,
@@ -106,6 +118,7 @@ function makeCapabilities(overrides: {
     tool_use: overrides.tool_use ?? false,
     max_context_tokens: 128_000,
     dynamically_loaded_tools: overrides.dynamically_loaded_tools,
+    minimal_mode: overrides.minimal_mode,
   };
 }
 
@@ -115,6 +128,14 @@ function toolCall(id: string, name: string, args: unknown = {}): ToolCall {
 
 function userMessage(text: string): ContextMessage {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+function assistantMessage(text: string): ContextMessage {
+  return { role: 'assistant', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+function inFlightAssistantMessage(): ContextMessage {
+  return { role: 'assistant', content: [], toolCalls: [] };
 }
 
 function schemaMessage(...names: string[]): ContextMessage {
@@ -1193,5 +1214,285 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
     const h = createHarness();
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
     expect(await announce(h)).toBeUndefined();
+  });
+});
+
+// Lean mode is the same regime chosen per session rather than declared per
+// model. It exists to keep the request prefix small, so where the declared mode
+// hands back the full catalogue on a miss, this one must not: that would send
+// every tool while the user believes the session is lean.
+describe('AgentToolSelectService lean mode', () => {
+  const [LEAN_READ, LEAN_SEARCH, LEAN_SHELL, LEAN_PATCH] = LEAN_MODE_TOOL_NAMES;
+
+  beforeEach(() => {
+    capabilities = composeLeanCapability(makeCapabilities({ tool_use: true }), true);
+  });
+
+  function registerLean(h: Harness, names: readonly string[] = LEAN_MODE_TOOL_NAMES): void {
+    for (const name of names) registerBuiltin(h, new EchoTool(name));
+  }
+
+  it('narrows the catalogue to the lean-ctx tools', () => {
+    const h = createHarness();
+    registerLean(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(new Set(LEAN_MODE_TOOL_NAMES));
+  });
+
+  it('sends the intersection when one lean tool is missing', () => {
+    const h = createHarness();
+    registerLean(h, [LEAN_READ!, LEAN_SEARCH!, LEAN_SHELL!]);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([LEAN_READ, LEAN_SEARCH, LEAN_SHELL]),
+    );
+    expect(shaped.map((entry) => entry.name)).not.toContain(OFF_CATALOGUE);
+  });
+
+  it('warns once about the missing lean tools', () => {
+    const h = createHarness();
+    registerLean(h, [LEAN_READ!]);
+
+    h.sut.shapeTools(h.registry.list());
+    h.sut.shapeTools(h.registry.list());
+
+    const warnings = h.eventBus.published.filter(
+      (event) => event.type === 'warning' && event.code === 'lean-mode-tools-unavailable',
+    );
+    expect(warnings).toHaveLength(1);
+    expect((warnings[0] as { message: string }).message).toContain(LEAN_PATCH!);
+  });
+
+  // The refusal to fall back is the whole contract: with no lean tool present
+  // the session composes nothing and says so, rather than quietly shipping the
+  // full catalogue the mode exists to avoid.
+  it('composes nothing and warns when no lean tool is available', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const entries = h.registry.list();
+    const shaped = h.sut.shapeTools(entries);
+
+    expect(shaped).toEqual([]);
+    expect(shaped).not.toBe(entries);
+    const warning = h.eventBus.published.find(
+      (event) => event.type === 'warning' && event.code === 'lean-mode-tools-unavailable',
+    );
+    expect((warning as { message: string } | undefined)?.message).toContain('lean-ctx MCP server');
+  });
+
+  // Sensitivity check for every assertion above: without the session flag the
+  // same capability object narrows nothing.
+  it('leaves the catalogue untouched when lean is not composed', () => {
+    capabilities = composeLeanCapability(makeCapabilities({ tool_use: true }), false);
+    const h = createHarness();
+    registerLean(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  // A model that declares the capability keeps the old all-or-nothing degrade;
+  // only the session-chosen mode narrows to the intersection.
+  it('keeps the declared capability degrading to the full catalogue', () => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+});
+
+describe('AgentToolSelectService minimal mode', () => {
+  beforeEach(() => {
+    capabilities = makeCapabilities({ tool_use: true, minimal_mode: true });
+  });
+
+  function registerMinimal(h: Harness): void {
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(MINIMAL_READ));
+    registerBuiltin(h, new EchoTool(MINIMAL_SEARCH));
+    registerBuiltin(h, new EchoTool(MINIMAL_PATCH));
+  }
+
+  it('narrows the catalogue to the minimal tools', () => {
+    const h = createHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
+    );
+  });
+
+  // The whole point of the mode: the catalogue is fixed for the session, so no
+  // amount of conversation widens it. There is no promotion path to latch.
+  it('stays narrow however much the conversation has produced', () => {
+    const h = createHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    h.contextMemory.history.push(
+      userMessage('go'),
+      assistantMessage('on it'),
+      userMessage('again'),
+      { role: 'assistant', content: [], toolCalls: [toolCall('call-1', MINIMAL_READ)] },
+      assistantMessage('still here'),
+    );
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
+    );
+  });
+
+  it('stays narrow across a compaction that replaces the history', () => {
+    const h = createHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    h.contextMemory.history.push(assistantMessage('on it'));
+    h.sut.shapeTools(h.registry.list());
+
+    h.contextMemory.history.length = 0;
+    h.contextMemory.history.push(userMessage('next'), createCompactionSummaryMessage('summary'));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
+    );
+  });
+
+  it('keeps the full catalogue when one of the minimal tools is not registered', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('keeps the full catalogue when the profile disables a minimal tool', () => {
+    const h = createHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    activeToolNames = new Set([MINIMAL_SHELL, OFF_CATALOGUE]);
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(shaped.map((entry) => entry.name)).toEqual([MINIMAL_SHELL, OFF_CATALOGUE]);
+  });
+
+  // Sensitivity check for every assertion above.
+  it('leaves the catalogue untouched when the capability is absent', () => {
+    capabilities = makeCapabilities({ tool_use: true });
+    const h = createHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+  });
+
+  it('narrows even while progressive disclosure is also on', () => {
+    flagEnabled = true;
+    capabilities = makeCapabilities({
+      tool_use: true,
+      dynamically_loaded_tools: true,
+      minimal_mode: true,
+    });
+    const h = createHarness();
+    registerMinimal(h);
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+
+    const shaped = h.sut.shapeTools(h.registry.list());
+
+    expect(new Set(shaped.map((entry) => entry.name))).toEqual(
+      new Set([MINIMAL_SHELL, MINIMAL_READ, MINIMAL_SEARCH, MINIMAL_PATCH]),
+    );
+  });
+
+  // The refusal must not promise a later opening — there is not one.
+  it('tells the model an off-catalogue tool never opens', async () => {
+    const h = createExecutorHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.output).toContain('no further tool opens later');
+    expect(results[0]!.result.output).not.toContain('next step');
+    expect(results[0]!.result.isError).toBe(true);
+  });
+
+  it('keeps refusing an off-catalogue tool on a later step', async () => {
+    const h = createExecutorHarness();
+    registerMinimal(h);
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+    h.contextMemory.history.push(userMessage('go'), assistantMessage('on it'));
+
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBe(true);
+  });
+
+  it('lets a minimal tool run', async () => {
+    const h = createExecutorHarness();
+    registerMinimal(h);
+
+    const results = await execute(h, toolCall('call-1', MINIMAL_SHELL, { payload: 'ok' }));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBeFalsy();
+  });
+
+  // An empty catalogue is a legal measurement setting but an unusable session,
+  // and nothing opens later to rescue it. A config typo must not reach that
+  // state silently.
+  it('warns when the configured catalogue is empty', () => {
+    capabilities = { ...makeCapabilities({ tool_use: true, minimal_mode: true }),
+      minimal_mode_tools: [] };
+    const h = createHarness();
+    registerMinimal(h);
+    const warn = vi.spyOn(h.ix.get(ILogService), 'warn');
+
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('minimal_mode_tools is empty'),
+    );
+  });
+
+  // Degrading has to be all-or-nothing. When `narrowTools` gives up it hands the
+  // model the full catalogue, so the refusal gate must give up too — otherwise
+  // every tool is listed and every tool is refused, quoting a catalogue that is
+  // not in effect, and the model has no way out of the loop.
+  it('stops refusing once narrowing has degraded', async () => {
+    const h = createExecutorHarness();
+    registerBuiltin(h, new EchoTool(MINIMAL_SHELL));
+    registerBuiltin(h, new EchoTool(OFF_CATALOGUE));
+
+    const entries = h.registry.list();
+    expect(h.sut.shapeTools(entries)).toBe(entries);
+
+    const results = await execute(h, toolCall('call-1', OFF_CATALOGUE, { payload: 'ok' }));
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result.isError).toBeFalsy();
   });
 });

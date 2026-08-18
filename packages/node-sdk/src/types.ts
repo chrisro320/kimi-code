@@ -132,6 +132,14 @@ export interface CreateSessionOptions {
   readonly thinking?: string | undefined;
   readonly permission?: PermissionMode | undefined;
   readonly planMode?: boolean;
+  /**
+   * Compose the session's whole lifetime in lean mode: a one-line prompt with
+   * no workspace instructions, runtime context, skills, or plugin sections, no
+   * context injection, no external hooks, and the lean-ctx catalogue instead of
+   * the full tool set. Decided here because those are the request prefix — it
+   * cannot be turned on later without rewriting it.
+   */
+  readonly leanMode?: boolean;
   readonly metadata?: JsonObject | undefined;
   readonly kaos?: Kaos | undefined;
   readonly persistenceKaos?: Kaos | undefined;
@@ -160,6 +168,14 @@ export interface CreateSessionOptions {
 export interface RenameSessionInput {
   readonly id: string;
   readonly title: string;
+}
+
+export interface GenerateSessionTitleInput {
+  readonly id: string;
+  /** Regenerate even when the session already has a generated/custom title. */
+  readonly force?: boolean;
+  /** Conversation excerpt to generate from (default `user_prompts`). */
+  readonly source?: 'user_prompts' | 'first_turn' | 'digest';
 }
 
 export interface ResumeSessionInput {
@@ -314,6 +330,7 @@ export interface SessionStatus {
   readonly permission: PermissionMode;
   readonly planMode: boolean;
   readonly swarmMode?: boolean | undefined;
+  readonly leanMode?: boolean | undefined;
   readonly dispatchMode?: DispatchMode;
   readonly contextTokens: number;
   readonly maxContextTokens: number;
@@ -321,9 +338,20 @@ export interface SessionStatus {
   readonly usage?: SessionUsage;
 }
 
+/**
+ * The engine's canonical title state: `replaceable` (a prompt-derived easy
+ * title auto generation may overwrite), `generated` (an auto-generated title
+ * already landed), `custom` (a user-set title that is never overwritten).
+ * Only populated by the v2 engine on live / resumed sessions (read off the
+ * metadata document); v1 backends leave it undefined, and the v2 list path
+ * does not project it.
+ */
+export type SessionTitleKind = 'replaceable' | 'generated' | 'custom';
+
 export interface SessionSummary {
   readonly id: string;
   readonly title?: string | undefined;
+  readonly titleKind?: SessionTitleKind;
   readonly lastPrompt?: string;
   readonly workDir: string;
   readonly sessionDir: string;

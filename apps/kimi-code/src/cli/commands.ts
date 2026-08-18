@@ -122,7 +122,8 @@ export function createProgram(
     )
     .addOption(new Option('--yes').hideHelp().default(false))
     .addOption(new Option('--auto-approve').hideHelp().default(false))
-    .option('--plan', 'Start in plan mode.', false);
+    .option('--plan', 'Start in plan mode.', false)
+    .option('--lean', 'Start in lean mode: a one-line prompt and the lean-ctx tools only.', false);
 
   registerExportCommand(program);
   registerProviderCommand(program);
@@ -168,6 +169,7 @@ export function createProgram(
       trust: raw['trust'] === true,
       auto: autoValue,
       plan: raw['plan'] as boolean,
+      lean: raw['lean'] as boolean,
       model: raw['model'] as string | undefined,
       effort: raw['effort'] as string | undefined,
       outputFormat: raw['outputFormat'] as CLIOptions['outputFormat'],

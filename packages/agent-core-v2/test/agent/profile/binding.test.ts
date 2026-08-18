@@ -15,6 +15,11 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { BuiltinAgentProfileLoaderService } from '#/app/agentProfileCatalog/builtinAgentProfileLoaderService';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
+import {
+  LEAN_MODE_TOOL_NOTE,
+  MINIMAL_MODE_SYSTEM_PROMPT,
+} from '#/app/agentProfileCatalog/profile-shared';
+import { LEAN_MODE_TOOL_NAMES } from '#/agent/toolSelect/minimalCatalogue';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
 import { IHostClock } from '#/os/interface/hostClock';
@@ -79,6 +84,7 @@ function sessionMetadataAt(iso: string): ISessionMetadata {
     }),
     update: async () => {},
     setTitle: async () => {},
+    setGeneratedTitleIfUncustomized: async () => false,
     setArchived: async () => {},
     registerAgent: async () => {},
   };
@@ -335,6 +341,76 @@ describe('AgentProfileService.bind', () => {
     expect(svc.data().profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
   });
 
+  // `bind` renders the prompt before the wire records the model alias, so a
+  // capability read through the bound model would come back unknown and the
+  // gated prompt shape would never apply. Assert on the very first bind.
+  it('collapses the system prompt on the very bind that declares minimal_mode', async () => {
+    ctx = createTestAgent(
+      {
+        initialConfig: {
+          providers: {
+            kimi: { type: 'kimi', apiKey: 'test-key', baseUrl: 'https://api.example.test/v1' },
+          },
+          models: {
+            'minimal/model': {
+              provider: 'kimi',
+              model: 'minimal-model',
+              maxContextSize: 1_000_000,
+              capabilities: ['tool_use', 'minimal_mode'],
+            },
+          },
+        },
+      },
+      hostEnvironmentServices(homeDir),
+    );
+    const svc = ctx.get(IAgentProfileService);
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: 'minimal/model' });
+
+    expect(svc.getSystemPrompt()).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+  });
+
+  it('renders the full system prompt for a model without minimal_mode', async () => {
+    const { profile: svc } = buildContext();
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(svc.getSystemPrompt()).not.toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(svc.getSystemPrompt()).toContain('# Ultimate Reminders');
+  });
+
+  // The prompt is frozen before `profile.bind` writes the Model, so a lean
+  // session that only pulled the flag from the wire would render the full
+  // prompt on its own first request and never say so. Only asserting on the
+  // prompt of a real bind proves the choice was readable when it was frozen.
+  it('collapses the system prompt on the very bind that chooses lean mode', async () => {
+    const { profile: svc } = buildContext();
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, leanMode: true });
+
+    expect(svc.getSystemPrompt()).toBe(`${MINIMAL_MODE_SYSTEM_PROMPT}\n\n${LEAN_MODE_TOOL_NOTE}`);
+  });
+
+  it('composes the lean-ctx catalogue for a lean session', async () => {
+    const { profile: svc } = buildContext();
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, leanMode: true });
+
+    const capabilities = svc.getModelCapabilities();
+    expect(capabilities.minimal_mode).toBe(true);
+    expect(capabilities.minimal_mode_tools).toEqual(LEAN_MODE_TOOL_NAMES);
+  });
+
+  // Sensitivity check for both assertions above.
+  it('renders the full system prompt when lean mode is not chosen', async () => {
+    const { profile: svc } = buildContext();
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(svc.getSystemPrompt()).not.toContain(LEAN_MODE_TOOL_NOTE);
+    expect(svc.getModelCapabilities().minimal_mode).not.toBe(true);
+  });
+
   it('rejects an unsupported thinking effort atomically before first bind', async () => {
     ctx = createTestAgent(
       {
@@ -513,6 +589,26 @@ describe('AgentToolPolicyService tool denylist', () => {
     });
     expect(toolPolicy.isToolActive('Read')).toBe(true);
     expect(toolPolicy.isToolActive('Bash')).toBe(false);
+  });
+
+  // `bind()` never runs on a resume — the wire replays straight into
+  // `ProfileModel` — so a lean choice held anywhere but the Model would be
+  // silently absent on the second run of the same session.
+  it('restores the lean choice from persisted records on resume', async () => {
+    const persistence = new InMemoryWireRecordPersistence();
+    ctx = createTestAgent({ persistence }, hostEnvironmentServices(homeDir));
+    await ctx
+      .get(IAgentProfileService)
+      .bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, leanMode: true });
+    await ctx.get(IWireService).flush();
+    await ctx.dispose();
+
+    ctx = createTestAgent({ persistence }, hostEnvironmentServices(homeDir));
+    await ctx.restorePersisted();
+    const resumed = profileServices(ctx);
+
+    expect(resumed.profile.getModelCapabilities().minimal_mode).toBe(true);
+    expect(resumed.profile.data().leanMode).toBe(true);
   });
 
   it('restores the denylist from persisted records on resume without catalog resolution', async () => {

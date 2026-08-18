@@ -658,6 +658,9 @@ importers:
       ajv-formats:
         specifier: ^3.0.1
         version: 3.0.1(ajv@8.18.0)
+      billion-context-kit:
+        specifier: 0.2.0
+        version: 0.2.0
       chokidar:
         specifier: ^4.0.3
         version: 4.0.3
@@ -688,6 +691,9 @@ importers:
       retry:
         specifier: 0.13.1
         version: 0.13.1
+      semver:
+        specifier: ^7.7.4
+        version: 7.7.4
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -722,6 +728,9 @@ importers:
       '@types/retry':
         specifier: 0.12.0
         version: 0.12.0
+      '@types/semver':
+        specifier: ^7.7.0
+        version: 7.7.1
       '@types/sinon':
         specifier: ^21.0.1
         version: 21.0.1
@@ -786,6 +795,9 @@ importers:
       pino:
         specifier: ^9.5.0
         version: 9.14.0
+      semver:
+        specifier: ^7.7.4
+        version: 7.7.4
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -802,6 +814,9 @@ importers:
       '@types/bcryptjs':
         specifier: ^2.4.6
         version: 2.4.6
+      '@types/semver':
+        specifier: ^7.7.0
+        version: 7.7.1
       '@types/ws':
         specifier: ^8.18.0
         version: 8.18.1
@@ -4762,6 +4777,10 @@ packages:
     resolution: {integrity: sha512-V9QLaUvutOr3eSYuDMPfjkK3jUKexueiLsU2kEFpXUu6jeALjHACPZbYSYDxxpE1OkRDaD1XXxcjV+Q/t6v4NQ==}
     engines: {node: '>=20'}
 
+  acp-kernel@0.0.23:
+    resolution: {integrity: sha512-bG28aYfBda8z34fsaoNc4QBix4gRtQDQznR6G4XBaz9z1xgxdmdYtazQQMBjxnfEL9yCrDb9CTpkl7IXWiuviA==}
+    engines: {node: '>=20'}
+
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
@@ -4954,6 +4973,10 @@ packages:
 
   bignumber.js@9.3.1:
     resolution: {integrity: sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ==}
+
+  billion-context-kit@0.2.0:
+    resolution: {integrity: sha512-KBO8MYaOBNcdp3cU5h2Z0f3OsJrGf0+OBqbeJHt5yKXPU7cngRhlUInMbWC7cw6AdIcvurs7u8U1esMijizhdQ==}
+    engines: {node: '>=18'}
 
   binary-extensions@2.3.0:
     resolution: {integrity: sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==}
@@ -13574,6 +13597,8 @@ snapshots:
 
   acp-kernel@0.0.18: {}
 
+  acp-kernel@0.0.23: {}
+
   agent-base@7.1.4: {}
 
   ahooks@3.9.7(react-dom@19.2.5(react@19.2.5))(react@19.2.5):
@@ -13761,6 +13786,10 @@ snapshots:
       is-windows: 1.0.2
 
   bignumber.js@9.3.1: {}
+
+  billion-context-kit@0.2.0:
+    dependencies:
+      acp-kernel: 0.0.23
 
   binary-extensions@2.3.0: {}
 

@@ -39,6 +39,7 @@ export interface ResumedAgentState {
   readonly permission: PermissionData;
   readonly plan: PlanData;
   readonly swarmMode?: boolean | undefined;
+  readonly leanMode?: boolean | undefined;
   readonly dispatchMode?: DispatchMode;
   readonly usage: UsageStatus;
   readonly tools: readonly ToolInfo[];

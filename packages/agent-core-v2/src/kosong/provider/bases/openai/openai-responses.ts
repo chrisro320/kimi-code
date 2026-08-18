@@ -73,6 +73,7 @@ import {
   resolveAuthBackedClient,
 } from '../request-auth';
 import { normalizeToolCallIdsForProvider, sanitizeOpenAIResponsesCallId } from '../tool-call-id';
+import { flattenRootToolSchemaUnion } from './tool-schema';
 
 function normalizeResponsesFinishReason(
   status: string | null | undefined,
@@ -695,7 +696,15 @@ function convertTool(tool: Tool): ResponseToolParam {
     type: 'function',
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters,
+    // A tool built from `z.union([...])` normalizes to a bare `{ anyOf: [...] }`
+    // with no root `type`, and the Responses API rejects the whole request:
+    // `Invalid schema for function 'TaskOutput': schema must be a JSON Schema of
+    // 'type: "object"', got 'type: null'`. Chat-completions already flattens
+    // this (see `tool-schema.ts`); the same rewrite is needed here, and it
+    // returns the same object reference when there is no root union, so the
+    // wire shape and the provider-side prompt cache stay byte-identical for
+    // every other tool.
+    parameters: flattenRootToolSchemaUnion(tool.parameters),
     strict: false,
   };
 }
@@ -968,8 +977,12 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             break;
           case 'response.created':
           case 'response.in_progress': {
-            const responseObject = requireObjectField(chunk, 'response', type);
-            const respId = readStringField(responseObject, 'id');
+            // The `response` envelope only carries the optional `response.id`;
+            // gateways that omit it still produce a usable stream, so stay
+            // lenient instead of failing the whole request.
+            const responseObject = readObjectField(chunk, 'response');
+            const respId =
+              responseObject === undefined ? undefined : readStringField(responseObject, 'id');
             if (respId !== undefined) {
               this._id = respId;
             }
@@ -1051,16 +1064,21 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             break;
           case 'response.completed':
           case 'response.incomplete': {
-            const responseObject = requireObjectField(chunk, 'response', type);
-            const respId = readStringField(responseObject, 'id');
-            if (respId !== undefined) {
-              this._id = respId;
+            // Everything here — id, usage, finish reason — is optional metadata.
+            // A gateway that omits the envelope still delivered the content, so
+            // stay lenient rather than failing an otherwise complete stream.
+            const responseObject = readObjectField(chunk, 'response');
+            if (responseObject !== undefined) {
+              const respId = readStringField(responseObject, 'id');
+              if (respId !== undefined) {
+                this._id = respId;
+              }
+              const usage = readObjectField(responseObject, 'usage');
+              if (usage !== undefined) {
+                this._extractUsage(usage);
+              }
+              this._captureFinishReasonFromResponse(responseObject);
             }
-            const usage = readObjectField(responseObject, 'usage');
-            if (usage !== undefined) {
-              this._extractUsage(usage);
-            }
-            this._captureFinishReasonFromResponse(responseObject);
             break;
           }
           case 'error': {
@@ -1074,7 +1092,14 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             );
           }
           case 'response.failed': {
-            const responseObject = requireObjectField(chunk, 'response', type);
+            // The event itself is the failure signal; a missing envelope only
+            // costs the error details, so still throw instead of decoding out.
+            const responseObject = readObjectField(chunk, 'response');
+            if (responseObject === undefined) {
+              throw new ChatProviderError(
+                'OpenAI Responses response.failed: Unknown error (no response in event)',
+              );
+            }
             const error = readResponsesFailedResponseError(responseObject);
             if (error !== undefined) {
               throw errorFromOpenAIResponsesEvent(

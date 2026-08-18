@@ -607,6 +607,7 @@ export class FooterComponent implements Component {
     if (state.permissionMode === 'yolo') modes.push(chalk.hex(colors.warning).bold('yolo'));
     if (state.planMode) modes.push(chalk.hex(colors.primary).bold('plan'));
     if (state.swarmMode) modes.push(chalk.hex(colors.accent).bold('swarm'));
+    if (state.leanModeActive) modes.push(chalk.hex(colors.success).bold('lean'));
     if (state.acp === 'healthy') modes.push(chalk.hex(colors.success).bold('acp'));
     if (state.acp === 'degraded') modes.push(chalk.hex(colors.warning).bold('acp!'));
     if (modes.length > 0) slots['mode'] = [modes.join(' ')];

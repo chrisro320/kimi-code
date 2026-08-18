@@ -389,6 +389,28 @@ describe('DeepSeek Anthropic tool schema compatibility', () => {
     },
   );
 
+  // The Responses API rejects the entire request when any tool's schema has no
+  // root `type` ("schema must be a JSON Schema of 'type: \"object\"', got
+  // 'type: null'"), so one unflattened tool takes the whole session down. Both
+  // other wires already flattened; this one did not, and the gap only surfaced
+  // when a live provider was switched to `openai_responses`.
+  it('flattens the real TaskOutput root union on the Responses wire', async () => {
+    expect(rootObjectUnionTool.parameters).toHaveProperty('anyOf');
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      modelName: 'deepseek-v4-pro',
+      apiKey: 'sk-probe',
+    });
+
+    const params = await captureResponsesBody(provider, undefined, [rootObjectUnionTool]);
+    const tools = params['tools'] as Array<Record<string, unknown>>;
+    const schema = tools[0]?.['parameters'] as Record<string, unknown>;
+
+    expect(schema['type']).toBe('object');
+    expect(schema).not.toHaveProperty('anyOf');
+    expect(schema['properties']).toHaveProperty('task_id');
+  });
+
   it.each(['compatible-model', 'deepseek'])(
     'leaves model %s tool schemas unchanged',
     async (modelName) => {
@@ -745,6 +767,7 @@ async function captureGoogleBody(
 async function captureResponsesBody(
   provider: ChatProvider,
   options?: GenerateOptions,
+  tools: Parameters<ChatProvider['generate']>[1] = [],
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   const client = sdkClient(provider) as { responses: { create: unknown } };
@@ -752,7 +775,7 @@ async function captureResponsesBody(
     captured = params as Record<string, unknown>;
     return Promise.resolve(responsesEventStream());
   });
-  await drain(await provider.generate('', [], PROBE_HISTORY, options));
+  await drain(await provider.generate('', tools, PROBE_HISTORY, options));
   if (captured === undefined) throw new Error('expected responses.create to be called');
   return captured;
 }
