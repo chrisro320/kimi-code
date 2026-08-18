@@ -1201,6 +1201,33 @@ describe('KimiTUI message flow', () => {
     expect(driver.state.appState.acp).toBeUndefined();
   });
 
+  it('shows the ACP badge from --acp-context before any session exists', async () => {
+    const startupInput = makeStartupInput();
+    const { driver } = await makeDriver(makeSession(), {}, {
+      ...startupInput,
+      cliOptions: { ...startupInput.cliOptions, acpContext: true },
+    });
+
+    // Startup is session-less, so `syncRuntimeState` has nothing to query
+    // until the first message lazily creates the session. Without the seed
+    // the badge stays dark for a turn while the flag is in force — and worse,
+    // `/lean`'s guard reads this same field, so it would wave lean through
+    // into a session that then resolves the conflict by calling
+    // `session.acpDisable()`, a machine-wide config write.
+    // `sessionId` is '' until a session is installed (initial app state).
+    expect(driver.state.appState.sessionId).toBe('');
+    expect(driver.state.appState.acpContext).toBe(true);
+    expect(driver.state.appState.acp).toBe('healthy');
+  });
+
+  it('leaves the ACP badge unset session-less without --acp-context', async () => {
+    const startupInput = makeStartupInput();
+    const { driver } = await makeDriver(makeSession(), {}, startupInput);
+
+    expect(driver.state.appState.sessionId).toBe('');
+    expect(driver.state.appState.acp).toBeUndefined();
+  });
+
   it('disables an inherited-enabled ACP manager when hydrating a lean session', async () => {
     const acpDisable = vi.fn(async () => {});
     const session = makeSession({

@@ -255,6 +255,13 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     leanMode: input.cliOptions.lean === true,
     leanModeActive: input.cliOptions.lean === true,
     acpContext: input.cliOptions.acpContext === true,
+    // Seeded like `leanModeActive`, and for the same reason: a session-less
+    // startup (the default) has nothing to ask for health until the first
+    // message lazily creates the session, so a badge driven only by
+    // `syncRuntimeState` would stay dark for a turn while the flag is in
+    // force. `syncRuntimeState` replaces this with the measured health as
+    // soon as a session exists, including a `degraded` downgrade.
+    acp: input.cliOptions.acpContext === true ? 'healthy' : undefined,
     dispatchMode: 'auto',
     thinkingEffort: 'off',
     contextUsage: 0,
