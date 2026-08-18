@@ -181,6 +181,39 @@ describe('CLI options parsing', () => {
     });
   });
 
+  describe('--acp-context', () => {
+    it('defaults to false and sets the flag when given', () => {
+      expect(parse([]).acpContext).toBe(false);
+      expect(parse(['--acp-context']).acpContext).toBe(true);
+    });
+
+    it('refuses --lean at parse time without running the main action', () => {
+      let mainCalled = false;
+      const program = createProgram(
+        '0.1.0-test',
+        () => {
+          mainCalled = true;
+        },
+        () => {},
+      );
+      program.exitOverride();
+      program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+      // Rejecting the pair must not reach session hydration, whose guard for
+      // the same conflict calls `session.acpDisable()` — a write to the
+      // machine-wide `contextManager` config section.
+      expect(() => program.parse(['node', 'kimi', '--lean', '--acp-context'])).toThrow(
+        /cannot be used with/,
+      );
+      expect(mainCalled).toBe(false);
+    });
+
+    it('accepts either flag on its own', () => {
+      expect(parse(['--lean']).lean).toBe(true);
+      expect(parse(['--acp-context']).lean).toBe(false);
+    });
+  });
+
   describe('--auto / --yolo / --plan with --session / --continue', () => {
     it('allows --auto with --continue', () => {
       const opts = parse(['--auto', '--continue']);
