@@ -2,7 +2,10 @@
  * `llmRequester` domain — durable request-trace wire Model and Ops.
  *
  * Defines `llm.tools_snapshot` snapshots and `llm.request` outbound request
- * traces, with replay restoring only the snapshot de-dup cursor.
+ * traces, with replay restoring only the snapshot de-dup cursor. A request
+ * trace carries `prefixMatch`, the count of leading messages unchanged since
+ * the previous request, so a KV-cache miss can be attributed to local context
+ * rebuild drift or to the server from the wire log alone.
  */
 
 import { z } from 'zod';
@@ -66,6 +69,7 @@ export const llmRequest = LlmRequestTraceModel.defineOp('llm.request', {
     systemPrompt: z.string().optional(),
     toolsHash: z.string(),
     messageCount: z.number(),
+    prefixMatch: z.number().optional(),
     turnStep: z.string().optional(),
     attempt: z.string().optional(),
     projection: z.enum(['strict', 'media-degraded', 'media-stripped']).optional(),

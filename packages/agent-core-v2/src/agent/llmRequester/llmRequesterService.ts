@@ -233,6 +233,8 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private registeredContextManager: ContextManager | undefined;
 
+  private lastMessageHashes: readonly string[] | undefined;
+
   private transformQueue: Promise<void> = Promise.resolve();
 
   private readonly transformLifetime = new AbortController();
@@ -1048,6 +1050,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     }
 
     const systemPromptHash = fingerprint(input.systemPrompt);
+    const messageHashes = input.messages.map((message) => fingerprint(JSON.stringify(message)));
+    const prefixMatch = countMatchingPrefix(this.lastMessageHashes, messageHashes);
+    this.lastMessageHashes = messageHashes;
     const overrides = this.config.get<ModelOverrides>('modelOverrides');
     const thinkingConfig = this.config.get<ThinkingConfig>(THINKING_SECTION);
     const modelConfig =
@@ -1075,6 +1080,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           : input.systemPrompt,
       toolsHash,
       messageCount: input.messages.length,
+      prefixMatch,
       turnStep: stringField(fields, 'turnStep'),
       attempt: stringField(fields, 'attempt'),
       projection: projectionField(fields),
@@ -1289,6 +1295,17 @@ function projectionField(
 
 function fingerprint(content: string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+function countMatchingPrefix(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): number | undefined {
+  if (previous === undefined) return undefined;
+  const limit = Math.min(previous.length, current.length);
+  let matched = 0;
+  while (matched < limit && previous[matched] === current[matched]) matched++;
+  return matched;
 }
 
 function apiStatusCode(error: unknown): number | undefined {

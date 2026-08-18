@@ -348,6 +348,7 @@ interface LlmRequestPayload {
   systemPrompt?: string;
   toolsHash: string;
   messageCount: number;
+  prefixMatch?: number;
   turnStep?: string;
   attempt?: string;
   projection?: 'strict' | 'media-degraded' | 'media-stripped';
