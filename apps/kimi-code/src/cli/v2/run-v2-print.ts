@@ -19,8 +19,10 @@
 import { readFile } from 'node:fs/promises';
 
 import {
+  ACP_MANAGER_ID,
   IAgentGoalService,
   IAgentLifecycleService,
+  IAgentLLMRequesterService,
   IAgentPermissionModeService,
   IAgentProfileService,
   IAgentPromptService,
@@ -208,6 +210,17 @@ export async function runV2Print(
 
     const resolved = await resolveNativeSession(app, opts, workDir, defaultModel, stderr);
     restorePermission = resolved.restorePermission;
+
+    // Applied here rather than inside resolveNativeSession because all three
+    // of its paths (create, --session, --continue) converge on this handle,
+    // and `--acp-context` should hold for a resumed session too. An override
+    // is process-local: nothing is written to the config section, so this
+    // cannot leak ACP into any other session on the machine.
+    if (opts.acpContext === true) {
+      resolved.agent.accessor
+        .get(IAgentLLMRequesterService)
+        .setContextManagerOverride(ACP_MANAGER_ID);
+    }
 
     telemetryService.setContext({ sessionId: resolved.session.id, model: resolved.telemetryModel });
     if (firstLaunch) {

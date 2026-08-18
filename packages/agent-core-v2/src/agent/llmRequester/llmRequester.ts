@@ -170,9 +170,23 @@ export interface IAgentLLMRequesterService {
   registerContextManager(manager: ContextManager): IDisposable;
 
   /**
-   * The registered manager when the `contextManager` config section names
-   * its `id`; `undefined` otherwise (not registered, not configured, or a
-   * mismatch — the mismatch warns once on first resolution).
+   * The agent's own choice of context manager, outranking the config section
+   * and never written back to it. Decided when the agent is materialized,
+   * because a manager rewrites the request prefix — the same reason
+   * `leanMode` is a session-creation option rather than a live toggle.
+   *
+   * Three states, and the third is not the same as the second: `undefined`
+   * (the default) means this agent expressed no choice and the global
+   * `contextManager` section decides; a string names the manager for this
+   * agent alone; `null` opts this agent out even while the section names one.
+   */
+  setContextManagerOverride(id: string | null | undefined): void;
+
+  /**
+   * The registered manager when this agent's override, or failing that the
+   * `contextManager` config section, names its `id`; `undefined` otherwise
+   * (opted out, not registered, not configured, or a mismatch — the mismatch
+   * warns once on first resolution).
    */
   getActiveContextManager(): ContextManager | undefined;
 

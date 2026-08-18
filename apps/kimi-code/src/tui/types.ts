@@ -56,7 +56,18 @@ export interface AppState {
   leanMode?: boolean;
   /** Whether the live session was actually created in lean mode. */
   leanModeActive?: boolean;
+  /**
+   * `--acp-context`: create every session of this run under the ACP context
+   * manager, this process only. Session-creation-time for the same reason as
+   * `leanMode`, and deliberately not mirrored back from the runtime — `acp`
+   * below already carries the live state.
+   */
+  acpContext?: boolean;
   acp?: 'healthy' | 'degraded';
+  /** ACP ref / active-block counts, mirrored from `agent.status.updated`.
+   *  Undefined whenever `acp` is undefined (ACP off, or a v1 session). */
+  acpRefs?: number;
+  acpActiveBlocks?: number;
   dispatchMode: DispatchMode;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');
    * mirrors the runtime. The single source of truth for the thinking state in

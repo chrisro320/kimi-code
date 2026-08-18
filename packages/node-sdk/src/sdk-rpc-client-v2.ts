@@ -1234,12 +1234,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       input.model !== undefined ||
       input.thinking !== undefined ||
       input.permission !== undefined ||
-      input.leanMode === true
+      input.leanMode === true ||
+      input.acpContext === true
     ) {
       const agent = await this.materializeMainAgent(handle, {
         model: input.model,
         thinking: input.thinking,
         leanMode: input.leanMode,
+        acpContext: input.acpContext,
       });
       if (input.permission !== undefined) {
         agent.accessor.get(IAgentPermissionModeService).setMode(input.permission);
@@ -1549,10 +1551,19 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       readonly model?: string;
       readonly thinking?: string;
       readonly leanMode?: boolean;
+      readonly acpContext?: boolean;
     },
   ): Promise<IAgentScopeHandle> {
     await this.modelReady;
     const agent = await ensureMainAgent(session);
+    // Applied before the bind attempt, not after: the manager choice does not
+    // depend on the profile, and the MODEL_NOT_CONFIGURED path below returns
+    // early — a session created with `--acp-context` against a model-less home
+    // would otherwise silently drop it. An override is never written to the
+    // config section, so a later call with no binding cannot clear it either.
+    if (binding?.acpContext === true) {
+      agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(ACP_MANAGER_ID);
+    }
     const profile = agent.accessor.get(IAgentProfileService);
     if (binding !== undefined || profile.data().profileName === undefined) {
       try {

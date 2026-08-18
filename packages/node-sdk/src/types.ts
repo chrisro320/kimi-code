@@ -140,6 +140,16 @@ export interface CreateSessionOptions {
    * cannot be turned on later without rewriting it.
    */
   readonly leanMode?: boolean;
+  /**
+   * Run this session under the ACP context manager, for this session only.
+   * Decided here for the same reason as `leanMode`: the manager rewrites the
+   * outgoing messages, so it is part of the request prefix.
+   *
+   * Unlike `session.acpEnable()`, which writes the machine-wide
+   * `contextManager` config section, this sets an agent-scoped override that
+   * is never persisted — other sessions, running or later, are unaffected.
+   */
+  readonly acpContext?: boolean;
   readonly metadata?: JsonObject | undefined;
   readonly kaos?: Kaos | undefined;
   readonly persistenceKaos?: Kaos | undefined;

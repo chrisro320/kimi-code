@@ -210,3 +210,64 @@ describe('FooterComponent acp badge', () => {
     expect(footer.render(120).join('\n')).toContain('acp!');
   });
 });
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+const visibleLength = (s: string): number => [...stripAnsi(s)].length;
+
+describe('FooterComponent acp line2 readout', () => {
+  const acpState: AppState = { ...appState, acp: 'healthy', acpRefs: 47, acpActiveBlocks: 0 };
+
+  it('shows refs and active blocks next to the context readout when acp is active', () => {
+    const footer = new FooterComponent(acpState);
+
+    const line2 = stripAnsi(footer.render(120)[1] ?? '');
+
+    expect(line2).toContain('context:');
+    expect(line2).toContain('acp r47 b0');
+    expect(line2).not.toContain('healthy');
+  });
+
+  it('leaves line2 byte-identical when acp is off', () => {
+    const footer = new FooterComponent(appState);
+
+    const line2 = stripAnsi(footer.render(120)[1] ?? '');
+
+    expect(line2).toBe(' '.repeat(120 - 'context: 0%'.length) + 'context: 0%');
+  });
+
+  it('renders the same line2 text for degraded as for healthy (health stays on line1)', () => {
+    const healthy = new FooterComponent(acpState).render(120)[1] ?? '';
+    const degraded =
+      new FooterComponent({ ...acpState, acp: 'degraded' }).render(120)[1] ?? '';
+
+    expect(stripAnsi(degraded)).toBe(stripAnsi(healthy));
+  });
+
+  it('hides the fragment when any of the three fields is missing', () => {
+    const footer = new FooterComponent({ ...appState, acp: 'healthy', acpRefs: 47 });
+
+    const line2 = stripAnsi(footer.render(120)[1] ?? '');
+
+    expect(line2).not.toContain('acp r');
+    expect(line2).toContain('context:');
+  });
+
+  it('stays within a narrow width', () => {
+    const footer = new FooterComponent(acpState);
+
+    const line2 = footer.render(30)[1] ?? '';
+
+    expect(visibleLength(line2)).toBeLessThanOrEqual(30);
+  });
+
+  it('truncates the transient hint instead of overlapping the acp fragment', () => {
+    const footer = new FooterComponent(acpState);
+    footer.setTransientHint('Press Ctrl+C again to exit');
+
+    const line2 = stripAnsi(footer.render(40)[1] ?? '');
+
+    expect([...line2].length).toBeLessThanOrEqual(40);
+    expect(line2).toContain('acp r47 b0');
+    expect(line2).not.toContain('Press Ctrl+C again to exit');
+  });
+});

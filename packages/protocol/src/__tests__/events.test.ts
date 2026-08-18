@@ -120,6 +120,28 @@ describe('events / display re-exports', () => {
     ).toBe(false);
   });
 
+  it('preserves acp ref/block counts on agent.status.updated', () => {
+    expect(
+      agentStatusUpdatedEventSchema.parse({
+        type: 'agent.status.updated',
+        acpRefs: 47,
+        acpActiveBlocks: 0,
+      }),
+    ).toEqual({ type: 'agent.status.updated', acpRefs: 47, acpActiveBlocks: 0 });
+    for (const bad of [-1, 1.5]) {
+      expect(
+        agentStatusUpdatedEventSchema.safeParse({ type: 'agent.status.updated', acpRefs: bad })
+          .success,
+      ).toBe(false);
+      expect(
+        agentStatusUpdatedEventSchema.safeParse({
+          type: 'agent.status.updated',
+          acpActiveBlocks: bad,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it('validates session-scoped daemon events with agentId and sessionId', () => {
     const parsed = eventSchema.parse({
       type: 'turn.started',

@@ -78,7 +78,7 @@ describe('handleAcpCommand', () => {
     await handleAcpCommand(host, '');
 
     expect(session.acpStatus).toHaveBeenCalledOnce();
-    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy' });
+    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy', acpRefs: 3, acpActiveBlocks: 2 });
     const [title, detail] = (host.showNotice as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
     expect(title).toBe('ACP status');
     expect(detail).toContain('enabled');
@@ -94,7 +94,11 @@ describe('handleAcpCommand', () => {
 
     await handleAcpCommand(host, 'status');
 
-    expect(host.setAppState).toHaveBeenCalledWith({ acp: undefined });
+    expect(host.setAppState).toHaveBeenCalledWith({
+      acp: undefined,
+      acpRefs: undefined,
+      acpActiveBlocks: undefined,
+    });
     const [, detail] = (host.showNotice as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
     expect(detail).toContain('disabled');
     expect(detail).toContain('store offline');
@@ -108,7 +112,7 @@ describe('handleAcpCommand', () => {
 
     expect(session.acpEnable).toHaveBeenCalledOnce();
     expect(session.acpStatus).toHaveBeenCalledOnce();
-    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy' });
+    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy', acpRefs: 3, acpActiveBlocks: 2 });
     expect(host.showNotice).toHaveBeenCalledWith(
       'ACP context manager enabled',
       'Takes effect on the next request.',
@@ -143,17 +147,26 @@ describe('handleAcpCommand', () => {
     await handleAcpCommand(host, 'enable');
 
     expect(session.acpEnable).toHaveBeenCalledOnce();
-    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'degraded' });
+    expect(host.setAppState).toHaveBeenCalledWith({ acp: 'degraded', acpRefs: 3, acpActiveBlocks: 2 });
   });
 
   it('disables the manager and clears the badge', async () => {
     const { host, session } = makeHost();
+    host.state.appState.acp = 'healthy';
+    host.state.appState.acpRefs = 3;
+    host.state.appState.acpActiveBlocks = 2;
 
     await handleAcpCommand(host, 'disable');
 
     expect(session.acpDisable).toHaveBeenCalledOnce();
-    expect(host.setAppState).toHaveBeenCalledWith({ acp: undefined });
+    expect(host.setAppState).toHaveBeenCalledWith({
+      acp: undefined,
+      acpRefs: undefined,
+      acpActiveBlocks: undefined,
+    });
     expect(host.state.appState.acp).toBeUndefined();
+    expect(host.state.appState.acpRefs).toBeUndefined();
+    expect(host.state.appState.acpActiveBlocks).toBeUndefined();
   });
 
   it('does not reset when the confirmation picker is cancelled', async () => {

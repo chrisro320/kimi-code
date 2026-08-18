@@ -235,6 +235,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private lastMessageHashes: readonly string[] | undefined;
 
+  /**
+   * Agent-scoped, in-memory, never persisted. `undefined` = no choice, defer
+   * to the config section; a string = this manager; `null` = opted out.
+   */
+  private contextManagerOverride: string | null | undefined;
+
   private transformQueue: Promise<void> = Promise.resolve();
 
   private readonly transformLifetime = new AbortController();
@@ -289,13 +295,24 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
   }
 
+  setContextManagerOverride(id: string | null | undefined): void {
+    this.contextManagerOverride = id;
+  }
+
   /**
    * Config naming a manager that has no (matching) registration warns once
    * per configured id — at first resolution, not at config load, because an
    * Agent-scope registration does not exist yet when config is read.
+   *
+   * The agent's own override is read first so a session-scoped choice never
+   * has to be written to the shared config file to take effect. `null` is an
+   * opt-out and must short-circuit before the section is consulted at all;
+   * `undefined` is the absence of a choice and falls through to it.
    */
   getActiveContextManager(): ContextManager | undefined {
-    const configuredId = this.config.get<string>(CONTEXT_MANAGER_SECTION);
+    const override = this.contextManagerOverride;
+    if (override === null) return undefined;
+    const configuredId = override ?? this.config.get<string>(CONTEXT_MANAGER_SECTION);
     if (configuredId === undefined) return undefined;
     const manager = this.registeredContextManager;
     if (manager !== undefined && manager.id === configuredId) {

@@ -1539,6 +1539,7 @@ function createTimingRequester(): IAgentLLMRequesterService {
     },
     compact: async () => ({ kind: 'unsupported' }),
     registerContextManager: () => ({ dispose: () => {} }),
+    setContextManagerOverride: () => {},
     getActiveContextManager: () => undefined,
     startInternal(_context, overrides, onPart, signal) {
       return this.start(overrides, onPart, signal);

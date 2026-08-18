@@ -89,6 +89,7 @@ import {
   BLOCKED_REF,
   buildStatusReport,
   collectBlockContent,
+  coveredMessageIds,
   createCore,
   createInitialState,
   defaultConfig,
@@ -96,6 +97,7 @@ import {
   findActiveAncestor,
   messageDocs,
   parseBlockIdArg,
+  prune,
   renderNudgeText,
   searchBlocks,
   type CompressionBlock,
@@ -156,10 +158,10 @@ export class AcpService extends Service implements IAcpService {
   private readonly core: CompressionCore;
   private readonly lifetime = new AbortController();
   private operation = Promise.resolve();
-  private lastUsage: { readonly usedContextTokens: number; readonly maxContextTokens: number } = {
-    usedContextTokens: 0,
-    maxContextTokens: 100_000,
-  };
+  private lastUsage: {
+    readonly measured: { readonly foldedTokens: number } | undefined;
+    readonly maxContextTokens: number;
+  } = { measured: undefined, maxContextTokens: 100_000 };
   /**
    * The last successful turn's input array (the view the model's refs were
    * issued against) plus the live-history snapshot used to validate reuse.
@@ -212,7 +214,7 @@ export class AcpService extends Service implements IAcpService {
           let durableRefs = this.currentStatus.refs;
           try {
             linked.throwIfAborted();
-            this.lastUsage = { usedContextTokens, maxContextTokens };
+            this.lastUsage = { measured: undefined, maxContextTokens };
             const loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
             linked.throwIfAborted();
             durableRefs = loaded.refs.length;
@@ -237,11 +239,17 @@ export class AcpService extends Service implements IAcpService {
             const kernelState = isCompressionState(loaded.compressionState)
               ? loaded.compressionState
               : createInitialState();
+            const foldedTokens = this.measureVisibleTokens(
+              projection.projection.messages,
+              kernelState,
+              usedContextTokens,
+            );
+            this.lastUsage = { measured: { foldedTokens }, maxContextTokens };
             const turn = this.core.processTurn({
               messages: projection.projection.messages,
               state: kernelState,
               config,
-              tokenCount: usedContextTokens,
+              tokenCount: foldedTokens,
               renderTags: 'text-only',
             });
             linked.throwIfAborted();
@@ -266,7 +274,7 @@ export class AcpService extends Service implements IAcpService {
               refs: nextSidecar.refs.length,
               blocks: turn.state.blocks.length,
               activeBlocks: turn.state.blocks.filter((block) => block.active).length,
-              contextUsage: maxContextTokens > 0 ? usedContextTokens / maxContextTokens : undefined,
+              contextUsage: maxContextTokens > 0 ? foldedTokens / maxContextTokens : undefined,
             });
             const nudge = renderTurnNudge(turn);
             const base = tagOnly ? messages : rebuilt.messages;
@@ -410,10 +418,10 @@ export class AcpService extends Service implements IAcpService {
         }
         const view = await this.toolView();
         if (!view.ok) return { ok: false, message: view.reason };
-        const usage = this.core.status(
+        const visible = this.visibleTokenCount(
+          view.projection.messages,
           view.state,
-          this.lastUsage.usedContextTokens,
-          defaultConfig(this.lastUsage.maxContextTokens),
+          this.usageFallback(),
         );
         const report = buildStatusReport(
           view.state,
@@ -422,6 +430,23 @@ export class AcpService extends Service implements IAcpService {
         );
         const status = this.currentStatus;
         const reason = status.reason === undefined ? '' : ` — ${status.reason}`;
+        if (visible === undefined) {
+          return {
+            ok: true,
+            message: [
+              `ACP ${this.isActive() ? 'active' : 'inactive'}; health: ${status.health}${reason}; manager ${status.managerId} v${status.managerVersion}.`,
+              'Context usage: unmeasured (no transform has reported a token count).',
+              `Blocks: ${status.activeBlocks} active / ${status.blocks} total.`,
+              '',
+              report,
+            ].join('\n'),
+          };
+        }
+        const usage = this.core.status(
+          view.state,
+          visible,
+          defaultConfig(this.lastUsage.maxContextTokens),
+        );
         return {
           ok: true,
           message: [
@@ -438,6 +463,38 @@ export class AcpService extends Service implements IAcpService {
         return { ok: false, message: `ACP status failed: ${reason}` };
       }
     });
+  }
+
+  private measureVisibleTokens(
+    messages: CoreMessage[],
+    state: CompressionState,
+    fallback: number,
+  ): number {
+    try {
+      if (coveredMessageIds(state).size === 0) return fallback;
+      const pruned = prune(messages, state);
+      let total = 0;
+      for (const message of pruned) {
+        total += defaultCountTokens(message.text ?? '');
+      }
+      return total;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private visibleTokenCount(
+    messages: CoreMessage[],
+    state: CompressionState,
+    fallback: number | undefined,
+  ): number | undefined {
+    const folded = this.measureVisibleTokens(messages, state, Number.NaN);
+    return Number.isNaN(folded) ? fallback : folded;
+  }
+
+  private usageFallback(): number | undefined {
+    const usage = this.currentStatus.contextUsage;
+    return usage === undefined ? undefined : Math.round(usage * this.lastUsage.maxContextTokens);
   }
 
   compress(input: {
@@ -582,16 +639,15 @@ export class AcpService extends Service implements IAcpService {
           activeBlocks: next.blocks.filter((entry) => entry.active).length,
           contextUsage: this.currentStatus.contextUsage,
         });
-        const { text, count } = collectBlockContent(
+        const { count } = collectBlockContent(
           view.state,
           block,
           [...view.projection.messages],
           { full },
         );
-        const body = count === 0 ? '(no restorable text content)' : text;
         return {
           ok: true,
-          message: `Restored ACP block ${block.blockId} (${count} item(s)); the originals rejoin the context view on the next request.\n\n${body}`,
+          message: `Restored ACP block ${block.blockId} (${count === 0 ? 'no restorable text content' : `${count} item(s)`}); the originals rejoin the context view on the next request.`,
         };
       } catch (error) {
         const reason = errorMessage(error);
@@ -699,31 +755,32 @@ export class AcpService extends Service implements IAcpService {
   statusSnapshot(): Promise<AcpStatus> {
     return this.serialize(async () => {
       this.lifetime.signal.throwIfAborted();
-      let loaded: AcpSidecar;
+      const current = this.currentStatus;
+      let view: AcpToolView;
       try {
-        loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+        view = await this.toolView();
       } catch (error) {
         const reason = errorMessage(error);
         this.degrade(reason, this.currentStatus.refs);
         return this.currentStatus;
       }
-      const blocks = isCompressionState(loaded.compressionState)
-        ? loaded.compressionState.blocks
-        : [];
-      const corrupt = loaded.compressionState !== null && !isCompressionState(loaded.compressionState);
-      if (corrupt) {
-        this.degrade('ACP sidecar compression state is corrupt', loaded.refs.length);
-        return this.currentStatus;
-      }
-      const current = this.currentStatus;
+      if (!view.ok) return this.currentStatus;
+      const visible = this.visibleTokenCount(
+        view.projection.messages,
+        view.state,
+        this.usageFallback(),
+      );
       return {
         managerId: ACP_MANAGER_ID,
         managerVersion: ACP_MANAGER_VERSION,
         health: current.health,
-        refs: loaded.refs.length,
-        blocks: blocks.length,
-        activeBlocks: blocks.filter((block) => block.active).length,
-        contextUsage: current.contextUsage,
+        refs: view.sidecar.refs.length,
+        blocks: view.state.blocks.length,
+        activeBlocks: view.state.blocks.filter((block) => block.active).length,
+        contextUsage:
+          visible === undefined || this.lastUsage.maxContextTokens <= 0
+            ? current.contextUsage
+            : visible / this.lastUsage.maxContextTokens,
         ...(current.reason === undefined ? {} : { reason: current.reason }),
       };
     });
@@ -771,7 +828,12 @@ export class AcpService extends Service implements IAcpService {
   private setStatus(status: AcpStatus): void {
     this.currentStatus = status;
     if (this.requester.getActiveContextManager()?.id !== ACP_MANAGER_ID) return;
-    this.eventBus.publish({ type: 'agent.status.updated', acp: status.health });
+    this.eventBus.publish({
+      type: 'agent.status.updated',
+      acp: status.health,
+      acpRefs: status.refs,
+      acpActiveBlocks: status.activeBlocks,
+    });
   }
 
   private appendTodoList(summary: string): string {

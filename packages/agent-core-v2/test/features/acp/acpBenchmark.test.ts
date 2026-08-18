@@ -138,8 +138,11 @@ describe('ACP long-session benchmark (synthetic)', () => {
 
       const restored = await acpService.decompress({ blockId: 'b1' });
       expect(restored.ok, restored.message).toBe(true);
-      // 'turn 3 qqq' lives only inside fold b1; 'turn 1' is kernel-kept and proves nothing.
-      expect(restored.message).toContain('turn 3 qqq');
+      // The decompress result carries only confirmation (block id + item count);
+      // the restored content re-enters the context view on the next prompt below.
+      expect(restored.message).toContain('b1');
+      expect(restored.message).toContain('8 item(s)');
+      expect(restored.message).not.toContain('turn 3 qqq');
 
       await acp.ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 14 post-restore check' }] });
       await acp.ctx.untilTurnEnd();
