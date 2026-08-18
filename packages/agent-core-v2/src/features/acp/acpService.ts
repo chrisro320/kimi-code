@@ -828,7 +828,12 @@ export class AcpService extends Service implements IAcpService {
   private setStatus(status: AcpStatus): void {
     this.currentStatus = status;
     if (this.requester.getActiveContextManager()?.id !== ACP_MANAGER_ID) return;
-    this.eventBus.publish({ type: 'agent.status.updated', acp: status.health });
+    this.eventBus.publish({
+      type: 'agent.status.updated',
+      acp: status.health,
+      acpRefs: status.refs,
+      acpActiveBlocks: status.activeBlocks,
+    });
   }
 
   private appendTodoList(summary: string): string {

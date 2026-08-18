@@ -320,17 +320,30 @@ describe('AcpService', () => {
   it('publishes the acp health slice on the agent event bus while the manager is active', async () => {
     const setup = createService('publish');
     owned.push(setup.disposables);
-    const seen: Array<'healthy' | 'degraded'> = [];
+    const seen: Array<{
+      acp: 'healthy' | 'degraded';
+      acpRefs: number | undefined;
+      acpActiveBlocks: number | undefined;
+    }> = [];
     setup.eventBus.subscribe('agent.status.updated', (event) => {
-      if (event.acp !== undefined) seen.push(event.acp);
+      if (event.acp !== undefined) {
+        seen.push({
+          acp: event.acp,
+          acpRefs: event.acpRefs,
+          acpActiveBlocks: event.acpActiveBlocks,
+        });
+      }
     });
     const duplicate = textMessage('same');
 
     await transform(setup.requester.manager(), [duplicate, duplicate]);
-    expect(seen).toEqual(['healthy']);
+    expect(seen).toEqual([{ acp: 'healthy', acpRefs: 2, acpActiveBlocks: 0 }]);
 
     await transform(setup.requester.manager(), [duplicate]);
-    expect(seen).toEqual(['healthy', 'degraded']);
+    expect(seen).toEqual([
+      { acp: 'healthy', acpRefs: 2, acpActiveBlocks: 0 },
+      { acp: 'degraded', acpRefs: 2, acpActiveBlocks: 0 },
+    ]);
   });
 
   it('stays silent on the event bus while another context manager is active', async () => {
