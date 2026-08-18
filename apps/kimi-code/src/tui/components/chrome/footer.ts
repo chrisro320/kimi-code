@@ -509,13 +509,22 @@ export class FooterComponent implements Component {
       }
     }
 
-    // ── Line 2: transient hint (bottom-left) + context (right) ──
+    // ── Line 2: transient hint (bottom-left) + context / ACP readout (right) ──
     const contextText = formatContextStatus(
       state.contextUsage,
       state.contextTokens,
       state.maxContextTokens,
     );
-    const contextWidth = visibleWidth(contextText);
+    const acpText =
+      state.acp !== undefined && state.acpRefs !== undefined && state.acpActiveBlocks !== undefined
+        ? `acp r${state.acpRefs} b${state.acpActiveBlocks}`
+        : undefined;
+    const contextWidth =
+      visibleWidth(contextText) + (acpText === undefined ? 0 : visibleWidth(`  ·  ${acpText}`));
+    const contextStyled =
+      acpText === undefined
+        ? chalk.hex(colors.text)(contextText)
+        : chalk.hex(colors.text)(contextText) + chalk.hex(colors.textMuted)(`  ·  ${acpText}`);
     let line2: string;
     if (this.transientHint) {
       const maxHintWidth = Math.max(0, width - contextWidth - 1);
@@ -528,10 +537,10 @@ export class FooterComponent implements Component {
       line2 =
         chalk.hex(colors.warning).bold(shownHint) +
         ' '.repeat(pad) +
-        chalk.hex(colors.text)(contextText);
+        contextStyled;
     } else {
       const leftPad = Math.max(0, width - contextWidth);
-      line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
+      line2 = ' '.repeat(leftPad) + contextStyled;
     }
 
     const rows = [truncateToWidth(line1, width), truncateToWidth(line2, width)];

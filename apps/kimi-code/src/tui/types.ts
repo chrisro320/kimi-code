@@ -64,6 +64,10 @@ export interface AppState {
    */
   acpContext?: boolean;
   acp?: 'healthy' | 'degraded';
+  /** ACP ref / active-block counts, mirrored from `agent.status.updated`.
+   *  Undefined whenever `acp` is undefined (ACP off, or a v1 session). */
+  acpRefs?: number;
+  acpActiveBlocks?: number;
   dispatchMode: DispatchMode;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');
    * mirrors the runtime. The single source of truth for the thinking state in

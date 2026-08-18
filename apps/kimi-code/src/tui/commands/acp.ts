@@ -1,8 +1,19 @@
+import type { AcpStatusInfo } from '@moonshot-ai/kimi-code-sdk';
+
 import { ChoicePickerComponent } from '../components/dialogs/choice-picker';
 import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
+import type { AppState } from '../types';
 import type { SlashCommandHost } from './dispatch';
 
 const ACP_USAGE = 'Usage: /acp [status|enable|disable|reset]';
+
+function acpStatePatch(
+  status: AcpStatusInfo,
+): Pick<AppState, 'acp' | 'acpRefs' | 'acpActiveBlocks'> {
+  return status.enabled
+    ? { acp: status.health, acpRefs: status.refs, acpActiveBlocks: status.activeBlocks }
+    : { acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined };
+}
 
 export async function handleAcpCommand(host: SlashCommandHost, args: string): Promise<void> {
   const session = host.session;
@@ -15,7 +26,7 @@ export async function handleAcpCommand(host: SlashCommandHost, args: string): Pr
     case '':
     case 'status': {
       const status = await session.acpStatus();
-      host.setAppState({ acp: status.enabled ? status.health : undefined });
+      host.setAppState(acpStatePatch(status));
       const lines = [
         `Manager: ${status.managerId} v${status.managerVersion} (${status.enabled ? 'enabled' : 'disabled'})`,
         `Health: ${status.health}${status.reason === undefined ? '' : ` — ${status.reason}`}`,
@@ -36,13 +47,13 @@ export async function handleAcpCommand(host: SlashCommandHost, args: string): Pr
       }
       await session.acpEnable();
       const status = await session.acpStatus();
-      host.setAppState({ acp: status.enabled ? status.health : undefined });
+      host.setAppState(acpStatePatch(status));
       host.showNotice('ACP context manager enabled', 'Takes effect on the next request.');
       return;
     }
     case 'disable': {
       await session.acpDisable();
-      host.setAppState({ acp: undefined });
+      host.setAppState({ acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined });
       host.showNotice('ACP context manager disabled', 'Compressed state is kept; /acp reset deletes it.');
       return;
     }

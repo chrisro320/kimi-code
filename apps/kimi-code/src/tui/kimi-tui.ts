@@ -2148,7 +2148,7 @@ export class KimiTUI {
   }
 
   async syncRuntimeState(session: Session = this.requireSession()): Promise<void> {
-    const [status, goalResult, acp] = await Promise.all([
+    const [status, goalResult, acpState] = await Promise.all([
       session.getStatus(),
       session.getGoal(),
       this.acpBadgeState(session),
@@ -2160,8 +2160,11 @@ export class KimiTUI {
     // per-agent state set in an earlier, non-lean session; the /acp and /lean
     // commands guard the interactive toggle order, but hydration needs its own
     // check for that inherited case. Lean wins: disable ACP for this session.
-    const resolvedAcp = leanModeActive && acp !== undefined ? undefined : acp;
-    if (leanModeActive && acp !== undefined) {
+    const resolvedAcp =
+      leanModeActive && acpState.acp !== undefined
+        ? { acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined }
+        : acpState;
+    if (leanModeActive && acpState.acp !== undefined) {
       await session.acpDisable().catch(() => {});
       this.showStatus(
         'ACP conflicts with lean mode — disabled ACP for this session.',
@@ -2182,19 +2185,25 @@ export class KimiTUI {
       contextUsage: status.contextUsage,
       sessionTitle: session.summary?.title ?? null,
       goal: goalResult.goal,
-      acp: resolvedAcp,
+      ...resolvedAcp,
     });
     this.syncAdditionalDirs(session);
   }
 
   // ACP is a v2-only capability; v1 sessions answer NOT_IMPLEMENTED and simply
   // leave the badge unset.
-  private async acpBadgeState(session: Session): Promise<AppState['acp']> {
+  private async acpBadgeState(
+    session: Session,
+  ): Promise<Pick<AppState, 'acp' | 'acpRefs' | 'acpActiveBlocks'>> {
     try {
       const status = await session.acpStatus();
-      return status.enabled ? status.health : undefined;
+      return status.enabled
+        ? { acp: status.health, acpRefs: status.refs, acpActiveBlocks: status.activeBlocks }
+        : { acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined };
     } catch (error) {
-      if (isKimiError(error) && error.code === ErrorCodes.NOT_IMPLEMENTED) return undefined;
+      if (isKimiError(error) && error.code === ErrorCodes.NOT_IMPLEMENTED) {
+        return { acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined };
+      }
       throw error;
     }
   }

@@ -721,6 +721,8 @@ export class SessionEventHandler {
     if (event.planMode !== undefined) patch.planMode = event.planMode;
     if (event.swarmMode !== undefined) patch.swarmMode = event.swarmMode;
     if (event.acp !== undefined) patch.acp = event.acp;
+    if (event.acpRefs !== undefined) patch.acpRefs = event.acpRefs;
+    if (event.acpActiveBlocks !== undefined) patch.acpActiveBlocks = event.acpActiveBlocks;
     if (event.dispatchQueued !== undefined) {
       this.dispatchQueuedCount = event.dispatchQueued;
       this.syncBackgroundTaskBadge();
