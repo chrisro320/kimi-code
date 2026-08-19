@@ -1213,7 +1213,7 @@ describe('KimiTUI message flow', () => {
     // the badge stays dark for a turn while the flag is in force — and worse,
     // `/lean`'s guard reads this same field, so it would wave lean through
     // into a session that then resolves the conflict by calling
-    // `session.acpDisable()`, a machine-wide config write.
+    // `session.acpDisable()`, pinning an ACP opt-out on the agent.
     // `sessionId` is '' until a session is installed (initial app state).
     expect(driver.state.appState.sessionId).toBe('');
     expect(driver.state.appState.acpContext).toBe(true);

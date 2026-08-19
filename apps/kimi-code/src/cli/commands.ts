@@ -125,10 +125,9 @@ export function createProgram(
     .option('--plan', 'Start in plan mode.', false)
     .option('--lean', 'Start in lean mode: a one-line prompt and the lean-ctx tools only.', false)
     // Refused here rather than at session hydration: the hydration guard
-    // resolves the same conflict by calling `session.acpDisable()`, which
-    // writes the machine-wide `contextManager` config section — turning ACP
-    // off for every other session on the box. Rejecting an illegal flag pair
-    // must not have a side effect, least of all a global one.
+    // resolves the same conflict by calling `session.acpDisable()`, which pins
+    // an ACP opt-out on the agent for the rest of the session. Rejecting an
+    // illegal flag pair must not have a side effect on session state.
     .addOption(
       new Option(
         '--acp-context',
