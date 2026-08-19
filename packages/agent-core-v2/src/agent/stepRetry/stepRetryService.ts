@@ -1,3 +1,5 @@
+/* oxlint-disable typescript-eslint/no-unsafe-declaration-merging, eslint-plugin-import/namespace -- Event2 class+payload-interface declaration merging is the sanctioned event-declaration idiom. */
+
 /**
  * `stepRetry` domain — `IAgentStepRetryService` implementation.
  *
@@ -20,11 +22,10 @@
  * constructed with the scope so the handler registers before the first turn
  * runs.
  */
-
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { defineState } from '#/_base/state/stateRegistry';
+import { defineState } from '#/state/state';
 import {
   DEFAULT_MAX_RETRY_ATTEMPTS,
   readRetryAfterMs,
@@ -35,18 +36,21 @@ import {
 import { isCapacityMarkedContextOverflow, isRetryableGenerateError } from '#/kosong/contract/errors';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
+import { Event2 } from '#/app/event/event2';
 import { unwrapErrorCause } from '#/errors';
 import {
   IAgentLoopService,
   type LoopErrorContext,
 } from '#/agent/loop/loop';
 import { LOOP_CONTROL_SECTION, type LoopControl } from '#/agent/loop/configSection';
+import { TurnStarted } from '#/agent/loop/turnEvents';
+import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 
 import { IAgentStepRetryService } from './stepRetry';
 
-export interface TurnStepRetryingEvent {
-  readonly type: 'turn.step.retrying';
+export interface TurnStepRetryingPayload {
   readonly turnId: number;
   readonly step: number;
   readonly stepId?: string;
@@ -59,11 +63,11 @@ export interface TurnStepRetryingEvent {
   readonly statusCode?: number;
 }
 
-declare module '#/app/event/eventBus' {
-  interface DomainEventMap {
-    'turn.step.retrying': TurnStepRetryingEvent;
-  }
+export class TurnStepRetrying extends Event2<TurnStepRetryingPayload> {
+  static override readonly type = 'turn.step.retrying';
+  static override readonly observable = true;
 }
+export interface TurnStepRetrying extends TurnStepRetryingPayload {}
 
 export const stepRetryLastFailedDriverIdKey = defineState<string | undefined>(
   'stepRetry.lastFailedDriverId',
@@ -92,7 +96,6 @@ export const stepRetryCapacityAttemptsKey = defineState<number>(
 export const CAPACITY_RETRY_INTERVAL_MS = 60_000;
 export const CAPACITY_RETRY_BUDGET = 10;
 
-// NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentStepRetryService extends Disposable implements IAgentStepRetryService {
   declare readonly _serviceBrand: undefined;
 
@@ -100,12 +103,18 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IConfigService private readonly config: IConfigService,
     @IEventBus private readonly eventBus: IEventBus,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @IAgentStateService private readonly states: IAgentStateService,
+    // Ordering edge, not a real consumer: injecting the full-compaction
+    // service forces its constructor (which registers the 'full-compaction'
+    // loop error handler) to run before the `before: 'full-compaction'`
+    // registration below.
+    @IAgentFullCompactionService private readonly _fullCompactionOrdering: IAgentFullCompactionService,
   ) {
     super();
-    this.states.register(stepRetryLastFailedDriverIdKey);
-    this.states.register(stepRetryFailedAttemptsKey);
-    this.states.register(stepRetryCapacityAttemptsKey);
+    this.states.contributeState(stepRetryLastFailedDriverIdKey);
+    this.states.contributeState(stepRetryFailedAttemptsKey);
+    this.states.contributeState(stepRetryCapacityAttemptsKey);
     this._register(
       this.loopService.registerLoopErrorHandler(
         {
@@ -138,7 +147,7 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
         await next();
       }),
     );
-    this._register(this.eventBus.subscribe('turn.started', () => this.resetAttempts()));
+    this._register(this.eventBus.subscribe(TurnStarted, () => this.resetAttempts()));
   }
 
   private get lastFailedDriverId(): string | undefined {
@@ -199,17 +208,18 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
 
     const delayMs =
       readRetryAfterMs(error) ?? retryBackoffDelays(maxAttempts)[this.failedAttempts - 1] ?? 0;
-    this.eventBus.publish({
-      type: 'turn.step.retrying',
-      turnId: context.turnId,
-      step,
-      stepId: context.stepId,
-      failedAttempt: this.failedAttempts,
-      nextAttempt: this.failedAttempts + 1,
-      maxAttempts,
-      delayMs,
-      ...retryErrorFields(error),
-    });
+    void this.dispatcher.dispatch(
+      new TurnStepRetrying({
+        turnId: context.turnId,
+        step,
+        stepId: context.stepId,
+        failedAttempt: this.failedAttempts,
+        nextAttempt: this.failedAttempts + 1,
+        maxAttempts,
+        delayMs,
+        ...retryErrorFields(error),
+      }),
+    );
     await sleepForRetry(delayMs, context.signal);
 
     if (context.currentStep?.signal.aborted === true) return false;
@@ -229,17 +239,18 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
     this.capacityAttempts += 1;
 
     const delayMs = CAPACITY_RETRY_INTERVAL_MS;
-    this.eventBus.publish({
-      type: 'turn.step.retrying',
-      turnId: context.turnId,
-      step,
-      stepId: context.stepId,
-      failedAttempt: this.capacityAttempts,
-      nextAttempt: this.capacityAttempts + 1,
-      maxAttempts: CAPACITY_RETRY_BUDGET + 1,
-      delayMs,
-      ...retryErrorFields(error),
-    });
+    void this.dispatcher.dispatch(
+      new TurnStepRetrying({
+        turnId: context.turnId,
+        step,
+        stepId: context.stepId,
+        failedAttempt: this.capacityAttempts,
+        nextAttempt: this.capacityAttempts + 1,
+        maxAttempts: CAPACITY_RETRY_BUDGET + 1,
+        delayMs,
+        ...retryErrorFields(error),
+      }),
+    );
     await sleepForRetry(delayMs, context.signal);
 
     if (context.currentStep?.signal.aborted === true) return false;

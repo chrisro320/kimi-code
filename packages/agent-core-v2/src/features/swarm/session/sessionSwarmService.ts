@@ -1,3 +1,5 @@
+/* oxlint-disable typescript-eslint/no-unsafe-declaration-merging, eslint-plugin-import/namespace -- Event2 class+payload-interface declaration merging is the sanctioned event-declaration idiom. */
+
 /**
  * `sessionSwarm` domain — `ISessionSwarmService` implementation.
  *
@@ -26,7 +28,6 @@
  * invariant to enforce. Bound at Session scope — contributed into every
  * Session scope by `SwarmFeature` (`features/swarm/swarmFeature`).
  */
-
 import type { TokenUsage } from '#/kosong/contract/usage';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { Error2, ErrorCodes } from '#/errors';
@@ -36,7 +37,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
-import { IEventBus } from '#/app/event/eventBus';
+import { Event2 } from '#/app/event/event2';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
@@ -79,7 +80,10 @@ import {
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
-import { ISessionProcessRunner } from '#/session/process/processRunner';
+import { IAgentRuntimeBindingService } from '#/agent/runtimeBinding/runtimeBinding';
+import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
+import { IRuntimeResolver } from '#/workspace/workspaceInstance/workspaceInstanceManager';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ILogService } from '#/_base/log/log';
 
 import {
@@ -97,17 +101,16 @@ import {
   type AgentRunAttemptHandle,
 } from './agentRunBatch';
 
-export interface SubagentSuspendedEvent {
-  readonly type: 'subagent.suspended';
+export interface SubagentSuspendedPayload {
   readonly subagentId: string;
   readonly reason: string;
 }
 
-declare module '#/app/event/eventBus' {
-  interface DomainEventMap {
-    'subagent.suspended': SubagentSuspendedEvent;
-  }
+export class SubagentSuspended extends Event2<SubagentSuspendedPayload> {
+  static override readonly type = 'subagent.suspended';
+  static override readonly observable = true;
 }
+export interface SubagentSuspended extends SubagentSuspendedPayload {}
 
 const RESUMED_PROFILE_FALLBACK = 'subagent';
 
@@ -137,7 +140,7 @@ export class SessionSwarmService implements ISessionSwarmService {
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @ISessionContext private readonly sessionContext: ISessionContext,
     @ISessionMetadata private readonly metadata: ISessionMetadata,
-    @ISessionProcessRunner private readonly processRunner: ISessionProcessRunner,
+    @IRuntimeResolver private readonly runtimeResolver: IRuntimeResolver,
     @ILogService private readonly log: ILogService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionSubagentRoutingService
@@ -185,11 +188,12 @@ export class SessionSwarmService implements ISessionSwarmService {
       retry: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, true),
       suspended: (event) => {
         const caller = this.lifecycle.get(callerAgentId);
-        caller?.accessor.get(IEventBus)?.publish({
-          type: 'subagent.suspended',
-          subagentId: event.agentId,
-          reason: event.reason,
-        });
+        void caller?.accessor.get(IEventDispatcher)?.dispatch(
+          new SubagentSuspended({
+            subagentId: event.agentId,
+            reason: event.reason,
+          }),
+        );
       },
     };
     const maxConcurrency = await this.resolveRiskAwareMaxConcurrency(
@@ -266,6 +270,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       });
     }
     const callerData = caller.accessor.get(IAgentProfileService).data();
+    const callerRuntime = caller.accessor.get(IAgentRuntimeBindingService).current;
     if (callerData.modelAlias === undefined) {
       throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Caller agent has no model bound', {
         details: { agentId: callerAgentId },
@@ -326,6 +331,7 @@ export class SessionSwarmService implements ISessionSwarmService {
           },
           labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
           workspaceCwd: worktree?.cwd,
+          runtimeId: callerRuntime.runtimeId,
         });
       } catch (error) {
         throw wrapSubagentModelError(error, final.model, callerData.modelAlias);
@@ -355,11 +361,20 @@ export class SessionSwarmService implements ISessionSwarmService {
         // subagent actually runs on.
         model: final.model,
       });
-      const promptText = await applyProfilePromptPrefix(profile, options.prompt, {
-        cwd: worktree?.cwd ?? callerCwd,
-        runner: this.processRunner,
-        log: this.log,
-      });
+      const processLease = this.runtimeResolver.acquire(callerRuntime, ['process']);
+      let promptText: string;
+      try {
+        const view = new RuntimeWorkspaceView(processLease.runtime, {
+          workDir: worktree?.cwd ?? callerCwd,
+        });
+        promptText = await applyProfilePromptPrefix(profile, options.prompt, {
+          cwd: view.workDir,
+          process: processLease.runtime.process!,
+          log: this.log,
+        });
+      } finally {
+        processLease.dispose();
+      }
       if (releasePoolSlot !== undefined) {
         this.poolSlots.set(child.id, releasePoolSlot);
         batchPoolAgents.add(child.id);

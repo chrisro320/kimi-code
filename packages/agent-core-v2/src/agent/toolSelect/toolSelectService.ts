@@ -28,13 +28,17 @@ import { ILogService } from '#/_base/log/log';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { defineState } from '#/_base/state/stateRegistry';
+import { defineState } from '#/state/state';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IEventBus } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import type { Tool } from '#/kosong/contract/tool';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { ContextSpliced } from '#/agent/contextMemory/contextEvents';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { CompactionCompleted } from '#/agent/fullCompaction/compactionOps';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { WarningIssued } from '#/agent/profile/profileOps';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { isMcpToolName, type ToolInfo } from '#/tool/toolContract';
@@ -85,12 +89,13 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IFlagService private readonly flags: IFlagService,
-    @IEventBus private readonly eventBus: IEventBus,
+    @IEventBus eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @ILogService private readonly log?: ILogService,
   ) {
     super();
-    this.states.register(toolSelectPendingLoadedKey);
+    this.states.contributeState(toolSelectPendingLoadedKey);
     this._register(
       toolExecutor.registerUnavailableToolDescriber((name) => this.describeUnavailableTool(name)),
     );
@@ -98,12 +103,12 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       toolExecutor.registerMissingToolDescriber((name) => this.describeMissingTool(name)),
     );
     this._register(
-      eventBus.subscribe('compaction.completed', () => {
+      eventBus.subscribe(CompactionCompleted, () => {
         this.pendingLoaded.clear();
       }),
     );
     this._register(
-      eventBus.subscribe('context.spliced', (splice) => {
+      eventBus.subscribe(ContextSpliced, (splice) => {
         if (splice.deleteCount === 0 || splice.messages.length > 0) return;
         this.dropPendingLoadedNotLanded();
       }),
@@ -205,7 +210,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       : `Lean mode is missing ${missing.join(', ')}; the session runs with the rest.`;
     this.log?.warn(message, { missing: [...missing] });
     try {
-      this.eventBus.publish({ type: 'warning', code: 'lean-mode-tools-unavailable', message });
+      void this.dispatcher.dispatch(new WarningIssued({ code: 'lean-mode-tools-unavailable', message }));
     } catch {
     }
   }

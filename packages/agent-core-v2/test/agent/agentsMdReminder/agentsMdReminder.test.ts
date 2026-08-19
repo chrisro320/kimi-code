@@ -1,13 +1,6 @@
-/**
- * Scenario: discover uninjected AGENTS.md files from canonical tool accesses and Bash targets.
- * Responsibilities: seeding, once-only reminders, queue delivery, probing, and path extraction.
- * Wiring: real reminder, executor, parser, and host filesystem with telemetry/event stubs.
- * Run: pnpm exec vitest run test/agent/agentsMdReminder/agentsMdReminder.test.ts
- */
-
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, normalize } from 'pathe';
+import { join, normalize, basename, dirname } from 'pathe';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,6 +13,8 @@ import type { ToolCall } from '#/kosong/contract/message';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem, type HostFileStat } from '#/os/interface/hostFileSystem';
+import type { RuntimeLease } from '#/runtime/runtime';
+import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import {
   ToolAccesses,
@@ -42,6 +37,7 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { profileKey } from '#/agent/profile/profileOps';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentToolDedupeService } from '#/agent/toolDedupe/toolDedupe';
@@ -50,7 +46,7 @@ import { IAgentSystemReminderService } from '#/agent/systemReminder/systemRemind
 import type { PromptOrigin } from '#/agent/contextMemory/types';
 import { OrderedHookSlot } from '#/hooks';
 import { IModelCatalog } from '#/kosong/model/catalog';
-import { IWireService } from '#/wire/wire';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import type { ToolDidExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
 import { AgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminderService';
@@ -86,7 +82,7 @@ interface Harness {
   readonly ix: TestInstantiationService;
   readonly events: ToolExecutorEventStubs;
   readonly reminder: IAgentAgentsMdReminderService;
-  readonly wire: IWireService;
+  readonly dispatcher: IEventDispatcher;
   readonly telemetryEvents: TelemetryRecord[];
   readonly reminders: CapturedReminder[];
 }
@@ -135,27 +131,29 @@ function createHarness(
       } else {
         reg.defineInstance(IAgentToolExecutorService, events.executor);
       }
-      const wire: IWireService = {
+      const dispatcher: IEventDispatcher = {
         _serviceBrand: undefined,
         hooks: { onDidRestore: new OrderedHookSlot() },
-        dispatch: () => {},
-        seal: async () => {},
-        restore: async () => {},
-        flush: async () => {},
-        getModel: () => ({
-          ...(options.restoredProfile ?? { systemPrompt: '', agentsMdPaths: undefined }),
-          modelAlias: options.minimalMode === true ? 'minimal/model' : 'plain/model',
-          leanMode: options.leanMode,
-        }),
-      } as unknown as IWireService;
-      reg.defineInstance(IWireService, wire);
+        dispatch: async () => {},
+      } as unknown as IEventDispatcher;
+      reg.defineInstance(IEventDispatcher, dispatcher);
       reg.definePartialInstance(IModelCatalog, {
         get: (id: string) => ({
           capabilities: { minimal_mode: id === 'minimal/model' },
         }),
       } as unknown as Partial<IModelCatalog>);
       reg.defineInstance(IBootstrapService, { homeDir } as unknown as IBootstrapService);
-      reg.defineInstance(IAgentStateService, new AgentStateService());
+      const agentState = new AgentStateService();
+      agentState.contributeState(profileKey);
+      agentState.set(profileKey, {
+        thinkingLevel: 'off',
+        renderGeneration: 0,
+        systemPrompt: options.restoredProfile?.systemPrompt ?? '',
+        agentsMdPaths: options.restoredProfile?.agentsMdPaths,
+        modelAlias: options.minimalMode === true ? 'minimal/model' : 'plain/model',
+        leanMode: options.leanMode,
+      });
+      reg.defineInstance(IAgentStateService, agentState);
       reg.defineInstance(IAgentSystemReminderService, {
         _serviceBrand: undefined,
         appendSystemReminder: (content: string, origin: PromptOrigin) => {
@@ -173,12 +171,44 @@ function createHarness(
         scope: (sub?: string): string =>
           sub ? `sessions/workspace-1/session-1/${sub}` : 'sessions/workspace-1/session-1',
       } satisfies ISessionContext);
-      reg.defineInstance(IHostFileSystem, options.hostFs ?? new HostFileSystem());
-      reg.defineInstance(IHostEnvironment, {
+      const hostFs = options.hostFs ?? new HostFileSystem();
+      const hostEnvironment = {
         _serviceBrand: undefined,
         homeDir,
         pathClass: options.pathClass ?? 'posix',
-      } as unknown as IHostEnvironment);
+      } as unknown as IHostEnvironment;
+      reg.defineInstance(IHostFileSystem, hostFs);
+      reg.defineInstance(IHostEnvironment, hostEnvironment);
+      reg.defineInstance(IAgentRuntimeService, {
+        _serviceBrand: undefined,
+        onDidChange: () => ({ dispose: () => {} }),
+        isAvailable: () => true,
+        inspect() { return this.acquire().runtime; },
+        acquire: (): RuntimeLease => ({
+          runtime: {
+            identity: { workspaceId: 'workspace-1', runtimeId: 'local', generation: 'test' },
+            capabilities: new Set(['fs', 'watch', 'process', 'terminal']),
+            environment: hostEnvironment,
+            path: {
+              separator: options.pathClass === 'win32' ? '\\' : '/',
+              delimiter: options.pathClass === 'win32' ? ';' : ':',
+              isAbsolute: (path: string) => path.startsWith('/') || /^[A-Za-z]:[\\\\]/.test(path),
+              join,
+              relative: (from: string, to: string) => normalize(to).replace(`${normalize(from)}/`, ''),
+              resolve: (...paths: readonly string[]) => normalize(join(...paths)),
+              basename: (path: string) => basename(path),
+              dirname: (path: string) => dirname(path),
+            },
+            workspace: { mapRoots: (roots) => roots },
+            fs: hostFs,
+            status: 'ready',
+            onDidChangeStatus: () => ({ dispose: () => {} }),
+            dispose: () => {},
+          },
+          track: (resource) => resource,
+          dispose: () => {},
+        }),
+      } satisfies IAgentRuntimeService);
       reg.defineInstance(IBashParserService, new BashParserService());
       reg.defineInstance(
         ITelemetryService,
@@ -193,8 +223,8 @@ function createHarness(
     strict: true,
   });
   const reminder = ix.get(IAgentAgentsMdReminderService);
-  const wire = ix.get(IWireService);
-  return { ix, events, reminder, wire, telemetryEvents, reminders };
+  const dispatcher = ix.get(IEventDispatcher);
+  return { ix, events, reminder, dispatcher, telemetryEvents, reminders };
 }
 
 function didCtx(
@@ -373,7 +403,6 @@ describe('agentsMdReminder path-carrying tools', () => {
   it('anchors at the nearest existing ancestor when Write targets a not-yet-created directory', async () => {
     const h = createHarness();
     const rootAgentsMd = await writeAgentsMd(workDir, 'root instructions');
-    // The root file was created after the bind injected nothing.
     h.reminder.seedInjected([], workDir);
 
     const result = await fire(
@@ -618,7 +647,7 @@ describe('agentsMdReminder persisted restore provenance', () => {
       },
     });
 
-    await h.wire.hooks.onDidRestore.run({});
+    await h.dispatcher.hooks.onDidRestore.run({});
     const result = await fire(h, didCtx('Read', { path: join(subDir, 'index.ts') }));
 
     expect(outputText(result)).toBe('original result');
@@ -633,7 +662,7 @@ describe('agentsMdReminder persisted restore provenance', () => {
       },
     });
 
-    await h.wire.hooks.onDidRestore.run({});
+    await h.dispatcher.hooks.onDidRestore.run({});
     const result = await fire(h, didCtx('Read', { path: join(workDir, 'index.ts') }));
 
     expect(outputText(result)).toBe('original result');

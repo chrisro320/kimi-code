@@ -1,3 +1,6 @@
+/* oxlint-disable typescript-eslint/no-unsafe-declaration-merging, eslint-plugin-import/namespace -- Event2 class+payload-interface declaration merging is the sanctioned event-declaration idiom. */
+
+
 /**
  * `externalHooks` domain — Agent-scope adapter for external
  * hook commands.
@@ -27,7 +30,7 @@ import { IInstantiationService } from '#/_base/di/instantiation';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { defineState } from '#/_base/state/stateRegistry';
+import { defineState } from '#/state/state';
 import { isPlainRecord } from '#/_base/utils/canonical-args';
 import { Event } from '#/_base/event';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -42,12 +45,20 @@ import {
 import type { CompactionResult } from '#/agent/fullCompaction/types';
 import { IAgentLoopService, type AfterStepContext } from '#/agent/loop/loop';
 import { ContinuationStepRequest } from '#/agent/loop/stepRequest';
+import { TurnStarted } from '#/agent/loop/turnEvents';
+import { TurnEnded } from '#/agent/loop/turnOps';
 import {
   IAgentPromptService,
   type PromptSubmitContext,
 } from '#/agent/prompt/prompt';
-import type { TurnEndedEvent, TurnStartedEvent } from '#/agent/loop/turnEvents';
+import { PromptQueued } from '#/agent/prompt/promptService';
+import { TaskNotified, TaskStarted } from '#/agent/task/taskOps';
+import {
+  PermissionApprovalRequested,
+  PermissionApprovalResolved,
+} from '#/agent/toolApproval/toolApprovalService';
 import { IEventBus } from '#/app/event/eventBus';
+import { Event2 } from '#/app/event/event2';
 import type { ExecutableToolResult } from '#/tool/toolContract';
 import type { ResolvedToolExecutionHookContext, ToolDidExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
@@ -55,6 +66,7 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { toKimiErrorPayload } from '#/errors';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 
 import { IAgentExternalHooksService } from './externalHooks';
 import { IExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHooksRunner';
@@ -63,6 +75,7 @@ import {
   renderUserPromptHookBlockResult,
   renderUserPromptHookResult,
 } from './user-prompt';
+
 
 /** Answers every hook event as "nothing configured" — see `runner`. */
 const SUPPRESSED_HOOKS_RUNNER: IExternalHooksRunnerService = {
@@ -75,19 +88,18 @@ const SUPPRESSED_HOOKS_RUNNER: IExternalHooksRunnerService = {
   hasHooksFor: () => false,
 };
 
-export interface HookResultEvent {
-  readonly type: 'hook.result';
+export interface HookResultPayload {
   readonly turnId?: number;
   readonly hookEvent: string;
   readonly content: string;
   readonly blocked?: boolean;
 }
 
-declare module '#/app/event/eventBus' {
-  interface DomainEventMap {
-    'hook.result': HookResultEvent;
-  }
+export class HookResult extends Event2<HookResultPayload> {
+  static override readonly type = 'hook.result';
+  static override readonly observable = true;
 }
+export interface HookResult extends HookResultPayload {}
 
 export const externalHooksStopHookContinuationUsedKey = defineState<boolean>(
   'externalHooks.stopHookContinuationUsed',
@@ -106,9 +118,10 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
     @ISessionContext private readonly sessionContext: ISessionContext,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
   ) {
     super();
-    this.states.register(externalHooksStopHookContinuationUsedKey);
+    this.states.contributeState(externalHooksStopHookContinuationUsedKey);
     void this.sessionMetadata
       .read()
       .then((meta) => {
@@ -222,14 +235,14 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
 
   private registerPermissionHooks(): void {
     this._register(
-      this.eventBus.subscribe('permission.approval.requested', (e) => {
-        const { type: _type, ...inputData } = e;
+      this.eventBus.subscribe(PermissionApprovalRequested, (e) => {
+        const { type: _type, time: _time, ...inputData } = e;
         this.fireAndForget('PermissionRequest', inputData, e.toolName);
       }),
     );
     this._register(
-      this.eventBus.subscribe('permission.approval.resolved', (e) => {
-        const { type: _type, ...inputData } = e;
+      this.eventBus.subscribe(PermissionApprovalResolved, (e) => {
+        const { type: _type, time: _time, ...inputData } = e;
         this.fireAndForget('PermissionResult', inputData, e.toolName);
       }),
     );
@@ -246,7 +259,7 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
       }),
     );
     this._register(
-      this.eventBus.subscribe('prompt.queued', (e) => {
+      this.eventBus.subscribe(PromptQueued, (e) => {
         this.fireAndForget(
           'UserPromptQueued',
           { promptId: e.promptId, prompt: e.content, queueLength: e.queueLength },
@@ -258,14 +271,14 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
 
   private registerTurnHooks(): void {
     this._register(
-      this.eventBus.subscribe('turn.started', (e) => this.notifyTurnStarted(e)),
+      this.eventBus.subscribe(TurnStarted, (e) => this.notifyTurnStarted(e)),
     );
     this._register(
-      this.eventBus.subscribe('turn.ended', (e) => this.notifyTurnEnded(e)),
+      this.eventBus.subscribe(TurnEnded, (e) => this.notifyTurnEnded(e)),
     );
   }
 
-  private notifyTurnStarted(event: TurnStartedEvent): void {
+  private notifyTurnStarted(event: TurnStarted): void {
     this.fireAndForget(
       'TurnStarted',
       {
@@ -325,13 +338,13 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
 
   private registerTaskHooks(_tasks: IAgentTaskService): void {
     this._register(
-      this.eventBus.subscribe('task.notified', (e) => {
-        const { type: _type, ...ctx } = e;
+      this.eventBus.subscribe(TaskNotified, (e) => {
+        const { type: _type, time: _time, ...ctx } = e;
         this.notifyTaskNotification(ctx);
       }),
     );
     this._register(
-      this.eventBus.subscribe('task.started', (e) => this.notifyTaskStarted(e.info)),
+      this.eventBus.subscribe(TaskStarted, (e) => this.notifyTaskStarted(e.info)),
     );
   }
 
@@ -408,12 +421,13 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
         toolCalls: [],
         origin: { kind: 'hook_result', event: block.event, blocked: true },
       });
-      this.eventBus.publish({
-        type: 'hook.result',
-        hookEvent: block.event,
-        content: block.message,
-        blocked: true,
-      });
+      void this.dispatcher.dispatch(
+        new HookResult({
+          hookEvent: block.event,
+          content: block.message,
+          blocked: true,
+        }),
+      );
       return true;
     }
 
@@ -425,16 +439,17 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
         toolCalls: [],
         origin: { kind: 'hook_result', event: append.event },
       });
-      this.eventBus.publish({
-        type: 'hook.result',
-        hookEvent: append.event,
-        content: append.message,
-      });
+      void this.dispatcher.dispatch(
+        new HookResult({
+          hookEvent: append.event,
+          content: append.message,
+        }),
+      );
     }
     return false;
   }
 
-  private notifyTurnEnded(event: Pick<TurnEndedEvent, 'turnId' | 'reason' | 'error'>): void {
+  private notifyTurnEnded(event: TurnEnded): void {
     this.stopHookContinuationUsed = false;
     if (event.reason === 'failed' && event.error !== undefined) {
       this.notifyStopFailure(event.error, new AbortController().signal);

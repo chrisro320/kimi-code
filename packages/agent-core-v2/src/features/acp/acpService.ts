@@ -123,6 +123,7 @@ import {
 } from '#/agent/llmRequester/llmRequester';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
 import { IEventBus } from '#/app/event/eventBus';
 import { unwrapErrorCause } from '#/errors';
 import { APIContextOverflowError } from '#/kosong/contract/errors';
@@ -828,12 +829,13 @@ export class AcpService extends Service implements IAcpService {
   private setStatus(status: AcpStatus): void {
     this.currentStatus = status;
     if (this.requester.getActiveContextManager()?.id !== ACP_MANAGER_ID) return;
-    this.eventBus.publish({
-      type: 'agent.status.updated',
-      acp: status.health,
-      acpRefs: status.refs,
-      acpActiveBlocks: status.activeBlocks,
-    });
+    this.eventBus.publish(
+      new AgentStatusUpdated({
+        acp: status.health,
+        acpRefs: status.refs,
+        acpActiveBlocks: status.activeBlocks,
+      }),
+    );
   }
 
   private appendTodoList(summary: string): string {

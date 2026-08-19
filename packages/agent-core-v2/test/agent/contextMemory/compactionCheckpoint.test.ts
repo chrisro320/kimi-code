@@ -25,7 +25,7 @@ import {
   type TokenEstimate,
 } from '#/agent/contextMemory/compactionHandoff';
 import { AgentContextMemoryService } from '#/agent/contextMemory/contextMemoryService';
-import { ContextModel } from '#/agent/contextMemory/contextOps';
+import { contextMemoryKey } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   IAgentTokenCountingService,
@@ -43,10 +43,17 @@ import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
+import { IAgentStateService } from '#/agent/state/agentState';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IWireService } from '#/wire/wire';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
-import { registerTestAgentWire, restoreTestAgentWire, testWireScope } from '../../wire/stubs';
+import {
+  registerTestAgentWire,
+  registerTestEventDispatcher,
+  restoreTestEventDispatcher,
+  testWireScope,
+} from '../../wire/stubs';
 
 const SCOPE = 'wire';
 const KEY = 'checkpoint-live';
@@ -75,6 +82,8 @@ function userMessage(text: string): ContextMessage {
 
 interface Host {
   wire: IWireService;
+  dispatcher: IEventDispatcher;
+  agentState: IAgentStateService;
   svc: IAgentContextMemoryService;
   log: IAppendLogStore;
   eventBus: IEventBus;
@@ -98,7 +107,15 @@ function buildHost(key: string): Host {
     log: ix.get(IAppendLogStore),
     eventBus,
   });
-  return { wire, svc: ix.get(IAgentContextMemoryService), log: ix.get(IAppendLogStore), eventBus };
+  const dispatcher = registerTestEventDispatcher(ix);
+  return {
+    wire,
+    dispatcher,
+    agentState: ix.get(IAgentStateService),
+    svc: ix.get(IAgentContextMemoryService),
+    log: ix.get(IAppendLogStore),
+    eventBus,
+  };
 }
 
 async function readRecords(log: IAppendLogStore, key: string): Promise<WireRecord[]> {
@@ -110,7 +127,7 @@ async function readRecords(log: IAppendLogStore, key: string): Promise<WireRecor
 }
 
 function restoredModel(host: Host): readonly ContextMessage[] {
-  return host.wire.getModel(ContextModel) as readonly ContextMessage[];
+  return host.agentState.get(contextMemoryKey) as readonly ContextMessage[];
 }
 
 beforeEach(() => {
@@ -144,7 +161,7 @@ describe('compaction checkpoint carrier', () => {
     expect((record!['checkpoint'] as CompactionCheckpoint).encrypted).toBe(ENCRYPTED);
 
     const replay = buildHost(REPLAY_KEY);
-    await restoreTestAgentWire(replay.wire, replay.log, testWireScope(SCOPE, REPLAY_KEY), records);
+    await restoreTestEventDispatcher(replay.dispatcher, replay.log, testWireScope(SCOPE, REPLAY_KEY), records);
 
     const model = restoredModel(replay);
     const summary = model.find((m) => m.origin?.kind === 'compaction_summary');
@@ -198,7 +215,7 @@ describe('compaction checkpoint carrier', () => {
     for (const [index, variant] of variants.entries()) {
       const key = `${REPLAY_KEY}-legacy-${index}`;
       const host = buildHost(key);
-      await restoreTestAgentWire(host.wire, host.log, testWireScope(SCOPE, key), [
+      await restoreTestEventDispatcher(host.dispatcher, host.log, testWireScope(SCOPE, key), [
         { type: 'context.append_message', message: userMessage('old') },
         { type: 'context.append_message', message: userMessage('tail') },
         variant.record,
@@ -217,7 +234,7 @@ describe('compaction checkpoint carrier', () => {
 
     const key = `${REPLAY_KEY}-malformed`;
     const host = buildHost(key);
-    await restoreTestAgentWire(host.wire, host.log, testWireScope(SCOPE, key), [
+    await restoreTestEventDispatcher(host.dispatcher, host.log, testWireScope(SCOPE, key), [
       { type: 'context.append_message', message: userMessage('old') },
       {
         type: 'context.apply_compaction',
@@ -292,7 +309,7 @@ describe('compaction checkpoint carrier', () => {
     const warnings: WarningEvent[] = [];
     disposables.add(
       host.eventBus.subscribe('warning', (event) => {
-        warnings.push(event);
+        warnings.push(event as unknown as WarningEvent);
       }),
     );
     host.svc.append(userMessage('old fact'));
@@ -309,6 +326,7 @@ describe('compaction checkpoint carrier', () => {
         type: 'warning',
         code: 'compaction-replay-estimate',
         message: expect.stringMatching(/post-compaction token count is an underestimate/) as string,
+        time: expect.any(Number) as number,
       },
     ]);
   });
@@ -318,7 +336,7 @@ describe('compaction checkpoint carrier', () => {
     const warnings: WarningEvent[] = [];
     disposables.add(
       host.eventBus.subscribe('warning', (event) => {
-        warnings.push(event);
+        warnings.push(event as unknown as WarningEvent);
       }),
     );
     host.svc.append(userMessage('old fact'));
@@ -339,10 +357,10 @@ describe('compaction checkpoint carrier', () => {
     const warnings: WarningEvent[] = [];
     disposables.add(
       host.eventBus.subscribe('warning', (event) => {
-        warnings.push(event);
+        warnings.push(event as unknown as WarningEvent);
       }),
     );
-    await restoreTestAgentWire(host.wire, host.log, testWireScope(SCOPE, key), [
+    await restoreTestEventDispatcher(host.dispatcher, host.log, testWireScope(SCOPE, key), [
       { type: 'context.append_message', message: userMessage('old') },
       {
         type: 'context.apply_compaction',
@@ -368,7 +386,7 @@ describe('compaction checkpoint carrier', () => {
     const key = `${REPLAY_KEY}-double-count`;
     const host = buildHost(key);
     const checkpoint = makeCheckpoint();
-    await restoreTestAgentWire(host.wire, host.log, testWireScope(SCOPE, key), [
+    await restoreTestEventDispatcher(host.dispatcher, host.log, testWireScope(SCOPE, key), [
       { type: 'context.append_message', message: userMessage('tail') },
       {
         type: 'context.apply_compaction',

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices } from '#/_base/di/test';
+import { Event } from '#/_base/event';
 import type { ILogService } from '#/_base/log/log';
 import { IGitService } from '#/app/git/git';
 import { GitService } from '#/app/git/gitService';
@@ -14,6 +15,12 @@ import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
+import type { Runtime } from '#/runtime/runtime';
+import {
+  IRuntimeResolver,
+  IWorkspaceInstanceManager,
+  type WorkspaceInstanceChange,
+} from '#/workspace/workspaceInstance/workspaceInstanceManager';
 import {
   __testing,
   acquireSubagentWorktree,
@@ -59,6 +66,17 @@ describe('subagent worktree isolation (real git integration)', () => {
       additionalServices: (reg) => {
         reg.define(IHostProcessService, HostProcessService);
         reg.define(IHostFileSystem, HostFileSystem);
+        const process = new HostProcessService();
+        const runtime = { process } as unknown as Runtime;
+        reg.defineInstance(IRuntimeResolver, {
+          _serviceBrand: undefined,
+          inspect: () => runtime,
+          acquire: () => ({ runtime, track: (resource) => resource, dispose: () => {} }),
+        });
+        reg.definePartialInstance(IWorkspaceInstanceManager, {
+          findByRoot: () => ({ id: 'workspace-1' } as never),
+          onDidChange: Event.None as Event<WorkspaceInstanceChange>,
+        });
         reg.define(IGitService, GitService);
       },
     });

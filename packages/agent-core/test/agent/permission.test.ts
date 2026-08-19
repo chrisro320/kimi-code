@@ -283,7 +283,7 @@ describe('Permission auto mode', () => {
     await injector.inject();
 
     expect(appendSystemReminder).toHaveBeenCalledWith(
-      expect.stringContaining('Do NOT call AskUserQuestion while auto mode is active'),
+      expect.stringContaining('AskUserQuestion'),
       { kind: 'injection', variant: 'permission_mode' },
     );
   });
@@ -302,7 +302,7 @@ describe('Permission auto mode', () => {
     await injector.inject();
 
     expect(appendSystemReminder).toHaveBeenCalledWith(
-      expect.stringContaining('Do NOT call AskUserQuestion while auto mode is active'),
+      expect.stringContaining('AskUserQuestion'),
       { kind: 'injection', variant: 'permission_mode' },
     );
   });

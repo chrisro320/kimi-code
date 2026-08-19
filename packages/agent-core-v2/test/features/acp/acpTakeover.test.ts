@@ -125,7 +125,12 @@ describe('ACP compaction takeover (harness)', () => {
     const events = await ctx.untilTurnEnd();
 
     expect(events).toContainEqual(
-      expect.objectContaining({ event: 'compaction.started', args: { trigger: 'auto' } }),
+      expect.objectContaining({
+        event: 'compaction.started',
+        // Event2 payloads also carry `time` / `instruction` — match the
+        // trigger field only.
+        args: expect.objectContaining({ trigger: 'auto' }),
+      }),
     );
     expect(countEvents(events, 'compaction.completed')).toBe(1);
     expect(events).toContainEqual(

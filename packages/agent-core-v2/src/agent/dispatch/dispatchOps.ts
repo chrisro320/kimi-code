@@ -1,33 +1,24 @@
-/**
- * `dispatch` domain — wire Model (`DispatchModeModel`) and the
- * `dispatch_mode.set` Op (`setMode`) for the session's proactive-delegation
- * policy.
- *
- * Declares the mode as a scalar `wire` Model (initial `auto`) plus a replay
- * marker that distinguishes an explicit persisted mode from the default. The
- * single Op replaces the mode and sets that marker.
- */
-
+/* oxlint-disable typescript-eslint/no-unsafe-declaration-merging, eslint-plugin-import/namespace -- Event2 class+payload-interface declaration merging is the sanctioned event-declaration idiom. */
 import { z } from 'zod';
 
-import { defineModel } from '#/wire/model';
+import { Event2 } from '#/app/event/event2';
+import { defineState } from '#/state/state';
 
 import type { DispatchMode } from './dispatch';
 
-export const DispatchModeModel = defineModel<DispatchMode>('dispatchMode', () => 'auto');
-export const DispatchModeConfiguredModel = defineModel<boolean>(
-  'dispatchMode.configured',
-  () => false,
-  { reducers: { 'dispatch_mode.set': () => true } },
-);
+const dispatchModeSetSchema = z.object({ mode: z.enum(['auto', 'ask', 'off']) });
 
-declare module '#/wire/types' {
-  interface PersistedOpMap {
-    'dispatch_mode.set': typeof setMode;
-  }
+export class DispatchModeSet extends Event2<z.infer<typeof dispatchModeSetSchema>> {
+  static override readonly type = 'dispatch_mode.set';
+  static override readonly durable = true;
+  static override readonly schema = dispatchModeSetSchema;
 }
+export interface DispatchModeSet extends z.infer<typeof dispatchModeSetSchema> {}
 
-export const setMode = DispatchModeModel.defineOp('dispatch_mode.set', {
-  schema: z.object({ mode: z.enum(['auto', 'ask', 'off']) }),
-  apply: (_s, p) => p.mode,
-});
+export const dispatchModeKey = defineState('dispatchMode', (): DispatchMode => 'auto')
+  .replayable({ schema: z.custom<DispatchMode>() })
+  .on(DispatchModeSet, (_s, e) => e.mode);
+
+export const dispatchModeConfiguredKey = defineState('dispatchMode.configured', () => false)
+  .replayable({ schema: z.custom<boolean>() })
+  .on(DispatchModeSet, () => true);

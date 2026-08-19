@@ -137,6 +137,7 @@ describe('default agent profiles', () => {
     expect(prompt).not.toContain('# Plugin Instructions');
   });
 
+
   it('keeps optional-tool guidance out of the shared system prompt entirely', () => {
     // Tool-coupled guidance now lives in each tool's own description, which the schema
     // layer ships ONLY when the tool is registered — that is the availability gate, for
@@ -157,7 +158,7 @@ describe('default agent profiles', () => {
       // that routing lives in bash.md (echo>file→Write, sed→Edit, etc.), which ships with Bash.
       expect(prompt).not.toContain('`Write` / `Edit` to change files');
       expect(prompt).not.toContain('Keep `Bash` for genuine shell work');
-      expect(prompt).toContain('`Glob` to find files by name'); // universal routing stays
+      expect(prompt).toContain('reach for it before raw shell'); // universal routing stays (fork routes via lean-ctx)
       expect(prompt).toContain('refuse a fixed set of well-known secret files'); // shared guard stays
     }
   });
@@ -177,6 +178,17 @@ describe('default agent profiles', () => {
       expect(prompt).toContain('locate the method in the code'); // ambiguous instruction -> edit code, not echo text
       expect(prompt).toContain('update the related tests'); // preamble phrasing example
       expect(prompt).toContain('premature abstraction'); // MINIMAL-changes counterexample
+    }
+  });
+
+  it('renders the shared coding guidelines identically for root and subagents', () => {
+    // The shared, ungated sections must reach every default profile byte-identically.
+    // The sharing is the contract; the wording is free to evolve — do not pin prose.
+    const root = DEFAULT_AGENT_PROFILES['agent']?.systemPrompt(promptContext) ?? '';
+    const shared = root.match(/# General Guidelines for Coding[\s\S]*?(?=\n# )/)?.[0];
+    if (shared === undefined) throw new Error('shared coding guidelines section not found');
+    for (const name of ['coder', 'explore', 'reviewer']) {
+      expect(DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '').toContain(shared);
     }
   });
 });

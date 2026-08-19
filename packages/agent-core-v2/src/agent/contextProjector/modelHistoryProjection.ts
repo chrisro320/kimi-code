@@ -19,7 +19,7 @@ import {
 } from '#/kosong/contract/compaction';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 
-import { toWireMessage } from './contextProjectorService';
+import { toWireMessage } from './projection';
 
 // The item/target types live in `kosong/contract/compaction` so the kosong
 // compaction request can share them; re-exported here for the projector's

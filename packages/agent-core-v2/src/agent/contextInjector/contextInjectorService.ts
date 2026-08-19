@@ -19,6 +19,7 @@ import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { ContextSpliced } from '#/agent/contextMemory/contextEvents';
 import { isCompactionSummaryMessage } from '#/agent/contextMemory/compactionHandoff';
 import { IAgentLoopService, type BeforeStepContext } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -59,7 +60,7 @@ export class AgentContextInjectorService extends Service implements IAgentContex
       ),
     );
     this._register(
-      this.eventBus.subscribe('context.spliced', (splice) => {
+      this.eventBus.subscribe(ContextSpliced, (splice) => {
         if (isCompactionSplice(splice)) this.compactionRearmPending = true;
       }),
     );
