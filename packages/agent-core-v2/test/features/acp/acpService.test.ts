@@ -326,11 +326,16 @@ describe('AcpService', () => {
       acpActiveBlocks: number | undefined;
     }> = [];
     setup.eventBus.subscribe('agent.status.updated', (event) => {
-      if (event.acp !== undefined) {
+      const e = event as unknown as {
+        acp?: 'healthy' | 'degraded';
+        acpRefs?: number;
+        acpActiveBlocks?: number;
+      };
+      if (e.acp !== undefined) {
         seen.push({
-          acp: event.acp,
-          acpRefs: event.acpRefs,
-          acpActiveBlocks: event.acpActiveBlocks,
+          acp: e.acp,
+          acpRefs: e.acpRefs,
+          acpActiveBlocks: e.acpActiveBlocks,
         });
       }
     });
@@ -351,7 +356,8 @@ describe('AcpService', () => {
     owned.push(setup.disposables);
     const seen: Array<'healthy' | 'degraded'> = [];
     setup.eventBus.subscribe('agent.status.updated', (event) => {
-      if (event.acp !== undefined) seen.push(event.acp);
+      const e = event as unknown as { acp?: 'healthy' | 'degraded' };
+      if (e.acp !== undefined) seen.push(e.acp);
     });
     const requester = setup.requester.service as unknown as {
       getActiveContextManager: () => ContextManager;

@@ -1,3 +1,4 @@
+
 /**
  * `agentLifecycle` domain — `IAgentLifecycleService` implementation.
  *
@@ -42,21 +43,30 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { DEFAULT_PERMISSION_MODE_SECTION } from '#/agent/permissionMode/configSection';
-import { PermissionModeConfiguredModel } from '#/agent/permissionMode/permissionModeOps';
+import { permissionModeConfiguredKey } from '#/agent/permissionMode/permissionModeOps';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
+import { profileKey } from '#/agent/profile/profileOps';
+import { TOWER_WORKER_PROFILE } from '#/features/tower/tower';
 import { IAgentTaskService } from '#/agent/task/task';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
+import { TurnEnded } from '#/agent/loop/turnOps';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { abortError } from '#/_base/utils/abort';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { IAgentRuntimeBindingSeed, IAgentRuntimeBindingService } from '#/agent/runtimeBinding/runtimeBinding';
+import '#/agent/runtimeBinding/runtimeBindingService';
 import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
 import { IAgentToolActivationService } from '#/agent/toolActivation/toolActivation';
+import { IAgentPromptService } from '#/agent/prompt/prompt';
 import { ISessionInteractionService } from '#/session/interaction/interaction';
+import { interactionKey } from '#/session/interaction/interactionOps';
 import { IWireService } from '#/wire/wire';
+import { IAgentStateService } from '#/agent/state/agentState';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { makeWorkspaceContextView } from '#/session/workspaceContext/workspaceContextView';
@@ -69,7 +79,6 @@ import {
 
 let nextAgentId = 0;
 
-// NOTE: stays Disposable — its own 'get' and 'config' collide with the Fiber
 export class AgentLifecycleService extends Disposable implements IAgentLifecycleService {
   declare readonly _serviceBrand: undefined;
   private readonly handles = new Map<string, IAgentScopeHandle>();
@@ -98,6 +107,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     super();
     this._register(this.onDidCreate((handle) => this.subscribeInteractionBus(handle)));
     this._register(
+      this.onDidCreate((handle) => {
+        handle.accessor.get(IAgentStateService).contributeState(interactionKey);
+      }),
+    );
+    this._register(
       this.onDidDispose((agentId) => {
         const d = this.interactionBusDisposables.get(agentId);
         if (d !== undefined) {
@@ -118,7 +132,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     if (this.interactionBusDisposables.has(handle.id)) return;
     const d = handle.accessor
       .get(IEventBus)
-      .subscribe('turn.ended', (e) => this.interaction.cancelPendingForTurn(e.turnId));
+      .subscribe(TurnEnded, (e) => this.interaction.cancelPendingForTurn(e.turnId));
     this.interactionBusDisposables.set(handle.id, d);
   }
 
@@ -181,6 +195,10 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     const extra: ScopeSeed = [
       [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
       [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
+      [IAgentRuntimeBindingSeed, {
+        _serviceBrand: undefined,
+        binding: { workspaceId: this.ctx.workspaceId, runtimeId: opts.runtimeId ?? 'local' },
+      }],
       ...workspaceSeeds,
     ];
     const handle = createScopedChildHandle(
@@ -203,7 +221,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
         labels: opts.labels,
       });
       this.onDidCreateEmitter.fire(handle);
-      await wire.restore();
+      await handle.accessor.get(IEventDispatcher).restore();
       await this.bindBootstrap(handle, opts);
       await handle.accessor.get(IAgentToolActivationService).activate();
       return handle;
@@ -224,9 +242,10 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     if (opts.binding !== undefined) {
       await handle.accessor.get(IAgentProfileService).bind(opts.binding);
     }
-    const wire = handle.accessor.get(IWireService);
     const permissionMode = this.config.get<PermissionMode>(DEFAULT_PERMISSION_MODE_SECTION);
-    const hasRestoredPermissionMode = wire.getModel(PermissionModeConfiguredModel);
+    const hasRestoredPermissionMode = handle.accessor
+      .get(IAgentStateService)
+      .get(permissionModeConfiguredKey);
     if (permissionMode !== undefined && !hasRestoredPermissionMode) {
       handle.accessor.get(IAgentPermissionModeService).setMode(permissionMode);
     }
@@ -244,7 +263,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
         details: { agentId: opts.agentId },
       });
     }
-    const child = await this.create({ agentId: opts?.agentId, forkedFrom: source.id });
+    const child = await this.create({
+      agentId: opts?.agentId,
+      runtimeId: source.accessor.get(IAgentRuntimeBindingService).current.runtimeId,
+      forkedFrom: source.id,
+    });
 
     const sourceData = source.accessor.get(IAgentProfileService).data();
     const childProfile = child.accessor.get(IAgentProfileService);
@@ -281,6 +304,12 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
   broadcastPermissionMode(mode: PermissionMode): void {
     for (const handle of this.handles.values()) {
+      if (
+        handle.accessor.get(IAgentStateService).get(profileKey).profileName ===
+        TOWER_WORKER_PROFILE
+      ) {
+        continue;
+      }
       handle.accessor.get(IAgentPermissionModeService).setMode(mode);
     }
   }
@@ -294,6 +323,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     const compaction = handle.accessor.get(IAgentFullCompactionService).compacting;
     const compactionSettled = compaction?.promise.catch(() => undefined) ?? Promise.resolve();
     const reason = abortError('Agent removed');
+    const prompt = handle.accessor.get(IAgentPromptService);
     for (const turnId of loop.status().pendingTurnIds) {
       loop.cancel(turnId, reason);
     }
@@ -301,7 +331,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     if (compaction !== null && !compaction.abortController.signal.aborted) {
       compaction.abortController.abort(reason);
     }
-    await Promise.all([loop.settled(), compactionSettled]);
+    await Promise.all([loop.settled(), compactionSettled, prompt.drain(reason)]);
     handle.dispose();
     this.onDidDisposeEmitter.fire(agentId);
   }

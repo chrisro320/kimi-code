@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { getAgentProfileContributions } from '#/app/agentProfileCatalog/contribution';
+
 import type { AgentProfile, AgentProfileContext } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import '#/session/agentLifecycle/profile/profiles';
@@ -114,5 +115,10 @@ describe('builtin agent profiles', () => {
       expect(profile.whenToUse?.length ?? 0).toBeGreaterThan(0);
       expect(profile.summaryPolicy?.minChars).toBe(200);
     }
+  });
+  it('wires TowerInit into the default profile', () => {
+    const agent = profileByName('agent');
+    expect(agent.tools).toContain('TowerInit');
+    expect(agent.subagents).toBeUndefined();
   });
 });

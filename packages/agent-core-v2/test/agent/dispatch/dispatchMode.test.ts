@@ -4,7 +4,7 @@ import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { type DispatchMode, IAgentDispatchModeService } from '#/agent/dispatch/dispatch';
-import { DispatchModeModel } from '#/agent/dispatch/dispatchOps';
+import { dispatchModeKey } from '#/agent/dispatch/dispatchOps';
 import { AgentDispatchModeService } from '#/agent/dispatch/dispatchService';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
@@ -15,7 +15,12 @@ import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IWireService } from '#/wire/wire';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
-import { registerTestAgentWire, restoreTestAgentWire, testWireScope } from '../../wire/stubs';
+import {
+  registerTestAgentWire,
+  registerTestEventDispatcher,
+  restoreTestEventDispatcher,
+  testWireScope,
+} from '../../wire/stubs';
 
 const SCOPE = 'wire';
 const KEY = 'dispatch-mode-test';
@@ -34,6 +39,7 @@ beforeEach(() => {
   ix.set(IAgentDispatchModeService, new SyncDescriptor(AgentDispatchModeService));
   log = ix.get(IAppendLogStore);
   registerTestAgentWire(ix, testWireScope(SCOPE, KEY), { log });
+  registerTestEventDispatcher(ix);
   svc = ix.get(IAgentDispatchModeService);
 });
 
@@ -94,14 +100,17 @@ describe('AgentDispatchModeService (wire-backed)', () => {
     ix2.stub(IFileSystemStorageService, new InMemoryStorageService());
     ix2.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
     const log2 = ix2.get(IAppendLogStore);
-    const fresh = registerTestAgentWire(ix2, testWireScope(SCOPE, 'dispatch-mode-replay'), {
+    registerTestAgentWire(ix2, testWireScope(SCOPE, 'dispatch-mode-replay'), {
       log: log2,
     });
+    const dispatcher2 = registerTestEventDispatcher(ix2);
+    ix2.set(IAgentDispatchModeService, new SyncDescriptor(AgentDispatchModeService));
+    ix2.get(IAgentDispatchModeService);
 
-    await restoreTestAgentWire(fresh, log2, testWireScope(SCOPE, 'dispatch-mode-replay'), [
+    await restoreTestEventDispatcher(dispatcher2, log2, testWireScope(SCOPE, 'dispatch-mode-replay'), [
       { type: 'dispatch_mode.set', mode: 'off' },
     ]);
 
-    expect(fresh.getModel(DispatchModeModel)).toBe('off');
+    expect(ix2.get(IAgentStateService).get(dispatchModeKey)).toBe('off');
   });
 });

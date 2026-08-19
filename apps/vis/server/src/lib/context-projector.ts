@@ -498,6 +498,8 @@ export function projectContext(
       case 'swarm_mode.exit':
         swarm = { active: false };
         break;
+      case 'tower_mode.enter':
+      case 'tower_mode.exit':
       case 'dispatch_mode.set':
         // Not yet projected in the vis inspector; tracked at the session-status level.
         break;

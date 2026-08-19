@@ -1,25 +1,16 @@
-/**
- * `dispatch` domain — `IAgentDispatchModeService` implementation.
- *
- * Holds the agent's dispatch mode (`auto` / `ask` / `off`) in the `wire`
- * `DispatchModeModel`, mutating it only through the `dispatch_mode.set` Op
- * (`wire.dispatch(setMode({ mode }))`) and reading it through
- * `wire.getModel`. `setMode` emits `onDidChangeMode` after an actual change.
- * Bound at Agent scope.
- */
-
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
-import { IWireService } from '#/wire/wire';
+import { IAgentStateService } from '#/agent/state/agentState';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 
 import {
   type DispatchMode,
   type DispatchModeChangedContext,
   IAgentDispatchModeService,
 } from './dispatch';
-import { DispatchModeConfiguredModel, DispatchModeModel, setMode } from './dispatchOps';
+import { DispatchModeSet, dispatchModeConfiguredKey, dispatchModeKey } from './dispatchOps';
 
 export class AgentDispatchModeService extends Disposable implements IAgentDispatchModeService {
   declare readonly _serviceBrand: undefined;
@@ -27,19 +18,24 @@ export class AgentDispatchModeService extends Disposable implements IAgentDispat
   private readonly _onDidChangeMode = this._register(new Emitter<DispatchModeChangedContext>());
   readonly onDidChangeMode: Event<DispatchModeChangedContext> = this._onDidChangeMode.event;
 
-  constructor(@IWireService private readonly wire: IWireService) {
+  constructor(
+    @IAgentStateService private readonly states: IAgentStateService,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
+  ) {
     super();
+    this.states.contributeState(dispatchModeKey);
+    this.states.contributeState(dispatchModeConfiguredKey);
   }
 
   get mode(): DispatchMode {
-    return this.wire.getModel(DispatchModeModel);
+    return this.states.get(dispatchModeKey);
   }
 
   setMode(mode: DispatchMode): void {
     const previousMode = this.mode;
     const changed = mode !== previousMode;
-    if (!changed && this.wire.getModel(DispatchModeConfiguredModel)) return;
-    this.wire.dispatch(setMode({ mode }));
+    if (!changed && this.states.get(dispatchModeConfiguredKey)) return;
+    void this.dispatcher.dispatch(new DispatchModeSet({ mode }));
     if (changed) this._onDidChangeMode.fire({ mode, previousMode });
   }
 }
@@ -48,6 +44,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentDispatchModeService,
   AgentDispatchModeService,
-  ScopeActivation.OnDemand,
+  ScopeActivation.OnScopeCreated,
   'dispatch',
 );

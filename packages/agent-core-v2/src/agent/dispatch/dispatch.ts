@@ -11,8 +11,9 @@
  *
  * Ported from v1 `agent/dispatch/mode.ts`. v1 kept the mode in a
  * `DispatchModeState` class logging a `dispatch_mode.set` record; in v2 the
- * mode lives in the wire `DispatchModeModel`, mutated only through the
- * `dispatch_mode.set` Op, so persistence and replay come from the wire.
+ * mode lives in the replayable `dispatchMode` state key, mutated only through
+ * the `dispatch_mode.set` event, so persistence and replay come from the
+ * event dispatcher.
  */
 
 import { createDecorator } from "#/_base/di/instantiation";

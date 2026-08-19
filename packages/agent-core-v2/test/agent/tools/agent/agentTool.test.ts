@@ -17,6 +17,7 @@ import type { ILogService } from '#/_base/log/log';
 import type { RunnableToolExecution } from '#/tool/toolContract';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { IEventBus } from '#/app/event/eventBus';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -31,7 +32,7 @@ import { IFlagService } from '#/app/flag/flag';
 import { IConfigService } from '#/app/config/config';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { ISessionProcessRunner } from '#/session/process/processRunner';
+import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
@@ -91,7 +92,7 @@ function makeTool(deps: {
       }
       // `emitAgentRunSpawned` publishes through these and tolerates their
       // absence; the tests that reach it only care about what happens after.
-      if (id === IEventBus || id === IAgentLifecycleService) return undefined;
+      if (id === IEventBus || id === IEventDispatcher || id === IAgentLifecycleService) return undefined;
       if (id === ITelemetryService) return noopTelemetryService;
       throw new Error(`unexpected accessor.get(${String(id)})`);
     },
@@ -115,7 +116,12 @@ function makeTool(deps: {
     { isToolActive: () => false, isToolActiveForProfile: () => false } as unknown as IAgentToolPolicyService,
     { listReferences: () => [] } as unknown as IAgentToolRegistryService,
     { workDir: WORK_DIR, additionalDirs: [] } as unknown as ISessionWorkspaceContext,
-    {} as ISessionProcessRunner,
+    {
+      acquire: () => ({
+        runtime: { identity: { runtimeId: 'test-runtime' }, process: undefined },
+        dispose: () => {},
+      }),
+    } as unknown as IAgentRuntimeService,
     { read: async () => ({}) } as unknown as ISessionMetadata,
     { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } as unknown as ILogService,
     { mode: 'acceptEdits', setMode: () => {} } as unknown as IAgentPermissionModeService,
