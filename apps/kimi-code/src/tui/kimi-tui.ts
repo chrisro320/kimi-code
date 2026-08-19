@@ -2156,10 +2156,11 @@ export class KimiTUI {
     const leanModeActive = status.leanMode === true;
     // Lean and ACP are opposite session shapes — lean composes only the
     // lean-ctx tools and injects no context, which starves ACP's long-context
-    // management. A lean session can still inherit ACP "enabled" from durable
-    // per-agent state set in an earlier, non-lean session; the /acp and /lean
-    // commands guard the interactive toggle order, but hydration needs its own
-    // check for that inherited case. Lean wins: disable ACP for this session.
+    // management. A lean session can still come up with ACP enabled: the
+    // `contextManager` config section names it, or the agent's own override
+    // outlived a resume inside this process. The /acp and /lean commands guard
+    // the interactive toggle order, but hydration needs its own check for
+    // those cases. Lean wins: disable ACP for this session.
     const resolvedAcp =
       leanModeActive && acpState.acp !== undefined
         ? { acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined }

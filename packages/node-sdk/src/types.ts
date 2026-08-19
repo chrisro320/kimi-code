@@ -145,9 +145,11 @@ export interface CreateSessionOptions {
    * Decided here for the same reason as `leanMode`: the manager rewrites the
    * outgoing messages, so it is part of the request prefix.
    *
-   * Unlike `session.acpEnable()`, which writes the machine-wide
-   * `contextManager` config section, this sets an agent-scoped override that
-   * is never persisted — other sessions, running or later, are unaffected.
+   * Sets the same agent-scoped, never-persisted override `session.acpEnable()`
+   * sets, one turn earlier: other sessions, running or later, are unaffected.
+   * The difference is only when the choice lands — here it is in force for the
+   * session's first request, whereas `acpEnable()` takes effect on the next
+   * one.
    */
   readonly acpContext?: boolean;
   readonly metadata?: JsonObject | undefined;

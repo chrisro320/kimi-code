@@ -115,7 +115,7 @@ describe('handleAcpCommand', () => {
     expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy', acpRefs: 3, acpActiveBlocks: 2 });
     expect(host.showNotice).toHaveBeenCalledWith(
       'ACP context manager enabled',
-      'Takes effect on the next request.',
+      'This session only; takes effect on the next request.',
     );
   });
 

@@ -48,13 +48,19 @@ export async function handleAcpCommand(host: SlashCommandHost, args: string): Pr
       await session.acpEnable();
       const status = await session.acpStatus();
       host.setAppState(acpStatePatch(status));
-      host.showNotice('ACP context manager enabled', 'Takes effect on the next request.');
+      host.showNotice(
+        'ACP context manager enabled',
+        'This session only; takes effect on the next request.',
+      );
       return;
     }
     case 'disable': {
       await session.acpDisable();
       host.setAppState({ acp: undefined, acpRefs: undefined, acpActiveBlocks: undefined });
-      host.showNotice('ACP context manager disabled', 'Compressed state is kept; /acp reset deletes it.');
+      host.showNotice(
+        'ACP context manager disabled',
+        'This session only. Compressed state is kept; /acp reset deletes it.',
+      );
       return;
     }
     case 'reset': {

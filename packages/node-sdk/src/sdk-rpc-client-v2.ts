@@ -1781,18 +1781,27 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Enable writes the engine-internal `contextManager` section in one atomic
-   * replace; the requester re-reads the section on every request, so the
-   * manager activates on the next turn without a session restart. The write
-   * is global — the session id only scopes the RPC route.
+   * Enable sets the requester's agent-scoped override, the same seam
+   * `--acp-context` uses; the requester reads the override ahead of the
+   * `contextManager` config section on every request, so the manager activates
+   * on the next turn without a session restart. Deliberately not a config
+   * write: the section is machine-wide and every session that holds no
+   * override of its own falls through to it, so persisting the choice here
+   * would switch ACP on in each concurrently running session too.
    */
-  override async acpEnable(_input: SessionIdRpcInput): Promise<void> {
-    await this.replaceConfigSections({ contextManager: ACP_MANAGER_ID });
+  override async acpEnable(input: SessionIdRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(ACP_MANAGER_ID);
   }
 
-  /** Disable clears the section (replace-with-undefined semantics). */
-  override async acpDisable(_input: SessionIdRpcInput): Promise<void> {
-    await this.replaceConfigSections({ contextManager: undefined });
+  /**
+   * Disable opts the agent out with `null` rather than clearing the override:
+   * `undefined` means "no choice" and falls through to the config section,
+   * which would leave ACP on whenever that section names it.
+   */
+  override async acpDisable(input: SessionIdRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(null);
   }
 
   /**
