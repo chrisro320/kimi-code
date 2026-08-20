@@ -49,6 +49,7 @@ import {
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
 import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentMediaResolverService } from '#/agent/media/mediaResolver';
@@ -218,6 +219,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
   ) {
     this.states.contributeState(llmRequestTraceKey);
     this.states.contributeState(llmRequesterLastConfigLogSignatureKey);
@@ -312,6 +314,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     if (override === null) return undefined;
     const configuredId = override ?? this.config.get<string>(CONTEXT_MANAGER_SECTION);
     if (configuredId === undefined) return undefined;
+    if (configuredId === 'acp-kernel' && this.scopeContext.agentId !== 'main') return undefined;
     const manager = this.registeredContextManager;
     if (manager !== undefined && manager.id === configuredId) {
       // Activation is otherwise silent: log the first successful match per id

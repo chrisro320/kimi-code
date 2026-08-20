@@ -931,7 +931,7 @@ describe('AcpService', () => {
   it('appends an emergency nudge to the turn output when the kernel asks for compression', async () => {
     const setup = createService();
     owned.push(setup.disposables);
-    const messages = [textMessage('one'), textMessage('two')];
+    const messages = bigMessages(10);
 
     const outcome = await transform(
       setup.requester.manager(),
@@ -942,7 +942,7 @@ describe('AcpService', () => {
 
     expect(outcome.accounting).toBe('transformed');
     expect(outcome.messages).not.toBe(messages);
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(10);
     expect(outcome.messages.slice(0, messages.length)).toEqual(messages);
     const nudge = outcome.messages[messages.length]!;
     expect(nudge.role).toBe('system');
@@ -1125,7 +1125,7 @@ describe('AcpService', () => {
   it('appends the emergency nudge on every turn while over the threshold', async () => {
     const setup = createService();
     owned.push(setup.disposables);
-    const messages = [textMessage('one'), textMessage('two')];
+    const messages = bigMessages(10);
     const limits = { usedContextTokens: 85_000, maxContextTokens: 100_000 };
 
     const first = await transform(
@@ -1624,7 +1624,7 @@ describe('AcpService', () => {
   it('passes the host token count through when no block is folded', async () => {
     const setup = createService();
     owned.push(setup.disposables);
-    const messages = [textMessage('one'), textMessage('two')];
+    const messages = bigMessages(10);
     setup.env.history = messages;
     const core = (setup.service as unknown as { core: { processTurn: (input: { tokenCount: number }) => unknown } }).core;
     const spy = vi.spyOn(core, 'processTurn');

@@ -14,6 +14,7 @@
 
 import type { CoreMessage } from 'acp-kernel';
 
+import { rewriteTagTokens } from '#/features/acp/tagTokens';
 import {
   isToolDeclarationOnlyMessage,
   type ContentPart,
@@ -375,7 +376,8 @@ function rebuildContent(
       }
       if (wroteText) continue;
       const body = textChanged ? coreText : originalText;
-      const text = tag === undefined ? body : body.length === 0 ? tag : `${tag}\n${body}`;
+      const stableTag = tag === undefined ? undefined : rewriteTagTokens(tag, body);
+      const text = stableTag === undefined ? body : body.length === 0 ? stableTag : `${stableTag}\n${body}`;
       if (text.length > 0) out.push({ type: 'text', text });
       wroteText = true;
       continue;
@@ -394,7 +396,8 @@ function rebuildContent(
   }
 
   if (!wroteText && textCore !== undefined) {
-    const text = tag === undefined ? coreText : coreText.length === 0 ? tag : `${tag}\n${coreText}`;
+    const stableTag = tag === undefined ? undefined : rewriteTagTokens(tag, coreText);
+    const text = stableTag === undefined ? coreText : coreText.length === 0 ? stableTag : `${stableTag}\n${coreText}`;
     if (text.length > 0) out.push({ type: 'text', text });
   }
   return { ok: true, content: sameContent(out, original) ? original : out };

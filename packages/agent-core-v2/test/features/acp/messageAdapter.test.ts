@@ -119,7 +119,7 @@ describe('ACP message adapter', () => {
     expect(rebuild(withoutReasoning, projection)[0]!.content).toContain(encrypted);
   });
 
-  it('uses an exact mutated kernel body while preserving message metadata', () => {
+  it('uses an exact mutated kernel body while preserving message metadata and stabilizing tag tokens', () => {
     const huge = 'secret '.repeat(8000);
     const message: Message = {
       role: 'tool',
@@ -137,9 +137,10 @@ describe('ACP message adapter', () => {
     ];
 
     const rebuilt = rebuild(mutated, projection);
+    // stableTagTokens overrides the density-inflated 12K with the deterministic raw token count of the body
     expect(rebuilt[0]!.content[0]).toEqual({
       type: 'text',
-      text: '<acp tokens="12K" type="Bash">m00001</acp>\n[tool output truncated]  ',
+      text: '<acp tokens="7" type="Bash">m00001</acp>\n[tool output truncated]  ',
     });
     expect(JSON.stringify(rebuilt)).not.toContain(huge);
     expect(rebuilt[0]!.toolCallId).toBe('call-large');

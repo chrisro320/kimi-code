@@ -35,8 +35,10 @@ import type {
 import {
   IAgentLifecycleService,
   IAgentProfileService,
+  IAgentLLMRequesterService,
   IAgentTokenCountingService,
   IAgentUsageService,
+  IAcpService,
   IEventBus,
   ISessionApprovalService,
   ISessionInteractionService,
@@ -279,12 +281,29 @@ function withStatusSnapshot(agent: IAgentScopeHandle, event: Event2<any>): Event
   }
   // Externally reported context size, resolved by the `[token_counting]`
   // strategy inside the service (`IAgentTokenCountingService.statusSize`).
-  const contextTokens = tokenCounting.statusSize();
+  // When ACP context manager is active and reporting status, prefer its
+  // folded context usage/tokens so the status line reflects the real model context.
+  const acpService = agent.accessor.get(IAcpService) as IAcpService | undefined;
+  const acpStatus = acpService?.status();
+  const requester = agent.accessor.get(IAgentLLMRequesterService) as IAgentLLMRequesterService | undefined;
+  const acpActive = requester?.getActiveContextManager()?.id === 'acp-kernel';
+  const rawContextTokens = tokenCounting.statusSize();
   const capabilities = profile.getModelCapabilities();
   const maxContextTokens = capabilities.max_input_tokens ?? capabilities.max_context_tokens;
+  const contextTokens =
+    acpActive && acpStatus?.health === 'healthy' && acpStatus.foldedTokens !== undefined
+      ? acpStatus.foldedTokens
+      : rawContextTokens;
+  const contextUsage =
+    acpActive && acpStatus?.health === 'healthy' && acpStatus.contextUsage !== undefined
+      ? acpStatus.contextUsage
+      : maxContextTokens !== undefined && maxContextTokens > 0
+        ? contextTokens / maxContextTokens
+        : undefined;
   return Object.assign({}, event, {
     usage: usageService.status(),
     contextTokens,
+    contextUsage,
     maxContextTokens,
     model: profile.getModel(),
   }) as unknown as Event2<any>;

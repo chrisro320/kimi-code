@@ -26,6 +26,7 @@ export interface AcpSidecar {
   readonly schemaVersion: 2;
   readonly managerId: string;
   readonly managerVersion: string;
+  readonly enabled?: boolean;
   readonly nextRef: number;
   readonly refs: readonly AcpRefRecord[];
   readonly liveSequence: readonly string[];
@@ -66,6 +67,22 @@ export async function resetAcpSidecar(
   store: IAtomicDocumentStore,
   scope: string,
 ): Promise<void> {
+  let preservedEnabled: boolean | undefined;
+  try {
+    const current = await store.get<unknown>(scope, ACP_SIDECAR_KEY);
+    if (current !== undefined && isAcpSidecar(current)) {
+      preservedEnabled = current.enabled;
+    }
+  } catch {
+    // Read/validation failed on a corrupt sidecar; fall through to clean delete.
+  }
+  if (preservedEnabled !== undefined) {
+    await store.set(scope, ACP_SIDECAR_KEY, {
+      ...emptyAcpSidecar(),
+      enabled: preservedEnabled,
+    });
+    return;
+  }
   await store.delete(scope, ACP_SIDECAR_KEY);
 }
 
@@ -170,6 +187,7 @@ function isAcpSidecar(value: unknown): value is AcpSidecar {
     candidate.schemaVersion !== SCHEMA_VERSION ||
     candidate.managerId !== ACP_MANAGER_ID ||
     candidate.managerVersion !== ACP_MANAGER_VERSION ||
+    (candidate.enabled !== undefined && typeof candidate.enabled !== 'boolean') ||
     !Number.isSafeInteger(candidate.nextRef) ||
     (candidate.nextRef ?? 0) < 1 ||
     (candidate.nextRef ?? 0) > MAX_REF + 1 ||

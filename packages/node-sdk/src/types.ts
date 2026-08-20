@@ -336,6 +336,7 @@ export interface AcpStatusInfo {
   readonly blocks: number;
   readonly activeBlocks: number;
   readonly contextUsage?: number;
+  readonly foldedTokens?: number;
   readonly reason?: string;
 }
 

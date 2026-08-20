@@ -177,6 +177,7 @@ import {
   IAcpService,
   IAgentActivityView,
   IAgentContextInjectorService,
+  IAgentScopeContext,
   IAgentContextMemoryService,
   IAgentConversationUndoService,
   IAgentDispatchModeService,
@@ -228,6 +229,7 @@ import {
   resumeSessionById,
   sessionDirOf,
   workspacePersistenceScope,
+  loadAcpSidecar,
   logSeed,
   MAIN_AGENT_ID,
   prepareSystemPromptContext,
@@ -1654,7 +1656,27 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     // would otherwise silently drop it. An override is never written to the
     // config section, so a later call with no binding cannot clear it either.
     if (binding?.acpContext === true) {
+      await agent.accessor.get(IAcpService).enable();
       agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(ACP_MANAGER_ID);
+    } else if (binding?.acpContext === false) {
+      await agent.accessor.get(IAcpService).disable();
+      agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(null);
+    } else {
+      let isEnabled: boolean | undefined;
+      try {
+        const sidecar = await loadAcpSidecar(
+          this.engineAccessor.get(IAtomicDocumentStore),
+          agent.accessor.get(IAgentScopeContext).scope('acp'),
+        );
+        isEnabled = sidecar.enabled;
+      } catch {
+        isEnabled = false;
+      }
+      if (isEnabled === true) {
+        agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(ACP_MANAGER_ID);
+      } else if (isEnabled === false) {
+        agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(null);
+      }
     }
     const profile = agent.accessor.get(IAgentProfileService);
     if (binding !== undefined || profile.data().profileName === undefined) {
@@ -1808,10 +1830,19 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const profile = agent.accessor.get(IAgentProfileService).data();
     const capability = profile.modelCapabilities;
     const maxContextTokens = capability.max_input_tokens ?? capability.max_context_tokens;
-    const contextTokens = context.tokenCount;
+    const acpService = agent.accessor.get(IAcpService);
+    const acpStatus = acpService.status();
+    const acpActive = agent.accessor.get(IAgentLLMRequesterService).getActiveContextManager()?.id === ACP_MANAGER_ID;
+    const contextTokens =
+      acpActive && acpStatus.health === 'healthy' && acpStatus.foldedTokens !== undefined
+        ? acpStatus.foldedTokens
+        : context.tokenCount;
     // Deliberately unclamped, same as the base class (>100% is the documented
     // overflow signal on this path).
-    const contextUsage = maxContextTokens > 0 ? contextTokens / maxContextTokens : 0;
+    const contextUsage =
+      acpActive && acpStatus.health === 'healthy' && acpStatus.contextUsage !== undefined
+        ? acpStatus.contextUsage
+        : maxContextTokens > 0 ? contextTokens / maxContextTokens : 0;
     const hasUsage =
       usage.byModel !== undefined || usage.total !== undefined || usage.currentTurn !== undefined;
     return {
@@ -1876,7 +1907,8 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * disabled instead of a stale enabled.
    */
   override async acpStatus(input: SessionIdRpcInput): Promise<AcpStatusInfo> {
-    const agent = await this.agentScope(input.sessionId);
+    const session = this.requireLiveSession(input.sessionId);
+    const agent = await this.materializeMainAgent(session);
     const status = await agent.accessor.get(IAcpService).statusSnapshot();
     const active = agent.accessor.get(IAgentLLMRequesterService).getActiveContextManager();
     return { enabled: active?.id === ACP_MANAGER_ID, ...status };
@@ -1892,17 +1924,17 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * would switch ACP on in each concurrently running session too.
    */
   override async acpEnable(input: SessionIdRpcInput): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
+    const session = this.requireLiveSession(input.sessionId);
+    const agent = await this.materializeMainAgent(session);
+    await agent.accessor.get(IAcpService).enable();
     agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(ACP_MANAGER_ID);
   }
 
-  /**
-   * Disable opts the agent out with `null` rather than clearing the override:
-   * `undefined` means "no choice" and falls through to the config section,
-   * which would leave ACP on whenever that section names it.
-   */
+  /** Disable clears the override on the live agent scope. */
   override async acpDisable(input: SessionIdRpcInput): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
+    const session = this.requireLiveSession(input.sessionId);
+    const agent = await this.materializeMainAgent(session);
+    await agent.accessor.get(IAcpService).disable();
     agent.accessor.get(IAgentLLMRequesterService).setContextManagerOverride(null);
   }
 
@@ -1911,7 +1943,8 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * next turn starts from a fresh kernel state and outstanding refs die.
    */
   override async acpReset(input: SessionIdRpcInput): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
+    const session = this.requireLiveSession(input.sessionId);
+    const agent = await this.materializeMainAgent(session);
     await agent.accessor.get(IAcpService).reset();
   }
 

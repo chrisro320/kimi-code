@@ -650,8 +650,8 @@ importers:
         specifier: ^0.6.0
         version: 0.6.0
       acp-kernel:
-        specifier: 0.0.18
-        version: 0.0.18
+        specifier: 0.0.29
+        version: 0.0.29
       ajv:
         specifier: ^8.18.0
         version: 8.18.0
@@ -4776,12 +4776,12 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  acp-kernel@0.0.18:
-    resolution: {integrity: sha512-V9QLaUvutOr3eSYuDMPfjkK3jUKexueiLsU2kEFpXUu6jeALjHACPZbYSYDxxpE1OkRDaD1XXxcjV+Q/t6v4NQ==}
-    engines: {node: '>=20'}
-
   acp-kernel@0.0.23:
     resolution: {integrity: sha512-bG28aYfBda8z34fsaoNc4QBix4gRtQDQznR6G4XBaz9z1xgxdmdYtazQQMBjxnfEL9yCrDb9CTpkl7IXWiuviA==}
+    engines: {node: '>=20'}
+
+  acp-kernel@0.0.29:
+    resolution: {integrity: sha512-6o9ynFTpFaMd7KfnPXdYEOcXKxzwBjUXQ6e/DeALqjgcHLZV84CUQUTtoraxbId6YFfTY/kZGVu+zg6faOWNBg==}
     engines: {node: '>=20'}
 
   agent-base@7.1.4:
@@ -13309,7 +13309,7 @@ snapshots:
       obug: 2.1.1
       std-env: 4.0.0
       tinyrainbow: 3.1.0
-      vitest: 4.1.4(@types/node@22.19.17)(@vitest/coverage-v8@4.1.4)(jsdom@25.0.1)(msw@2.15.0(@types/node@22.19.17)(typescript@6.0.2))(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
+      vitest: 4.1.4(@types/node@22.19.17)(@vitest/coverage-v8@4.1.4)(jsdom@25.0.1)(msw@2.15.0(@types/node@22.19.17)(typescript@6.0.2))(vite@6.4.2(@types/node@22.19.17)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0)(yaml@2.8.3))
 
   '@vitest/expect@4.1.4':
     dependencies:
@@ -13598,9 +13598,9 @@ snapshots:
 
   acorn@8.17.0: {}
 
-  acp-kernel@0.0.18: {}
-
   acp-kernel@0.0.23: {}
+
+  acp-kernel@0.0.29: {}
 
   agent-base@7.1.4: {}
 

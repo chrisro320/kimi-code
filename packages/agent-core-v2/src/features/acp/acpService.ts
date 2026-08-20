@@ -276,6 +276,7 @@ export class AcpService extends Service implements IAcpService {
               blocks: turn.state.blocks.length,
               activeBlocks: turn.state.blocks.filter((block) => block.active).length,
               contextUsage: maxContextTokens > 0 ? foldedTokens / maxContextTokens : undefined,
+              foldedTokens,
             });
             const nudge = renderTurnNudge(turn);
             const base = tagOnly ? messages : rebuilt.messages;
@@ -556,6 +557,7 @@ export class AcpService extends Service implements IAcpService {
           blocks: state.blocks.length,
           activeBlocks: state.blocks.filter((block) => block.active).length,
           contextUsage: this.currentStatus.contextUsage,
+          foldedTokens: this.currentStatus.foldedTokens,
         });
         const created = state.blocks
           .slice(-result.blocksCreated)
@@ -639,6 +641,7 @@ export class AcpService extends Service implements IAcpService {
           blocks: next.blocks.length,
           activeBlocks: next.blocks.filter((entry) => entry.active).length,
           contextUsage: this.currentStatus.contextUsage,
+          foldedTokens: this.currentStatus.foldedTokens,
         });
         const { count } = collectBlockContent(
           view.state,
@@ -749,6 +752,32 @@ export class AcpService extends Service implements IAcpService {
     super.dispose();
   }
 
+  async enable(): Promise<void> {
+    return this.serialize(async () => {
+      this.lifetime.signal.throwIfAborted();
+      const loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+      this.lifetime.signal.throwIfAborted();
+      if (loaded.enabled === true) return;
+      await saveAcpSidecar(this.documents, this.sidecarScope, {
+        ...loaded,
+        enabled: true,
+      });
+    });
+  }
+
+  async disable(): Promise<void> {
+    return this.serialize(async () => {
+      this.lifetime.signal.throwIfAborted();
+      const loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
+      this.lifetime.signal.throwIfAborted();
+      if (loaded.enabled === false) return;
+      await saveAcpSidecar(this.documents, this.sidecarScope, {
+        ...loaded,
+        enabled: false,
+      });
+    });
+  }
+
   status(): AcpStatus {
     return this.currentStatus;
   }
@@ -782,6 +811,7 @@ export class AcpService extends Service implements IAcpService {
           visible === undefined || this.lastUsage.maxContextTokens <= 0
             ? current.contextUsage
             : visible / this.lastUsage.maxContextTokens,
+        foldedTokens: visible ?? current.foldedTokens,
         ...(current.reason === undefined ? {} : { reason: current.reason }),
       };
     });

@@ -115,7 +115,7 @@ describe('handleAcpCommand', () => {
     expect(host.setAppState).toHaveBeenCalledWith({ acp: 'healthy', acpRefs: 3, acpActiveBlocks: 2 });
     expect(host.showNotice).toHaveBeenCalledWith(
       'ACP context manager enabled',
-      'This session only; takes effect on the next request.',
+      'Takes effect on the next request for this session.',
     );
   });
 
@@ -164,6 +164,10 @@ describe('handleAcpCommand', () => {
       acpRefs: undefined,
       acpActiveBlocks: undefined,
     });
+    expect(host.showNotice).toHaveBeenCalledWith(
+      'ACP context manager disabled',
+      'Disabled for this session. Compressed state is kept; /acp reset deletes it.',
+    );
     expect(host.state.appState.acp).toBeUndefined();
     expect(host.state.appState.acpRefs).toBeUndefined();
     expect(host.state.appState.acpActiveBlocks).toBeUndefined();

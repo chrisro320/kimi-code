@@ -21,6 +21,7 @@ export interface AcpStatus {
   readonly blocks: number;
   readonly activeBlocks: number;
   readonly contextUsage?: number;
+  readonly foldedTokens?: number;
   readonly reason?: string;
 }
 
@@ -34,6 +35,8 @@ export interface IAcpService {
 
   isActive(): boolean;
   status(): AcpStatus;
+  enable(): Promise<void>;
+  disable(): Promise<void>;
   /** Disk-derived status: loads and validates the sidecar instead of returning
    *  the in-memory snapshot, which holds constructor defaults between a restart
    *  and the first turn. An in-memory runtime degradation still wins over a
