@@ -328,22 +328,9 @@ describe('kimi-datasource MCP server', () => {
         'gildata',
         'sec_edgar',
         'sp_data',
-        'china_nda',
-        'china_nbs',
-        'china_standards',
-        'who',
-        'fao',
-        'unsd',
-        'ecb',
-        'eurostat',
-        'unicef',
-        'oecd',
-        'fred',
-        'xhcj',
-        'caixin',
       ]);
       expect(call?.description).toContain(
-        'For a simple lookup, use one specialized source and stop once a result covers the user',
+        'For a simple lookup, use one specialized source and stop after its first successful result',
       );
       expect(call?.description).toContain('When the user names a data source, use that source');
       expect(call?.inputSchema.properties['data_source_name']?.description).toContain(
