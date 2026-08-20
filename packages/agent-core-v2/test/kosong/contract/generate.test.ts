@@ -17,8 +17,8 @@ const USAGE: TokenUsage = { inputOther: 10, output: 5, inputCacheRead: 2, inputC
 class FakeStreamedMessage implements StreamedMessage {
   readonly id: string | null = 'gen-1';
   readonly usage: TokenUsage | null = USAGE;
-  readonly finishReason: FinishReason | null = 'completed';
-  readonly rawFinishReason: string | null = 'stop';
+  readonly finishReason: FinishReason | null;
+  readonly rawFinishReason: string | null;
   readonly traceId?: string | null;
   cancelCalls = 0;
 
@@ -28,11 +28,15 @@ class FakeStreamedMessage implements StreamedMessage {
       readonly traceId?: string | null;
       readonly droppedOutputItemTypes?: readonly string[];
       readonly onBeforeYield?: (index: number) => void;
+      readonly finishReason?: FinishReason | null;
+      readonly rawFinishReason?: string | null;
     } = {},
   ) {
     this.traceId = init.traceId;
     this.droppedOutputItemTypes = init.droppedOutputItemTypes;
     this.onBeforeYield = init.onBeforeYield;
+    this.finishReason = init.finishReason !== undefined ? init.finishReason : 'completed';
+    this.rawFinishReason = init.rawFinishReason !== undefined ? init.rawFinishReason : 'stop';
   }
 
   readonly droppedOutputItemTypes?: readonly string[];
@@ -64,6 +68,31 @@ function createFakeProvider(stream: StreamedMessage): FakeProvider {
       _history: Message[],
       _options?: GenerateOptions,
     ): Promise<StreamedMessage> => stream,
+  );
+  const provider: ChatProvider = {
+    name: 'fake',
+    modelName: 'fake-model',
+    thinkingEffort: null,
+    generate: generateSpy,
+  };
+  return { provider, generateSpy };
+}
+
+function createSequencedFakeProvider(streams: readonly StreamedMessage[]): FakeProvider {
+  const queue = [...streams];
+  const generateSpy = vi.fn(
+    async (
+      _systemPrompt: string,
+      _tools: Tool[],
+      _history: Message[],
+      _options?: GenerateOptions,
+    ): Promise<StreamedMessage> => {
+      const next = queue.shift();
+      if (next === undefined) {
+        throw new Error('createSequencedFakeProvider: no streams left');
+      }
+      return next;
+    },
   );
   const provider: ChatProvider = {
     name: 'fake',
@@ -331,5 +360,52 @@ describe('generate() per-turn intent passthrough', () => {
 
     expect(generateSpy).toHaveBeenCalledTimes(1);
     expect(generateSpy.mock.calls[0]?.[3]).toBe(options);
+  });
+});
+
+describe('generate() empty STOP retry', () => {
+  it('retries an empty STOP response and succeeds on a later attempt', async () => {
+    const emptyStop = new FakeStreamedMessage([], { rawFinishReason: 'STOP' });
+    const recovered = new FakeStreamedMessage([{ type: 'text', text: 'recovered' }], {
+      rawFinishReason: 'STOP',
+    });
+    const { provider, generateSpy } = createSequencedFakeProvider([emptyStop, recovered]);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'recovered' }]);
+    expect(generateSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('exhausts the retry budget and rethrows APIEmptyResponseError with a diagnostic', async () => {
+    const streams = [
+      new FakeStreamedMessage([], { rawFinishReason: 'STOP' }),
+      new FakeStreamedMessage([], { rawFinishReason: 'STOP' }),
+      new FakeStreamedMessage([], { rawFinishReason: 'STOP' }),
+    ];
+    const { provider, generateSpy } = createSequencedFakeProvider(streams);
+
+    let caught: unknown;
+    try {
+      await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(APIEmptyResponseError);
+    expect((caught as Error).message).toContain('retry is exhausted');
+    expect((caught as APIEmptyResponseError).rawFinishReason).toBe('STOP');
+    expect((caught as APIEmptyResponseError).finishReason).toBe('completed');
+    expect(generateSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry an empty response with a non-STOP raw finish reason', async () => {
+    const stream = new FakeStreamedMessage([], { rawFinishReason: 'length' });
+    const { provider, generateSpy } = createFakeProvider(stream);
+
+    await expect(generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY)).rejects.toBeInstanceOf(
+      APIEmptyResponseError,
+    );
+    expect(generateSpy).toHaveBeenCalledTimes(1);
   });
 });

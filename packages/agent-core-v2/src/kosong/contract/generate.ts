@@ -1,3 +1,4 @@
+import { retryBackoffDelays, sleepForRetry } from '#/_base/utils/retry';
 import { APIEmptyResponseError, createAbortError } from './errors';
 import {
   isContentPart,
@@ -28,7 +29,43 @@ export interface GenerateCallbacks {
   onToolCall?: (toolCall: ToolCall) => void | Promise<void>;
 }
 
+const EMPTY_STOP_MAX_ATTEMPTS = 3;
+
 export async function generate(
+  provider: ChatProvider,
+  systemPrompt: string,
+  tools: Tool[],
+  history: Message[],
+  callbacks?: GenerateCallbacks,
+  options?: GenerateOptions,
+): Promise<GenerateResult> {
+  const delays = retryBackoffDelays(EMPTY_STOP_MAX_ATTEMPTS);
+  let lastError: APIEmptyResponseError | null = null;
+  for (let attempt = 0; attempt < EMPTY_STOP_MAX_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleepForRetry(delays[attempt - 1] ?? 0, options?.signal);
+    }
+    try {
+      return await generateOnce(provider, systemPrompt, tools, history, callbacks, options);
+    } catch (error) {
+      if (!(error instanceof APIEmptyResponseError) || error.rawFinishReason !== 'STOP') {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+  throw new APIEmptyResponseError(
+    `${lastError?.message ?? 'The API returned an empty response.'} ` +
+      `The empty response persisted across ${EMPTY_STOP_MAX_ATTEMPTS} attempts; ` +
+      'automatic retry is exhausted and the turn must fail.',
+    {
+      finishReason: lastError?.finishReason ?? null,
+      rawFinishReason: lastError?.rawFinishReason ?? null,
+    },
+  );
+}
+
+async function generateOnce(
   provider: ChatProvider,
   systemPrompt: string,
   tools: Tool[],
