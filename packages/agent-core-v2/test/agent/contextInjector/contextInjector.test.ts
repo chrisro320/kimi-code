@@ -20,6 +20,7 @@ import { IAgentSystemReminderService } from '#/agent/systemReminder/systemRemind
 import { UNKNOWN_CAPABILITY, type ModelCapability } from '#/kosong/contract/capability';
 import { AgentSystemReminderService } from '#/agent/systemReminder/systemReminderService';
 import { IEventBus } from '#/app/event/eventBus';
+import { EventBusService } from '#/app/event/eventBusService';
 import { IWireService } from '#/wire/wire';
 import { registerLogServices } from '../../_base/log/stubs';
 import { registerContextMemoryServices, type StubContextMemory } from '../contextMemory/stubs';
@@ -29,6 +30,7 @@ import {
   stubLoopWithHooks,
   stubWire,
 } from '../loop/stubs';
+import { stubAgentContext } from '../agentContext/stubs';
 
 function injector(ix: TestInstantiationService): IAgentContextInjectorService {
   return ix.get(IAgentContextInjectorService);
@@ -101,12 +103,17 @@ describe('AgentContextInjectorService', () => {
   ): void {
     const backing = (context as StubContextMemory).messages as ContextMessage[];
     backing.splice(start, deleteCount, ...inserted);
-    ix.get(IEventBus).publish(
+    const eventBus = ix.get(IEventBus);
+    const agentContext = stubAgentContext('main', 1);
+    (eventBus as EventBusService).activateAgent(agentContext);
+    eventBus.publish(
       new ContextSpliced({
+        agentId: 'main',
         start,
         deleteCount,
         messages: [...inserted],
       }),
+      agentContext,
     );
   }
 

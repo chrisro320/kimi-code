@@ -13,7 +13,7 @@
 
 import { z } from 'zod';
 
-import { Event2 } from '#/app/event/event2';
+import { AgentEvent2 } from '#/app/event/event2';
 import type { ThinkingEffort } from '#/kosong/contract/provider';
 import { defineState } from '#/state/state';
 
@@ -34,18 +34,24 @@ const llmToolEntrySchema = z.object({
 });
 
 const llmToolsSnapshotSchema = z.object({
+  agentId: z.string(),
   hash: z.string(),
   tools: z.array(llmToolEntrySchema).readonly(),
 });
 
-export class LlmToolsSnapshot extends Event2<z.infer<typeof llmToolsSnapshotSchema>> {
+export class LlmToolsSnapshot extends AgentEvent2<z.infer<typeof llmToolsSnapshotSchema>> {
   static override readonly type = 'llm.tools_snapshot';
   static override readonly durable = true;
   static override readonly schema = llmToolsSnapshotSchema;
 }
-export interface LlmToolsSnapshot extends z.infer<typeof llmToolsSnapshotSchema> {}
+export interface LlmToolsSnapshot {
+  readonly agentId: string;
+  readonly hash: string;
+  readonly tools: readonly LlmRequestToolSchema[];
+}
 
 const llmRequestSchema = z.object({
+  agentId: z.string(),
   kind: z.enum(['loop', 'compaction', 'remote_compaction']),
   provider: z.string(),
   model: z.string(),
@@ -70,12 +76,38 @@ const llmRequestSchema = z.object({
 
 export type LlmRequestPayload = z.infer<typeof llmRequestSchema>;
 
-export class LlmRequest extends Event2<LlmRequestPayload> {
+export class LlmRequest extends AgentEvent2<LlmRequestPayload> {
   static override readonly type = 'llm.request';
   static override readonly durable = true;
   static override readonly schema = llmRequestSchema;
 }
-export interface LlmRequest extends LlmRequestPayload {}
+export interface LlmRequest {
+  readonly agentId: string;
+  readonly kind: 'loop' | 'compaction';
+  readonly provider: string;
+  readonly model: string;
+  readonly modelAlias?: string;
+  readonly thinkingEffort?: ThinkingEffort;
+  readonly thinkingKeep?: string;
+  readonly temperature?: number;
+  readonly topP?: number;
+  readonly maxTokens?: number;
+  readonly betaApi?: boolean;
+  readonly toolSelect: boolean;
+  readonly systemPromptHash: string;
+  readonly systemPrompt?: string;
+  readonly toolsHash: string;
+  readonly messageCount: number;
+  readonly turnStep?: string;
+  readonly attempt?: string;
+  readonly projection?:
+    | 'strict'
+    | 'media-degraded'
+    | 'media-stripped'
+    | 'strict-media-degraded'
+    | 'strict-media-stripped';
+  readonly droppedCount?: number;
+}
 
 export const llmRequestTraceKey = defineState(
   'llm.requestTrace',

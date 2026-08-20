@@ -119,6 +119,10 @@ describe('builtin agent profiles', () => {
   it('wires TowerInit into the default profile', () => {
     const agent = profileByName('agent');
     expect(agent.tools).toContain('TowerInit');
-    expect(agent.subagents).toBeUndefined();
+  });
+
+  it('caps the default profile delegation at non-spawning profiles', () => {
+    const agent = profile('agent');
+    expect(agent.subagents).toEqual(['coder', 'explore', 'plan']);
   });
 });

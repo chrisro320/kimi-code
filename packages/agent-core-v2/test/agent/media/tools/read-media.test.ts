@@ -47,6 +47,7 @@ import type { ISessionWorkspaceContext } from '#/session/workspaceContext/worksp
 import type { WorkspaceConfig } from '#/tool/path-access';
 import type { IEventDispatcher } from '#/state/eventDispatcher';
 import { sniffImageDimensions } from '#/agent/media/file-type';
+import { stubAgentContext } from '../../agentContext/stubs';
 
 const WORKSPACE: WorkspaceConfig = { workspaceDir: '/workspace', additionalDirs: [] };
 
@@ -866,6 +867,8 @@ describe('AgentMediaToolsRegistrar', () => {
     const wire = {
       hooks: { onDidRestore: new OrderedHookSlot() },
     } as unknown as IEventDispatcher;
+    const agentContext = stubAgentContext('main', 1);
+    eventBus.activateAgent(agentContext);
     const state: ProfileState = {
       alias: '',
       capabilities: capabilities({ image_in: false, video_in: false }),
@@ -917,9 +920,11 @@ describe('AgentMediaToolsRegistrar', () => {
       restoreModel(alias, caps);
       eventBus.publish(
         new AgentStatusUpdated({
+          agentId: 'main',
           model: alias,
           maxContextTokens: caps.max_context_tokens,
         }),
+        agentContext,
       );
     };
     const setRuntimeAvailable = (available: boolean): void => {

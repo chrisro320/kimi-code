@@ -2,9 +2,9 @@ import type { ReplayableStateKey } from '#/state/state';
 
 import { contextMemoryKey } from '#/agent/contextMemory/contextOps';
 import { dispatchModeConfiguredKey, dispatchModeKey } from '#/agent/dispatch/dispatchOps';
+import { staleGuardKey } from '#/features/staleGuard/staleGuardOps';
 import { fullCompactionKey } from '#/agent/fullCompaction/compactionOps';
-import { goalKey } from '#/agent/goal/goalOps';
-import { goalForkNoticeKey } from '#/agent/goal/goalService';
+import { goalForkNoticeKey, goalKey } from '#/features/goal/goalOps';
 import { interruptionReminderKey } from '#/agent/interruptionReminder/interruptionReminderOps';
 import { llmRequestTraceKey } from '#/agent/llmRequester/llmRequestOps';
 import { turnKey } from '#/agent/loop/turnOps';
@@ -21,20 +21,18 @@ import { runtimeBindingKey } from '#/agent/runtimeBinding/runtimeBindingOps';
 import { skillKey } from '#/agent/skill/skillOps';
 import { taskKey } from '#/agent/task/taskOps';
 import { taskNotificationDeliveryKey } from '#/agent/task/taskService';
-import { tokenCountingKey } from '#/agent/tokenCounting/tokenCountingOps';
-import { usageKey } from '#/agent/usage/usageOps';
 import { userToolKey } from '#/agent/userTool/userToolOps';
 import { planKey } from '#/features/plan/planOps';
 import { swarmKey } from '#/features/swarm/swarmOps';
 import { towerKey } from '#/features/tower/towerOps';
 import { cronKey } from '#/session/cron/cronOps';
 import { interactionKey } from '#/session/interaction/interactionOps';
-import { todoKey } from '#/session/todo/todoOps';
 
 export const BUILTIN_REPLAYABLE_STATE_KEYS: readonly ReplayableStateKey<any>[] = [
   contextMemoryKey,
   dispatchModeKey,
   dispatchModeConfiguredKey,
+  staleGuardKey,
   fullCompactionKey,
   goalKey,
   goalForkNoticeKey,
@@ -53,13 +51,10 @@ export const BUILTIN_REPLAYABLE_STATE_KEYS: readonly ReplayableStateKey<any>[] =
   skillKey,
   taskKey,
   taskNotificationDeliveryKey,
-  tokenCountingKey,
-  usageKey,
   userToolKey,
   planKey,
   swarmKey,
   towerKey,
   cronKey,
   interactionKey,
-  todoKey,
 ];

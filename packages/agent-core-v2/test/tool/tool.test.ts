@@ -17,14 +17,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
-import { makeHookRunner } from '../agent/externalHooks/runner-stub';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
+import { makeHookRunner } from '../features/externalHooks/runner-stub';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { ToolAccesses, type ExecutableTool } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentLoopService } from '#/agent/loop/loop';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentUserToolService, type UserToolRegistration } from '#/agent/userTool/userTool';
 import {
   AgentSwarmToolInputSchema,
@@ -39,7 +40,11 @@ import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import { Error2, ErrorCodes } from '#/errors';
 import { runAgentTurn } from '#/session/subagent/runAgentTurn';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
-import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import type { AgentContext } from '#/agent/agentContext/agentContext';
+import {
+  IAgentLifecycleService,
+  type AgentScopeCreatedEvent,
+} from '#/session/agentLifecycle/agentLifecycle';
 import {
   type AgentRunHandle,
   type AgentRunRequest,
@@ -86,6 +91,7 @@ import {
   type TestAgentServiceOverride,
 } from '../harness';
 import { executeTool } from '../tools/fixtures/execute-tool';
+import { stubAgentContext } from '../agent/agentContext/stubs';
 
 const signal = new AbortController().signal;
 
@@ -213,6 +219,7 @@ interface AgentLifecycleStub extends IAgentLifecycleService, ISessionSubagentSer
     agentId: string,
     profileName: string,
     services?: ReadonlyMap<unknown, unknown>,
+    context?: AgentContext,
   ): void;
 }
 
@@ -223,7 +230,16 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
   const profileByAgentId = new Map<string, string>();
   const handles = new Map<string, IAgentScopeHandle>();
   const servicesByAgentId = new Map(options.handleServices);
+  const contextsByAgentId = new Map<string, AgentContext>();
   const publishedEvents: Event2[] = [];
+  const contextFor = (agentId: string): AgentContext => {
+    let context = contextsByAgentId.get(agentId);
+    if (context === undefined) {
+      context = stubAgentContext(agentId, 1);
+      contextsByAgentId.set(agentId, context);
+    }
+    return context;
+  };
   const handle = (agentId: string): IAgentScopeHandle => ({
     id: agentId,
     kind: LifecycleScope.Agent,
@@ -233,6 +249,14 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
         if (service !== undefined) return service as never;
         if (serviceId === IAgentLifecycleService) return lifecycle as never;
         if (serviceId === ISessionSubagentService) return lifecycle as never;
+        if (serviceId === IAgentScopeContext) {
+          return {
+            _serviceBrand: undefined,
+            agentId,
+            agentContext: contextFor(agentId),
+            scope: (subKey?: string) => subKey ?? '',
+          } as never;
+        }
         if (serviceId === IAgentContextInjectorService) {
           return {
             _serviceBrand: undefined,
@@ -339,8 +363,9 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
       onWillStartAgentTask: hookSlot(),
     },
     onDidStopAgentTask: Event.None as KimiEvent<AgentTaskStopHookContext>,
-    onDidCreate: Event.None as KimiEvent<IAgentScopeHandle>,
-    onDidDispose: Event.None as KimiEvent<string>,
+    onDidCreate: Event.None as KimiEvent<AgentContext>,
+    onDidCreateScope: Event.None as KimiEvent<AgentScopeCreatedEvent>,
+    onDidDispose: Event.None as KimiEvent<AgentContext>,
     create: vi.fn(async (input = {}) => {
       if (options.createError !== undefined) throw options.createError;
       const agentId =
@@ -358,25 +383,27 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
     fork: vi.fn(async () => {
       throw new Error('unexpected fork');
     }),
-    run: vi.fn(async (agentId, request, runOptions): Promise<AgentRunHandle> => {
+    run: vi.fn(async (agent, request, runOptions): Promise<AgentRunHandle> => {
       const completion =
-        options.runCompletion?.(agentId, request, runOptions) ??
+        options.runCompletion?.(agent.agentId, request, runOptions) ??
         Promise.resolve({ summary: 'child result' });
       return {
-        agentId,
+        agentId: agent.agentId,
         turn: {} as AgentRunHandle['turn'],
         completion,
       };
     }),
-    get: vi.fn((agentId) => handles.get(agentId)),
+    get: vi.fn((agent) => handles.get(agent.agentId)),
+    findAgentHandle: vi.fn((agentId: string) => handles.get(agentId)),
     list: vi.fn(() => [...handles.values()]),
     broadcastPermissionMode: vi.fn(),
-    remove: vi.fn(async (agentId) => {
-      handles.delete(agentId);
+    remove: vi.fn(async (agent) => {
+      handles.delete(agent.agentId);
     }),
-    addHandle: (agentId, profileName, services) => {
+    addHandle: (agentId, profileName, services, context) => {
       profileByAgentId.set(agentId, profileName);
       if (services !== undefined) servicesByAgentId.set(agentId, services);
+      if (context !== undefined) contextsByAgentId.set(agentId, context);
       handles.set(agentId, handle(agentId));
     },
     publishedEvents,
@@ -453,6 +480,47 @@ function sessionMetadataStub(agents: Readonly<Record<string, AgentMeta>>): ISess
 function subagentMeta(parentAgentId = 'main'): AgentMeta {
   return {
     labels: { parentAgentId },
+  };
+}
+
+function discoveredCatalog(): ISessionAgentProfileCatalog {
+  const agent = normalizeAgentProfile({
+    name: 'agent',
+    description: 'Default agent',
+    subagents: ['coder', 'explore', 'plan'],
+    systemPrompt: () => 'agent',
+  });
+  const coder = normalizeAgentProfile({
+    name: 'coder',
+    description: 'Coder',
+    systemPrompt: () => 'coder',
+  });
+  const reviewer = normalizeAgentProfile({
+    name: 'reviewer',
+    description: 'Reviewer',
+    systemPrompt: () => 'reviewer',
+  });
+  const profiles = [agent, coder, reviewer];
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+    get: (name) => profiles.find((profile) => profile.name === name),
+    getDefault: () => agent,
+    list: () => [...profiles],
+    inspect: (name) => {
+      const profile = profiles.find((candidate) => candidate.name === name);
+      if (profile === undefined) return undefined;
+      return {
+        name,
+        profile,
+        sourceId: name === 'reviewer' ? 'workspace' : 'builtin',
+        priority: 0,
+        suppressed: [],
+      };
+    },
+    load: async () => {},
+    reload: async () => {},
   };
 }
 
@@ -541,6 +609,33 @@ describe('Agent tool description', () => {
     expect(description).toContain('Tools: Bash, CronCreate, CronDelete, CronList, Edit');
   });
 
+  it('does not offer the default agent type to the builtin default caller', () => {
+    ctx = createTestAgent();
+
+    const description = agentDescription();
+
+    expect(description).toContain('- coder:');
+    expect(description).toContain('- explore:');
+    expect(description).not.toContain('- agent:');
+  });
+
+  it('lists discovered custom agents for the main agent alongside the builtin allowlist', () => {
+    ctx = createTestAgent(sessionService(ISessionAgentProfileCatalog, discoveredCatalog()));
+    ctx.get(IAgentProfileService).applyBindingSnapshot({
+      modelAlias: 'mock-model',
+      profileName: 'agent',
+      thinkingLevel: 'off',
+      systemPrompt: 'persisted prompt',
+      subagents: ['coder', 'explore', 'plan'],
+    });
+
+    const description = agentDescription();
+
+    expect(description).toContain('- reviewer: Reviewer');
+    expect(description).toContain('- coder: Coder');
+    expect(description).not.toContain('- agent: Default agent');
+  });
+
   it('renders global tool restrictions in subagent type descriptions', () => {
     ctx = createTestAgent(
       configServices(() => ({
@@ -563,6 +658,7 @@ describe('Agent tool description', () => {
       profileName: 'orchestrator',
       activeToolNames: ['Agent', 'Bash', 'Read'],
       disallowedTools: [],
+      subagents: ['agent'],
     } as unknown as ProfileData;
     ctx = createTestAgent(
       { autoConfigure: false },
@@ -635,6 +731,7 @@ describe('Agent tool description', () => {
     const explore: AgentProfile = normalizeAgentProfile({
       name: 'explore',
       description: 'Explorer',
+      tools: ['Read'],
       systemPrompt: () => 'explore',
     });
     const profiles = [caller, coder, explore];
@@ -970,7 +1067,7 @@ describe('Agent tool execution contract', () => {
       ),
       ...extra,
     );
-    lifecycle.addHandle('main', 'agent');
+    lifecycle.addHandle('main', 'agent', undefined, ctx.get(IAgentScopeContext).agentContext);
     return ctx;
   }
 
@@ -984,11 +1081,13 @@ describe('Agent tool execution contract', () => {
     const coder: AgentProfile = normalizeAgentProfile({
       name: 'coder',
       description: 'Coder',
+      tools: ['Bash', 'Read'],
       systemPrompt: () => 'coder',
     });
     const explore: AgentProfile = normalizeAgentProfile({
       name: 'explore',
       description: 'Explorer',
+      tools: ['Read'],
       systemPrompt: () => 'explore',
     });
     const profiles = [caller, coder, explore];
@@ -1047,6 +1146,74 @@ describe('Agent tool execution contract', () => {
     expect(result.output).toContain('Subagent type "coder" is not allowed for this agent');
     expect(result.output).toContain('explore');
     expect(lifecycle.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks fallback delegation to profiles that can themselves delegate', async () => {
+    const agent = normalizeAgentProfile({
+      name: 'agent',
+      description: 'Default agent',
+      subagents: ['coder', 'explore'],
+      systemPrompt: () => 'agent',
+    });
+    const coder = normalizeAgentProfile({
+      name: 'coder',
+      description: 'Coder',
+      tools: ['Agent', 'Read'],
+      systemPrompt: () => 'coder',
+    });
+    const explore = normalizeAgentProfile({
+      name: 'explore',
+      description: 'Explorer',
+      tools: ['Read'],
+      systemPrompt: () => 'explore',
+    });
+    const profiles: AgentProfile[] = [agent, coder, explore];
+    const catalog: ISessionAgentProfileCatalog = {
+      _serviceBrand: undefined,
+      ready: Promise.resolve(),
+      onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      get: (name) => profiles.find((profile) => profile.name === name),
+      getDefault: () => agent,
+      list: () => [...profiles],
+      inspect: () => undefined,
+      load: async () => {},
+      reload: async () => {},
+    };
+    const lifecycle = createAgentLifecycleStub({
+      createAgentIds: ['agent-child'],
+      runCompletion: async () => ({ summary: 'child result' }),
+    });
+    const context = createAgentToolContext(
+      lifecycle,
+      sessionService(ISessionAgentProfileCatalog, catalog),
+    );
+    context.get(IAgentProfileService).applyBindingSnapshot({
+      modelAlias: 'mock-model',
+      profileName: 'coder',
+      thinkingLevel: 'off',
+      systemPrompt: 'persisted prompt',
+    });
+
+    const blocked = await executeAgentTool(context, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+      subagent_type: 'coder',
+    });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.output).toContain('Subagent type "coder" is not allowed for this agent');
+    expect(blocked.output).toContain('explore');
+
+    const allowed = await executeAgentTool(context, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+      subagent_type: 'explore',
+    });
+    expect(lifecycle.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({ profile: 'explore' }),
+      }),
+    );
+    expect(allowed.output).toContain('actual_subagent_type: explore');
   });
 
   it('does not create a subagent when process disappears after tool activation', async () => {
@@ -1121,7 +1288,7 @@ describe('Agent tool execution contract', () => {
 
     if (execution.isError === true) throw new Error('expected runnable execution');
     expect(execution.description).toBe('Launching explore agent: Continue work');
-    expect(lifecycle.get).toHaveBeenCalledWith('agent-existing');
+    expect(lifecycle.list).toHaveBeenCalled();
   });
 
   it('returns an error when resuming with a subagent type', async () => {
@@ -1163,13 +1330,36 @@ describe('Agent tool execution contract', () => {
       }),
     );
     expect(lifecycle.run).toHaveBeenCalledWith(
-      'agent-child',
+      expect.objectContaining({ agentId: 'agent-child' }),
       { kind: 'prompt', prompt: expect.stringContaining('Investigate') },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(result.output).toContain('agent_id: agent-child');
     expect(result.output).toContain('actual_subagent_type: explore');
     expect(result.output).toContain('child result');
+  });
+
+  it('emits subagent.spawned exactly once, after task registration, carrying the task id', async () => {
+    const lifecycle = createAgentLifecycleStub({
+      createAgentIds: ['agent-child'],
+      runCompletion: async () => ({ summary: 'child result' }),
+    });
+    const context = createAgentToolContext(lifecycle);
+
+    await executeAgentTool(context, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+      subagent_type: 'explore',
+    });
+
+    const spawned = lifecycle.publishedEvents.filter(
+      (event) => event.type === 'subagent.spawned',
+    );
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]).toMatchObject({
+      subagentId: 'agent-child',
+      taskId: expect.any(String),
+    });
   });
 
   it('spawns the subagent on the pool default model when the tool call omits model', async () => {
@@ -1459,7 +1649,7 @@ describe('Agent tool execution contract', () => {
       'explore',
       new Map([
         [
-          IAgentTokenCountingService,
+          ISessionTokenCountingService,
           {
             _serviceBrand: undefined,
             get: () => ({ size: 321, measured: 300, estimated: 21 }),
@@ -1534,6 +1724,7 @@ describe('Agent tool execution contract', () => {
         subagent_name: 'explore',
         run_in_background: false,
         agent_id: 'agent-child',
+        model: 'provider/secondary',
         parent_agent_id: 'main',
         parent_tool_call_id: 'call_agent',
       },
@@ -1620,7 +1811,7 @@ describe('Agent tool execution contract', () => {
 
     expect(lifecycle.create).not.toHaveBeenCalled();
     expect(lifecycle.run).toHaveBeenCalledWith(
-      'agent-existing',
+      expect.objectContaining({ agentId: 'agent-existing' }),
       { kind: 'prompt', prompt: 'Continue' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -1749,7 +1940,7 @@ describe('Agent tool execution contract', () => {
 
     expect(targetProfile.update).not.toHaveBeenCalled();
     expect(lifecycle.run).toHaveBeenCalledWith(
-      'agent-existing',
+      expect.objectContaining({ agentId: 'agent-existing' }),
       { kind: 'prompt', prompt: 'Continue' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -3126,7 +3317,7 @@ describe('Agent tools', () => {
         sessionService(ISessionSubagentService, lifecycle),
         sessionService(ISessionCronService, cronStub),
       );
-      lifecycle.addHandle('main', 'agent');
+      lifecycle.addHandle('main', 'agent', undefined, ctx.get(IAgentScopeContext).agentContext);
     });
 
     it('continues after a foreground Agent tool returns a max_tokens failure', async () => {

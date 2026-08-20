@@ -219,10 +219,13 @@ export function isRetryableGenerateError(error: unknown): boolean {
     // finished and successful — nothing was interrupted and no budget ran
     // out. Emptiness is then a property of this request, and retries resend
     // a byte-identical body, so every attempt reproduces it: the budget just
-    // burns wall-clock and upstream calls before failing anyway. Every other
-    // finish reason (an interrupted stream leaves it `null`, an exhausted
-    // output budget normalizes to `truncated`) stays retryable.
-    return error.finishReason !== 'completed';
+    // burns wall-clock and upstream calls before failing anyway.
+    // A `filtered` response is deterministic for the same reason: replaying it
+    // re-triggers the provider's safety filter, so fail fast and surface the
+    // filter notice instead of burning the whole step-retry budget.
+    // Every other finish reason (an interrupted stream leaves it `null`, an
+    // exhausted output budget normalizes to `truncated`) stays retryable.
+    return error.finishReason !== 'completed' && error.finishReason !== 'filtered';
   }
   if (error instanceof APIStatusError) {
     // Quota/balance exhaustion is a 429 but deterministic until the account

@@ -21,6 +21,8 @@ export const CHROME_GUTTER = 1;
 // wraps must collapse like a multi-line block does, or `a && b && c` deploy
 // one-liners escape the cap entirely.
 export const RESULT_PREVIEW_LINES = 1;
+// Collapsed row cap for a finished `!` shell command's output card.
+export const SHELL_OUTPUT_PREVIEW_LINES = 10;
 export const THINKING_PREVIEW_LINES = 2;
 // The shell command itself. Deploy one-liners are mostly `cd` + chained `&&`
 // noise, so one row plus the expand hint is the whole budget.

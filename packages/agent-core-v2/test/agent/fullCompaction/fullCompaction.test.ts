@@ -21,8 +21,8 @@ import {
   DefaultCompactionStrategy,
 } from '#/agent/fullCompaction/strategy';
 import { COMPACTION_SUMMARY_PREFIX } from '#/agent/contextMemory/compactionHandoff';
-import { makeHookRunner } from '../externalHooks/runner-stub';
-import type { IExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHooksRunner';
+import { makeHookRunner } from '../../features/externalHooks/runner-stub';
+import type { IExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunner';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import { estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
@@ -56,8 +56,7 @@ import {
   type ToolExecution,
 } from '#/index';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
-import { IAgentGoalService } from '#/agent/goal/goal';
+import { IAgentGoalService } from '#/features/goal/goal';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
@@ -277,7 +276,7 @@ describe('FullCompaction', () => {
       const candidate = event as { type?: unknown; event?: unknown };
       return candidate.type === '[wire]' && candidate.event === 'full_compaction.complete';
     });
-    expect(completeEvent?.args).toEqual({ time: '<time>' });
+    expect(completeEvent?.args).toEqual({ agentId: 'main', time: '<time>' });
     expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
       system: <system-prompt>
       tools: Agent, AgentSwarm, EnterPlanMode, ExitPlanMode
@@ -947,6 +946,37 @@ describe('FullCompaction', () => {
         error_type: 'APIEmptyResponseError',
       }),
     });
+    expect(ctx.compactHistory()).toEqual([
+      { role: 'user', text: 'old user one' },
+      { role: 'assistant', text: 'old assistant one' },
+      { role: 'user', text: 'recent user two' },
+      { role: 'assistant', text: 'recent assistant two' },
+    ]);
+  });
+
+  it('fails fast without shrinking when the provider filters the compaction response', async () => {
+    const inputs: string[][] = [];
+    const generate = realKosongGenerate((_attempt, history) => {
+      inputs.push(inputHistorySnapshot(history));
+      return mockStreamedMessage(
+        [{ type: 'think', think: 'Filtered while reasoning about the summary.' }],
+        null,
+        { finishReason: 'filtered', rawFinishReason: 'content_filter' },
+      );
+    });
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(inputs).toHaveLength(1);
     expect(ctx.compactHistory()).toEqual([
       { role: 'user', text: 'old user one' },
       { role: 'assistant', text: 'old assistant one' },
@@ -2946,7 +2976,7 @@ describe('FullCompaction', () => {
     const ctx = testAgent(
       sessionServices((reg) => {
         reg.definePartialInstance(ISessionTodoService, {
-          getTodos: () => todos,
+          getTodos: async () => todos,
         });
       }),
     );
@@ -3097,6 +3127,7 @@ function textResult(text: string, traceId: string | null = null): Awaited<Return
 function mockStreamedMessage(
   parts: readonly StreamedMessagePart[],
   traceId: string | null = null,
+  opts?: { finishReason?: StreamedMessage['finishReason']; rawFinishReason?: string | null },
 ): StreamedMessage {
   return {
     get id(): string | null {
@@ -3105,8 +3136,8 @@ function mockStreamedMessage(
     get usage() {
       return null;
     },
-    finishReason: null,
-    rawFinishReason: null,
+    finishReason: opts?.finishReason ?? null,
+    rawFinishReason: opts?.rawFinishReason ?? null,
     traceId,
     async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
       for (const part of parts) {
@@ -3397,7 +3428,7 @@ describe('goal reminder re-injection after full compaction', () => {
         lastCompactedTokenCount: number | null;
       }
     ).lastCompactedTokenCount;
-    expect(floor).toBe(ctx.get(IAgentTokenCountingService).get().size);
+    expect(floor).toBe(ctx.tokenCounting.get().size);
     expect(floor).toBe(tokensAfter);
 
     ctx.mockNextResponse({ type: 'text', text: 'Reply after compaction.' });

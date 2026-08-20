@@ -202,6 +202,7 @@ describe('Plan service', () => {
         (event) => event.type === '[wire]' && event.event === 'plan_mode.enter',
       );
       expect(enterRecord?.args).toEqual({
+        agentId: 'main',
         id: 'stable-plan',
         time: expect.any(Number),
       });
@@ -299,6 +300,7 @@ describe('Plan service', () => {
       expect(await readRevisionBlob('rev-plan', 1)).toBe(content);
       expect(revisionRecords()).toEqual([
         {
+          agentId: 'main',
           id: 'rev-plan',
           version: 1,
           path: revisionPath('rev-plan', 1),

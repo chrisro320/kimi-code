@@ -7,8 +7,10 @@ import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
+import type { AgentContext } from '#/agent/agentContext/agentContext';
 import { userCancellationReason } from '#/_base/utils/abort';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
@@ -71,6 +73,7 @@ import { SessionSwarmService } from '#/features/swarm/session/sessionSwarmServic
 import { stubLog } from '../../_base/log/stubs';
 import { stubFlag } from '../../app/flag/stubs';
 import { StubConfigService } from '../../kosong/stubs';
+import { stubAgentContext } from '../../agent/agentContext/stubs';
 
 // Isolation acquisition needs a real git repository, which the service-level
 // tests below do not have. The override lets a test stand in a fake handle and
@@ -1230,7 +1233,7 @@ describe('SessionSwarmService metadata compatibility', () => {
       }),
     );
     expect(runAgent).toHaveBeenCalledWith(
-      'agent-existing',
+      expect.objectContaining({ agentId: 'agent-existing' }),
       { kind: 'prompt', prompt: 'Continue' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -1310,8 +1313,9 @@ describe('SessionSwarmService metadata compatibility', () => {
         published.push(event);
       });
       let retryRuns = 0;
-      runAgent.mockImplementation((agentId, request, options) => {
+      runAgent.mockImplementation((agent, request, options) => {
         options?.onReady?.();
+        const agentId = (agent as AgentContext).agentId;
         if (agentId === 'agent-retry') {
           retryRuns += 1;
           return {
@@ -1345,7 +1349,7 @@ describe('SessionSwarmService metadata compatibility', () => {
       ).toEqual(['agent-retry', 'agent-blocker']);
       expect(
         runAgent.mock.calls
-          .filter(([agentId]) => agentId === 'agent-retry')
+          .filter(([agent]) => (agent as AgentContext).agentId === 'agent-retry')
           .map(([, request]) => request),
       ).toEqual([{ kind: 'prompt', prompt: 'Continue' }, { kind: 'retry' }]);
     } finally {
@@ -2148,6 +2152,7 @@ function lifecycleStub(
   const lifecycle = {
     _serviceBrand: undefined,
     onDidCreate: Event.None,
+    onDidCreateScope: Event.None,
     onDidDispose: Event.None,
     create: vi.fn(async (opts: CreateAgentOptions = {}) => {
       if (opts.agentId !== undefined) {
@@ -2164,10 +2169,11 @@ function lifecycleStub(
       return handle;
     }),
     fork: vi.fn(),
-    get: (agentId: string) => handles.get(agentId),
+    get: (context: AgentContext) => handles.get(context.agentId),
+    findAgentHandle: (agentId: string) => handles.get(agentId),
     list: () => [...handles.values()],
-    remove: async (agentId: string) => {
-      handles.delete(agentId);
+    remove: async (context: AgentContext) => {
+      handles.delete(context.agentId);
     },
     broadcastPermissionMode: () => {},
   };
@@ -2179,8 +2185,8 @@ function subagentStub(): ISessionSubagentService {
     _serviceBrand: undefined,
     hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
     onDidStopAgentTask: Event.None,
-    run: vi.fn(async (agentId: string) => ({
-      agentId,
+    run: vi.fn(async (agent: AgentContext) => ({
+      agentId: agent.agentId,
       turn: {} as never,
       completion: Promise.resolve({ summary: 'child summary' }),
     })),
@@ -2240,6 +2246,14 @@ function agentHandle(
           } as unknown as IAgentLoopService;
         }
         if (serviceId === IAgentUserToolService) return userToolServiceStub();
+        if (serviceId === IAgentScopeContext) {
+          return {
+            _serviceBrand: undefined,
+            agentId: id,
+            agentContext: stubAgentContext(id, 1),
+            scope: (subKey?: string) => subKey ?? '',
+          };
+        }
         if (serviceId === IEventBus) return eventBus;
         if (serviceId === IEventDispatcher) return dispatcher;
         if (serviceId === ITelemetryService) return noopTelemetryService;

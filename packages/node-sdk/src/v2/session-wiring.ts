@@ -33,16 +33,17 @@ import type {
   ToolInputDisplay,
 } from '@moonshot-ai/agent-core';
 import {
+  agentContextOf,
   IAgentLifecycleService,
   IAgentProfileService,
   IAgentLLMRequesterService,
-  IAgentTokenCountingService,
-  IAgentUsageService,
   IAcpService,
   IEventBus,
   ISessionApprovalService,
   ISessionInteractionService,
   ISessionQuestionService,
+  ISessionTokenCountingService,
+  ISessionUsageService,
   MAIN_AGENT_ID,
   type Event2,
   type IAgentScopeHandle,
@@ -120,11 +121,12 @@ export class SessionEventWiring {
     );
     const lifecycle = session.accessor.get(IAgentLifecycleService);
     this.disposables.push(
-      lifecycle.onDidCreate((agent) => {
-        this.attachAgent(agent);
+      lifecycle.onDidCreate((context) => {
+        const handle = lifecycle.get(context);
+        if (handle !== undefined) this.attachAgent(handle);
       }),
-      lifecycle.onDidDispose((agentId) => {
-        this.detachAgent(agentId);
+      lifecycle.onDidDispose((context) => {
+        this.detachAgent(context.agentId);
       }),
     );
     for (const agent of lifecycle.list()) {
@@ -272,22 +274,23 @@ export class SessionEventWiring {
  */
 function withStatusSnapshot(agent: IAgentScopeHandle, event: Event2<any>): Event2<any> {
   const profile = agent.accessor.get(IAgentProfileService) as IAgentProfileService | undefined;
-  const usageService = agent.accessor.get(IAgentUsageService) as IAgentUsageService | undefined;
-  const tokenCounting = agent.accessor.get(IAgentTokenCountingService) as
-    | IAgentTokenCountingService
+  const usageService = agent.accessor.get(ISessionUsageService) as ISessionUsageService | undefined;
+  const tokenCounting = agent.accessor.get(ISessionTokenCountingService) as
+    | ISessionTokenCountingService
     | undefined;
   if (profile === undefined || usageService === undefined || tokenCounting === undefined) {
     return event;
   }
   // Externally reported context size, resolved by the `[token_counting]`
-  // strategy inside the service (`IAgentTokenCountingService.statusSize`).
+  // strategy inside the service (`ISessionTokenCountingService.statusSize`).
   // When ACP context manager is active and reporting status, prefer its
   // folded context usage/tokens so the status line reflects the real model context.
+  const context = agentContextOf(agent);
   const acpService = agent.accessor.get(IAcpService) as IAcpService | undefined;
   const acpStatus = acpService?.status();
   const requester = agent.accessor.get(IAgentLLMRequesterService) as IAgentLLMRequesterService | undefined;
   const acpActive = requester?.getActiveContextManager()?.id === 'acp-kernel';
-  const rawContextTokens = tokenCounting.statusSize();
+  const rawContextTokens = tokenCounting.statusSize(context);
   const capabilities = profile.getModelCapabilities();
   const maxContextTokens = capabilities.max_input_tokens ?? capabilities.max_context_tokens;
   const contextTokens =
@@ -301,7 +304,7 @@ function withStatusSnapshot(agent: IAgentScopeHandle, event: Event2<any>): Event
         ? contextTokens / maxContextTokens
         : undefined;
   return Object.assign({}, event, {
-    usage: usageService.status(),
+    usage: usageService.status(context),
     contextTokens,
     contextUsage,
     maxContextTokens,

@@ -138,6 +138,15 @@ describe('isRetryableGenerateError', () => {
     ).toBe(false);
   });
 
+  it('does not retry a provider-filtered empty response', () => {
+    // Deterministic for the same reason `completed` is: replaying the request
+    // re-triggers the provider's safety filter, so the whole step-retry budget
+    // burns before the filter notice surfaces.
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('filtered', { finishReason: 'filtered' })),
+    ).toBe(false);
+  });
+
   it('retries a 401/403 context-overflow false alarm from a capacity crunch', () => {
     expect(
       isRetryableGenerateError(
