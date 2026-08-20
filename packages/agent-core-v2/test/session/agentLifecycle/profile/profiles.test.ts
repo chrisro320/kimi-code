@@ -122,7 +122,7 @@ describe('builtin agent profiles', () => {
   });
 
   it('caps the default profile delegation at non-spawning profiles', () => {
-    const agent = profile('agent');
+    const agent = profileByName('agent');
     expect(agent.subagents).toEqual(['coder', 'explore', 'plan']);
   });
 });

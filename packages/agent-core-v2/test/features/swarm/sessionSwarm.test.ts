@@ -1577,8 +1577,9 @@ describe('SessionSwarmService metadata compatibility', () => {
         return handle;
       });
       const rateLimited = createControlledPromise<{ summary: string }>();
-      runAgent.mockImplementation((agentId: string, request: unknown, options: { onReady?: () => void } | undefined) => {
+      runAgent.mockImplementation((agent: unknown, request: unknown, options: { onReady?: () => void } | undefined) => {
         options?.onReady?.();
+        const agentId = (agent as AgentContext).agentId;
         if (agentId === 'agent-pooled') {
           const kind = (request as { kind?: string }).kind;
           if (kind === 'retry') {
@@ -1647,8 +1648,9 @@ describe('SessionSwarmService metadata compatibility', () => {
       handles.set(id, handle);
       return handle;
     });
-    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+    runAgent.mockImplementation((agent: unknown, _request: unknown, options: { onReady?: () => void } | undefined) => {
       options?.onReady?.();
+      const agentId = (agent as AgentContext).agentId;
       if (agentId === 'agent-1') return Promise.reject(new Error('run failed to start'));
       return { agentId, turn: {} as never, completion: Promise.resolve({ summary: 'ok' }) };
     });
@@ -1687,8 +1689,9 @@ describe('SessionSwarmService metadata compatibility', () => {
       });
       const rateLimited = createControlledPromise<{ summary: string }>();
       let pooledRuns = 0;
-      runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+      runAgent.mockImplementation((agent: unknown, request: unknown, options: { onReady?: () => void } | undefined) => {
         options?.onReady?.();
+        const agentId = (agent as AgentContext).agentId;
         pooledRuns += 1;
         // The retry after the rate-limit requeue fails before the run
         // starts: no completion handler exists, the slot must go here.

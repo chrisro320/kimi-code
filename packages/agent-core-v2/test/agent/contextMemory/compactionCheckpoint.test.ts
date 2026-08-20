@@ -27,9 +27,7 @@ import {
 import { AgentContextMemoryService } from '#/agent/contextMemory/contextMemoryService';
 import { contextMemoryKey } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import {
-  IAgentTokenCountingService,
-} from '#/agent/tokenCounting/tokenCounting';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import type { WarningEvent } from '#/agent/profile/profileService';
@@ -96,11 +94,12 @@ function buildHost(key: string): Host {
   ix.stub(IFileSystemStorageService, new InMemoryStorageService());
   ix.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
-  ix.stub(IAgentTokenCountingService, {
+  ix.stub(ISessionTokenCountingService, {
     estimateText: estimateTokens,
     estimateMessage: estimateTokensForMessage,
     estimateMessages: estimateTokensForMessages,
-  } as unknown as IAgentTokenCountingService);
+    rebase: () => {},
+  } as unknown as ISessionTokenCountingService);
   ix.set(IAgentContextMemoryService, new SyncDescriptor(AgentContextMemoryService));
   const eventBus = ix.get(IEventBus);
   const wire = registerTestAgentWire(ix, testWireScope(SCOPE, key), {
@@ -324,6 +323,7 @@ describe('compaction checkpoint carrier', () => {
     expect(warnings).toEqual([
       {
         type: 'warning',
+        agentId: expect.any(String) as string,
         code: 'compaction-replay-estimate',
         message: expect.stringMatching(/post-compaction token count is an underestimate/) as string,
         time: expect.any(Number) as number,

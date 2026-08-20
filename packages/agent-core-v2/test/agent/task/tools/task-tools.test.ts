@@ -6,9 +6,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   IAgentTaskService,
-  RegisterAgentTaskOptions,
-  ScopeExpansionResolutionRequest,
-  ScopeExpansionResolutionResult,
+  type AgentTask,
+  type AgentTaskInfo,
+  type AgentTaskOutputSnapshot,
+  type AgentTaskTrackOptions,
+  type AgentTaskWaitDelivery,
+  type ForegroundTaskReleaseReason,
+  type IAgentTaskEntry,
+  type RegisterAgentTaskOptions,
+  type ScopeExpansionResolutionRequest,
+  type ScopeExpansionResolutionResult,
 } from '#/agent/task/task';
 import { type AgentTaskStatus, TERMINAL_STATUSES } from '#/agent/task/types';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';

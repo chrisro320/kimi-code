@@ -123,6 +123,7 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
     if (result.estimateNote !== undefined) {
       void this.dispatcher.dispatch(
         new WarningIssued({
+          agentId: this.scopeContext.agentId,
           code: 'compaction-replay-estimate',
           message: result.estimateNote,
         }),

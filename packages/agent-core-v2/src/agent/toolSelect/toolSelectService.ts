@@ -57,6 +57,7 @@ import {
   renderLoadableToolsAnnouncement,
   stripDynamicToolContext,
 } from './dynamicTools';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { TOOL_SELECT_FLAG_ID } from './flag';
 import {
   IAgentToolSelectService,
@@ -92,6 +93,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IEventBus eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
+    @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @ILogService private readonly log?: ILogService,
   ) {
     super();
@@ -210,7 +212,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       : `Lean mode is missing ${missing.join(', ')}; the session runs with the rest.`;
     this.log?.warn(message, { missing: [...missing] });
     try {
-      void this.dispatcher.dispatch(new WarningIssued({ code: 'lean-mode-tools-unavailable', message }));
+      void this.dispatcher.dispatch(new WarningIssued({ agentId: this.scopeContext.agentId, code: 'lean-mode-tools-unavailable', message }));
     } catch {
     }
   }

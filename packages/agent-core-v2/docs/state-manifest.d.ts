@@ -27,7 +27,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 17 keys · Agent: 94 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 17 keys · Agent: 99 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -68,6 +68,8 @@
 //     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
 //     cron                                            src/session/cron/cronOps.ts
 //     dateChange.seed                                 src/features/dateChange/dateChangeService.ts
+//     dispatchMode                                    src/agent/dispatch/dispatchOps.ts
+//     dispatchMode.configured                         src/agent/dispatch/dispatchOps.ts
 //     externalHooks.stopHookContinuationUsed          src/features/externalHooks/agent/agentExternalHooksService.ts
 //     fullCompaction                                  src/agent/fullCompaction/compactionOps.ts
 //     fullCompaction.activeTurnId                     src/agent/fullCompaction/fullCompactionService.ts
@@ -92,6 +94,8 @@
 //     interaction                                     src/session/interaction/interactionOps.ts
 //     interruptionReminder                            src/agent/interruptionReminder/interruptionReminderOps.ts
 //     llm.requestTrace                                src/agent/llmRequester/llmRequestOps.ts
+//     llmRequester.contextManagerActivated            src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.contextManagerMismatchWarnings     src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.emittedThinkingEffortWarnings      src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.lastConfigLogSignature             src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.mediaDegradedTurns                 src/agent/llmRequester/llmRequesterService.ts
@@ -126,6 +130,7 @@
 //     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
 //     skill                                           src/agent/skill/skillOps.ts
 //     staleGuard                                      src/features/staleGuard/staleGuardOps.ts
+//     stepRetry.capacityAttempts                      src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.failedAttempts                        src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.lastFailedDriverId                    src/agent/stepRetry/stepRetryService.ts
 //     swarm                                           src/features/swarm/swarmOps.ts
@@ -413,7 +418,9 @@ export interface WorkspaceStateSnapshot {
       readonly reason: string;
     }[];
     getKimiSkillsDescription: () => string;
-    getModelSkillListing: () => string;
+    getModelSkillListing: (options?: {
+      readonly compact?: boolean;
+    }) => string;
   };
   // src/workspace/workspaceTrust/workspaceTrustService.ts
   'workspaceTrust.trusted': boolean;
@@ -740,7 +747,9 @@ export interface SessionStateSnapshot {
       readonly reason: string;
     }[];
     getKimiSkillsDescription: () => string;
-    getModelSkillListing: () => string;
+    getModelSkillListing: (options?: {
+      readonly compact?: boolean;
+    }) => string;
   };
   // src/session/sessionToolPolicy/sessionToolPolicyService.ts
   'sessionToolPolicy.state': /* SessionToolPolicyState — packages/agent-core-v2/src/session/sessionToolPolicy/sessionToolPolicyService.ts */ {
@@ -802,13 +811,29 @@ export interface AgentStateSnapshot {
         readonly isError?: boolean;
       } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'compaction_summary';
+        readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly encrypted: string;
+          readonly itemType: string;
+          readonly itemId?: string;
+          readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly provider: string;
+            readonly model: string;
+            readonly baseUrl: string;
+          };
+          readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly kind: 'measured';
+            readonly tokens: number;
+          } | {
+            readonly kind: 'unknown';
+          };
+        };
       } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'system_trigger';
         readonly name: string;
       } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'task';
         readonly taskId: string;
-        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
         readonly notificationId: string;
       } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'cron_job';
@@ -935,13 +960,29 @@ export interface AgentStateSnapshot {
       readonly isError?: boolean;
     } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'compaction_summary';
+      readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+        readonly encrypted: string;
+        readonly itemType: string;
+        readonly itemId?: string;
+        readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly provider: string;
+          readonly model: string;
+          readonly baseUrl: string;
+        };
+        readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly kind: 'measured';
+          readonly tokens: number;
+        } | {
+          readonly kind: 'unknown';
+        };
+      };
     } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'system_trigger';
       readonly name: string;
     } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'task';
       readonly taskId: string;
-      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
       readonly notificationId: string;
     } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'cron_job';
@@ -1000,13 +1041,29 @@ export interface AgentStateSnapshot {
         readonly isError?: boolean;
       } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'compaction_summary';
+        readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly encrypted: string;
+          readonly itemType: string;
+          readonly itemId?: string;
+          readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly provider: string;
+            readonly model: string;
+            readonly baseUrl: string;
+          };
+          readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+            readonly kind: 'measured';
+            readonly tokens: number;
+          } | {
+            readonly kind: 'unknown';
+          };
+        };
       } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'system_trigger';
         readonly name: string;
       } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'task';
         readonly taskId: string;
-        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+        readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
         readonly notificationId: string;
       } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'cron_job';
@@ -1143,13 +1200,29 @@ export interface AgentStateSnapshot {
       readonly isError?: boolean;
     } | /* CompactionSummaryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'compaction_summary';
+      readonly checkpoint?: /* CompactionCheckpoint — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+        readonly encrypted: string;
+        readonly itemType: string;
+        readonly itemId?: string;
+        readonly lineage: /* CompactionLineage — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly provider: string;
+          readonly model: string;
+          readonly baseUrl: string;
+        };
+        readonly replayInputTokens: /* ReplayInputTokenEstimate — packages/agent-core-v2/src/kosong/contract/compaction.ts */ {
+          readonly kind: 'measured';
+          readonly tokens: number;
+        } | {
+          readonly kind: 'unknown';
+        };
+      };
     } | /* SystemTriggerOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'system_trigger';
       readonly name: string;
     } | /* TaskOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'task';
       readonly taskId: string;
-      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+      readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
       readonly notificationId: string;
     } | /* CronJobOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'cron_job';
@@ -1174,6 +1247,11 @@ export interface AgentStateSnapshot {
   })[];
   // src/agent/contextProjector/contextProjectorService.ts
   'contextProjector.lastRepairSignature': string | null;
+  // src/agent/dispatch/dispatchOps.ts
+  // replayable · durable — folds: DispatchModeSet
+  'dispatchMode': /* DispatchMode — packages/agent-core-v2/src/agent/dispatch/dispatch.ts */ 'off' | 'auto' | 'ask';
+  // replayable · durable — folds: DispatchModeSet
+  'dispatchMode.configured': boolean;
   // src/agent/fullCompaction/compactionOps.ts
   // replayable · durable — folds: FullCompactionBegin, FullCompactionCancel, FullCompactionComplete
   'fullCompaction': /* CompactionState — packages/agent-core-v2/src/agent/fullCompaction/compactionOps.ts */ {
@@ -1194,6 +1272,8 @@ export interface AgentStateSnapshot {
     readonly seenToolsHashes: readonly string[];
   };
   // src/agent/llmRequester/llmRequesterService.ts
+  'llmRequester.contextManagerActivated': Set<string>;
+  'llmRequester.contextManagerMismatchWarnings': Set<string>;
   'llmRequester.emittedThinkingEffortWarnings': Set<string>;
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
@@ -1212,6 +1292,9 @@ export interface AgentStateSnapshot {
         readonly max_context_tokens: number;
         readonly max_input_tokens?: number;
         readonly dynamically_loaded_tools?: boolean;
+        readonly remote_compaction?: boolean;
+        readonly minimal_mode?: boolean;
+        readonly minimal_mode_tools?: readonly string[];
       };
       readonly maxOutputSize: number | undefined;
       readonly alwaysThinking: boolean | undefined;
@@ -1287,17 +1370,17 @@ export interface AgentStateSnapshot {
   // src/agent/media/mediaToolsRegistrar.ts
   'media.registeredKey': string | undefined;
   // src/agent/permissionMode/injection/permissionModeInjection.ts
-  'permissionMode.lastMode': 'manual' | 'auto' | 'yolo' | undefined;
+  'permissionMode.lastMode': 'auto' | 'manual' | 'yolo' | undefined;
   // src/agent/permissionMode/permissionModeOps.ts
   // replayable · durable — folds: PermissionSetMode
-  'permissionMode': /* PermissionMode — packages/agent-core-v2/src/agent/permissionPolicy/types.ts */ 'manual' | 'auto' | 'yolo';
+  'permissionMode': /* PermissionMode — packages/agent-core-v2/src/agent/permissionPolicy/types.ts */ 'auto' | 'manual' | 'yolo';
   // replayable · durable — folds: PermissionSetMode
   'permissionMode.configured': boolean;
   // src/agent/permissionRules/permissionRulesOps.ts
   // replayable · durable — folds: PermissionRulesAdd, PermissionRecordApprovalResult
   'permissionRules': /* PermissionRulesModelState — packages/agent-core-v2/src/agent/permissionRules/permissionRulesOps.ts */ {
     readonly rules: readonly /* PermissionRule — packages/agent-core-v2/src/agent/permissionRules/permissionRules.ts */ {
-      readonly decision: /* PermissionRuleDecision — packages/agent-core-v2/src/agent/permissionRules/permissionRules.ts */ 'allow' | 'deny' | 'ask';
+      readonly decision: /* PermissionRuleDecision — packages/agent-core-v2/src/agent/permissionRules/permissionRules.ts */ 'ask' | 'allow' | 'deny';
       readonly scope: /* PermissionRuleScope — packages/agent-core-v2/src/agent/permissionRules/permissionRules.ts */ 'project' | 'user' | 'turn-override' | 'session-runtime';
       readonly pattern: string;
       readonly reason?: string;
@@ -1335,6 +1418,7 @@ export interface AgentStateSnapshot {
     readonly agentsMdPaths?: readonly string[];
     readonly disallowedTools?: readonly string[];
     readonly subagents?: readonly string[];
+    readonly leanMode?: boolean;
   };
   // replayable · durable — folds: ToolsSetActiveTools, ToolsResetActiveTools, ProfileBind
   'profile.activeTools': /* ActiveToolsState — packages/agent-core-v2/src/agent/profile/profileOps.ts */ readonly string[] | undefined;
@@ -1366,6 +1450,7 @@ export interface AgentStateSnapshot {
   // replayable · transient — folds: SkillActivate
   'skill': null;
   // src/agent/stepRetry/stepRetryService.ts
+  'stepRetry.capacityAttempts': number;
   'stepRetry.failedAttempts': number;
   'stepRetry.lastFailedDriverId': string | undefined;
   // src/agent/task/taskOps.ts
@@ -1374,12 +1459,17 @@ export interface AgentStateSnapshot {
     readonly kind: 'agent';
     readonly agentId?: string;
     readonly subagentType?: string;
+    readonly candidate?: {
+      readonly hash: string;
+      requestedScope: string[];
+      paths: string[];
+    };
     readonly parentToolCallId?: string;
     readonly model?: string;
     readonly thinkingEffort?: string;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1392,7 +1482,7 @@ export interface AgentStateSnapshot {
     readonly toolCallId?: string;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1406,7 +1496,7 @@ export interface AgentStateSnapshot {
     readonly exitCode: number | null;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1421,12 +1511,17 @@ export interface AgentStateSnapshot {
     readonly kind: 'agent';
     readonly agentId?: string;
     readonly subagentType?: string;
+    readonly candidate?: {
+      readonly hash: string;
+      requestedScope: string[];
+      paths: string[];
+    };
     readonly parentToolCallId?: string;
     readonly model?: string;
     readonly thinkingEffort?: string;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1439,7 +1534,7 @@ export interface AgentStateSnapshot {
     readonly toolCallId?: string;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;
@@ -1453,7 +1548,7 @@ export interface AgentStateSnapshot {
     readonly exitCode: number | null;
     readonly taskId: string;
     readonly description: string;
-    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost' | 'input_required' | 'expansion_denied';
     readonly detached?: boolean;
     readonly startedAt: number;
     readonly endedAt: number | null;

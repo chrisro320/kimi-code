@@ -103,6 +103,7 @@ export interface ProfileBind {
   readonly activeToolNames?: readonly string[];
   readonly disallowedTools: readonly string[];
   readonly subagents?: readonly string[];
+  readonly leanMode?: boolean;
 }
 
 const configUpdateSchema = z.object({

@@ -23,6 +23,8 @@ import { z } from 'zod';
 import { AgentEvent2 } from '#/app/event/event2';
 import { type TokenUsage } from '#/kosong/contract/usage';
 
+import type { UsageStatus } from './usage';
+
 export type UsageRecordScope = 'session' | 'turn';
 
 declare module '#/app/event/eventBus' {

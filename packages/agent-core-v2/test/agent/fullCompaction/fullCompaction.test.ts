@@ -41,10 +41,11 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IWireService } from '#/wire/wire';
 import type { TokenUsage } from '#/kosong/contract/usage';
+import { ISessionUsageService } from '#/session/usage/sessionUsage';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import {
   IAgentFullCompactionService,
   IAgentLLMRequesterService,
-  IAgentUsageService,
   IModelOAuthTokens,
   IAgentProfileService,
   IAgentToolRegistryService,
@@ -310,9 +311,11 @@ describe('FullCompaction', () => {
 
         // Token counts run higher than upstream: this fork registers extra tools
         // (routing / circuit / dispatch) and four extra builtin profiles, so the
-        // full-request overhead the counter now includes is larger. Re-measure
+        // full-request overhead the counter now includes is larger. Re-measured
+    // for 0.38.0 (upstream added WaitFor and friends, shifting the tool set again).
+    // Re-measure
         // rather than reverting to upstream numbers.
-        tokens_before: 3_901,
+        tokens_before: 3_171,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -602,7 +605,7 @@ describe('FullCompaction', () => {
       cwd: dir,
       trigger: 'auto',
 
-      token_count: 3_901,
+      token_count: 3_171,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -689,7 +692,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1104,7 +1107,7 @@ describe('FullCompaction', () => {
         agent_id: 'main',
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1330,7 +1333,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1704,12 +1707,12 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'auto',
 
-        tokens_before: 3_908,
+        tokens_before: 3_178,
         // 3267 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
         // 21 estimated tokens for the kept user messages — the summary
         // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_892,
+        tokens_after: 3_162,
         compacted_count: 7,
         retry_count: 0,
       }),
@@ -3690,11 +3693,13 @@ describe('goal reminder re-injection after full compaction', () => {
     it('records remote usage exactly once (inside compact(), never in the caller)', async () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
-      const usageService = ctx.get(IAgentUsageService);
+      const usageService = ctx.get(ISessionUsageService);
+      const agentContext = ctx.get(IAgentScopeContext).agentContext;
       const recordSpy = vi.spyOn(usageService, 'record');
       vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal').mockImplementation(async (_context, input) => {
         // Mirror compact()'s real contract: usage is recorded inside, once.
         usageService.record(
+          agentContext,
           'kimi-code',
           { inputOther: 500, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
           input?.source,
@@ -3705,7 +3710,7 @@ describe('goal reminder re-injection after full compaction', () => {
       await runManualCompaction(ctx);
 
       const remoteUsageRecords = recordSpy.mock.calls.filter(
-        ([, , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
+        ([, , , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
       );
       expect(remoteUsageRecords).toHaveLength(1);
     });

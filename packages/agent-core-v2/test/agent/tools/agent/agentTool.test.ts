@@ -20,7 +20,7 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentProfileService } from '#/agent/profile/profile';
-import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolContribution } from '#/agent/toolRegistry/toolContribution';
@@ -100,7 +100,12 @@ function makeTool(deps: {
   const handle = { id: 'main', accessor } as unknown as IAgentScopeHandle;
   return new SubagentTool(
     {
-      get: (id: string) => (id === 'main' ? handle : undefined),
+      // `get` now takes an AgentContext; `findAgentHandle` is the by-id lookup.
+      get: (ctx: unknown) =>
+        (ctx as { agentId?: string } | undefined)?.agentId === 'main' ? handle : undefined,
+      // The spawned child ('agent-1' from `create`) must resolve too — the tool
+      // looks it up before handing it to subagents.run.
+      findAgentHandle: () => handle,
       create: deps.create ?? vi.fn(async () => ({ id: 'agent-1', accessor }) as unknown as IAgentScopeHandle),
     } as unknown as IAgentLifecycleService,
     { run: deps.run ?? vi.fn() } as unknown as ISessionSubagentService,
@@ -108,9 +113,12 @@ function makeTool(deps: {
       ready: Promise.resolve(),
       get: () => deps.profile ?? editingProfile(['Write', 'Edit']),
       list: () => [],
-      getDefault: () => ({ subagents: [] }),
+      // '*' = no allowlist restriction; these tests exercise worktree isolation,
+      // not delegation gating. Upstream changed subagentAllowlistFor to fall back
+      // to getDefault() even when profileName is set, so [] now means "deny all".
+      getDefault: () => ({ subagents: ['*'] }),
     } as unknown as ISessionAgentProfileCatalog,
-    { agentId: 'main', scope: () => '' } as IAgentScopeContext,
+    makeAgentScopeContext({ agentId: 'main', agentScope: 'sessions/ws/session/agents/main' }),
     {} as IAgentTaskService,
     { data: () => ({ modelAlias: 'test-model', thinkingLevel: 'high', profileName: 'main' }) } as unknown as IAgentProfileService,
     { isToolActive: () => false, isToolActiveForProfile: () => false } as unknown as IAgentToolPolicyService,

@@ -245,6 +245,7 @@ export class AgentStepRetryService extends Disposable implements IAgentStepRetry
     const delayMs = CAPACITY_RETRY_INTERVAL_MS;
     void this.dispatcher.dispatch(
       new TurnStepRetrying({
+        agentId: this.scopeContext.agentId,
         turnId: context.turnId,
         step,
         stepId: context.stepId,

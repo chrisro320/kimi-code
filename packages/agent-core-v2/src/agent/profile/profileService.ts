@@ -586,6 +586,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     } catch (error) {
       void this.dispatcher.dispatch(
         new WarningIssued({
+          agentId: this.scopeContext.agentId,
           message: `System prompt refresh failed: ${error instanceof Error ? error.message : String(error)}`,
           code: 'system-prompt-refresh-failed',
         }),

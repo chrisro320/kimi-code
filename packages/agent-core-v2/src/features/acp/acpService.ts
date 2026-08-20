@@ -192,7 +192,7 @@ export class AcpService extends Service implements IAcpService {
   };
 
   constructor(
-    @IAgentScopeContext agentContext: IAgentScopeContext,
+    @IAgentScopeContext private readonly agentContext: IAgentScopeContext,
     @IAtomicDocumentStore private readonly documents: IAtomicDocumentStore,
     @IAgentLLMRequesterService private readonly requester: IAgentLLMRequesterService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
@@ -390,7 +390,7 @@ export class AcpService extends Service implements IAcpService {
           linked.throwIfAborted();
           assertFoldSafe();
 
-          const fullSummary = this.appendTodoList(summary);
+          const fullSummary = await this.appendTodoList(summary);
           const result = this.context.applyCompaction({
             summary: fullSummary,
             contextSummary: buildCompactionSummaryText(fullSummary),
@@ -861,15 +861,17 @@ export class AcpService extends Service implements IAcpService {
     if (this.requester.getActiveContextManager()?.id !== ACP_MANAGER_ID) return;
     this.eventBus.publish(
       new AgentStatusUpdated({
+        agentId: this.agentContext.agentId,
         acp: status.health,
         acpRefs: status.refs,
         acpActiveBlocks: status.activeBlocks,
       }),
+      this.agentContext.agentContext,
     );
   }
 
-  private appendTodoList(summary: string): string {
-    const todos = this.todo.getTodos();
+  private async appendTodoList(summary: string): Promise<string> {
+    const todos = await this.todo.getTodos(this.agentContext.agentContext);
     if (todos.length === 0) {
       return summary;
     }

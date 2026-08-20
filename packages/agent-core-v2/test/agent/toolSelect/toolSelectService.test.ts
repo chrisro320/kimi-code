@@ -341,6 +341,10 @@ function registerSharedServices(
   eventBus: RecordingEventBus,
 ): void {
   registerStateServices(reg);
+  reg.defineInstance(
+    IAgentScopeContext,
+    makeAgentScopeContext({ agentId: 'main', agentScope: 'sessions/ws/session/agents/main' }),
+  );
   reg.defineInstance(IEventBus, eventBus);
   reg.defineInstance(IAgentLoopService, loop);
   reg.defineInstance(IAgentContextMemoryService, contextMemory);

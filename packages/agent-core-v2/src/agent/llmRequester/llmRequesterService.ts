@@ -392,7 +392,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           manager.transformMessages({
             messages,
             source: meta.source,
-            usedContextTokens: this.tokenCounting.get().size,
+            usedContextTokens: this.tokenCounting.get(this.scopeContext.agentContext).size,
             maxContextTokens: meta.maxContextTokens,
             signal: linked,
           }),
@@ -476,7 +476,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           this.config.get<ModelOverrides>('modelOverrides')?.maxCompletionTokens,
       }),
       capability: resolved.modelCapabilities,
-      usedContextTokens: this.tokenCounting.get().measured,
+      usedContextTokens: this.tokenCounting.get(this.scopeContext.agentContext).measured,
     });
     const requester = this.modelCatalog.getRequester(resolved.modelAlias);
     const lineage = requester.compactionLineage();
@@ -558,7 +558,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       params,
     );
     if (outcome.kind === 'ok') {
-      this.usage.record(resolved.modelAlias, outcome.result.usage ?? emptyUsage(), input.source);
+      void this.usage.record(
+        this.scopeContext.agentContext,
+        resolved.modelAlias,
+        outcome.result.usage ?? emptyUsage(),
+        input.source,
+      );
       return outcome;
     }
     if (outcome.kind === 'error') {

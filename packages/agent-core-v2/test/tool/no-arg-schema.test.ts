@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CronListInputSchema } from '#/agent/tools/cron/cron-list/cron-list';
-import { GetGoalToolInputSchema } from '#/agent/tools/goal/get-goal/get-goal';
+import { GetGoalToolInputSchema } from '#/features/goal/tools/get-goal/get-goal';
 import { EnterPlanModeInputSchema } from '#/features/plan/tools/enter-plan-mode/enter-plan-mode';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { toInputJsonSchema } from '#/tool/input-schema';

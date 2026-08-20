@@ -29,8 +29,8 @@ import {
 } from '#/agent/loop/loop';
 import { MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { stubAgentContext } from '../../agent/agentContext/stubs';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
-import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import type { PermissionMode, PermissionPolicyResult } from '#/agent/permissionPolicy/types';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -2411,7 +2411,7 @@ describe('AgentGoalService background task waiting', () => {
 
   async function startGoalTurn(turnId: number): Promise<Turn> {
     const turn = makeTurn(turnId);
-    eventBus.publish(new TurnStarted({ turnId: turn.id, origin: USER_PROMPT_ORIGIN }));
+    eventBus.publish(new TurnStarted({ agentId: 'main', turnId: turn.id, origin: USER_PROMPT_ORIGIN }));
     await loopService.hooks.onWillBeginStep.run({
       turnId: turn.id,
       step: 1,

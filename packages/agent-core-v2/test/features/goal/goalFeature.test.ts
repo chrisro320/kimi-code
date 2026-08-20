@@ -10,6 +10,7 @@ import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInj
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -86,6 +87,9 @@ describe('GoalFeature', () => {
       stubPair(IAgentStateService, {
         contributeState: () => undefined,
       } as unknown as IAgentStateService),
+      // The fork's goal service waits on background tasks, so it depends on
+      // IAgentTaskService; upstream's move to features/ did not carry the stub.
+      stubPair(IAgentTaskService, {} as IAgentTaskService),
     ]);
     const manager = host.app.accessor.get(IFeatureManager);
 

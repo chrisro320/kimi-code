@@ -171,6 +171,7 @@ function createService(agentId = 'main', store = createStore()) {
   } as unknown as ISessionTodoService);
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.set(IAcpService, new SyncDescriptor(AcpService));
+  ix.get(IEventBus).activateAgent(ix.get(IAgentScopeContext).agentContext);
   const service = ix.get(IAcpService);
   return { disposables, requester, service, store, env, todos, applyCompaction };
 }
