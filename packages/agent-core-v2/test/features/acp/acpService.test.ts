@@ -13,7 +13,7 @@ import {
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IEventBus } from '#/app/event/eventBus';
+import { IEventBus, ISessionEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { ACP_MANAGER_ID, IAcpService } from '#/features/acp/acp';
 import { AcpService, renderTurnNudge } from '#/features/acp/acpService';
@@ -187,7 +187,7 @@ function createService(agentId = 'main', store = createStore()) {
   } as unknown as ISessionTodoService);
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.set(IAcpService, new SyncDescriptor(AcpService));
-  const eventBus = ix.get(IEventBus);
+  const eventBus = ix.get(IEventBus) as ISessionEventBus;
   eventBus.activateAgent(ix.get(IAgentScopeContext).agentContext);
   const service = ix.get(IAcpService);
   return { disposables, requester, service, store, env, project, eventBus };
