@@ -18,6 +18,19 @@ import { StaleGuardCleared, StaleGuardRecorded, staleGuardKey } from './staleGua
 const WRITE_OPERATIONS: readonly ToolFileAccessOperation[] = ['write', 'readwrite'];
 const READ_OPERATIONS: readonly ToolFileAccessOperation[] = ['read'];
 
+const LEAN_CTX_READ_TOOL = 'mcp__lean-ctx__ctx_read';
+const LEAN_CTX_PATCH_TOOL = 'mcp__lean-ctx__ctx_patch';
+
+function isReadToolName(name: string): boolean {
+  return name === 'Read' || name === LEAN_CTX_READ_TOOL;
+}
+
+function leanCtxReadPaths(args: unknown): readonly string[] {
+  const single = stringArg(args, 'path');
+  const batch = stringArrayArg(args, 'paths');
+  return single === undefined ? batch : [single, ...batch];
+}
+
 function accessedFilePath(
   accesses: ToolAccesses | undefined,
   operations: readonly ToolFileAccessOperation[],
@@ -32,6 +45,13 @@ function stringArg(args: unknown, key: string): string | undefined {
   if (typeof args !== 'object' || args === null) return undefined;
   const value = (args as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function stringArrayArg(args: unknown, key: string): readonly string[] {
+  if (typeof args !== 'object' || args === null) return [];
+  const value = (args as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
 function callPathArg(call: ToolCall): string | undefined {
@@ -93,6 +113,15 @@ export class StaleGuardService extends Disposable implements IStaleGuardService 
       if (path !== undefined) await this.recordCurrentMtime(path);
       return;
     }
+    if (name === LEAN_CTX_READ_TOOL) {
+      for (const path of leanCtxReadPaths(ctx.args)) await this.recordCurrentMtime(path);
+      return;
+    }
+    if (name === LEAN_CTX_PATCH_TOOL) {
+      const path = stringArg(ctx.args, 'path');
+      if (path !== undefined) await this.recordCurrentMtime(path);
+      return;
+    }
     if (name === 'Edit' || name === 'Write') {
       const path = accessedFilePath(ctx.accesses, WRITE_OPERATIONS);
       if (path !== undefined) await this.recordCurrentMtime(path);
@@ -140,7 +169,7 @@ export class StaleGuardService extends Disposable implements IStaleGuardService 
 function coveredByEarlierRead(event: BeforeToolExecuteEvent, rawPath: string): boolean {
   for (const call of event.toolCalls) {
     if (call.id === event.toolCall.id) return false;
-    if (call.name === 'Read' && callPathArg(call) === rawPath) return true;
+    if (isReadToolName(call.name) && callPathArg(call) === rawPath) return true;
   }
   return false;
 }
