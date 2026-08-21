@@ -66,7 +66,7 @@ export const TOWER_WORKER_PROFILE_DEF: AgentProfile = normalizeAgentProfile({
   whenToUse:
     'Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.',
   tools: TOWER_WORKER_TOOLS,
-  subagents: ['explore', 'plan'],
+  subagents: ['explore'],
   renderSystemPrompt: (context) =>
     renderSystemPromptResult(TOWER_WORKER_ROLE, context, {
       skillActive: skillActiveFor(TOWER_WORKER_TOOLS),

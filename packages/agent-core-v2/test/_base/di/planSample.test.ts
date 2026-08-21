@@ -9,7 +9,6 @@ import { Scope } from '#/_base/di/scope';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ConfigSectionContribution } from '#/app/config/configSectionContributions';
-import { AgentProfileContribution } from '#/app/agentProfileCatalog/agentProfileContribution';
 import { AgentToolContribution } from '#/agent/toolRegistry/toolContribution';
 import { EventStateContribution } from '#/state/stateContribution';
 
@@ -35,8 +34,6 @@ class EnterPlanModeTool extends Service {
   }
 }
 
-const planProfile = { name: 'plan' } as never;
-
 describe('Plan sample (plan-domain-plugin.manifest.ts) — API acceptance', () => {
   it('§1: the two Plan-domain units assemble through this.provide only', async () => {
     const log: string[] = [];
@@ -50,10 +47,6 @@ describe('Plan sample (plan-domain-plugin.manifest.ts) — API acceptance', () =
           domain: 'defaultPlanMode',
           schema: { '~standard': { validate: (v: unknown) => ({ value: v }) } } as never,
           options: { defaultValue: false } as never,
-        });
-        this.provide(AgentProfileContribution, {
-          sourceId: 'builtin',
-          contribution: { profiles: [planProfile] },
         });
         this.provide(ScopeUnits(LifecycleScope.Agent), PlanAgentFeature);
       }

@@ -13,6 +13,7 @@ import {
   matchesGlobRuleSubject,
   matchesPathRuleSubject,
 } from '#/tool/rule-match';
+import { IAgentDispatchModeService, type DispatchMode } from '#/agent/dispatch/dispatch';
 import type { ResolvedToolExecutionHookContext } from '#/agent/toolExecutor/toolHooks';
 import { IHostEnvironment, type IHostEnvironment as HostEnvironmentService } from '#/os/interface/hostEnvironment';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
@@ -26,11 +27,13 @@ import {
 } from '#/agent/permissionRules/permissionRules';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
+import type { AgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { IGitService } from '#/app/git/git';
 import { findGitWorkTree } from '#/app/git/workTree';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { ToolAccesses, type ToolAccesses as ToolAccessList } from '#/tool/toolContract';
+import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 import { stubPermissionModeService } from '../permissionMode/stubs';
@@ -44,6 +47,8 @@ describe('AgentPermissionPolicyService chain', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
   let mode: PermissionMode;
+  let dispatchMode: DispatchMode;
+  let profiles: Map<string, AgentProfile>;
   let rules: PermissionRule[];
   let sessionApprovalRulePatterns: string[];
   let workspace: ReturnType<typeof workspaceStub>;
@@ -51,12 +56,27 @@ describe('AgentPermissionPolicyService chain', () => {
   beforeEach(() => {
     disposables = new DisposableStore();
     mode = 'manual';
+    dispatchMode = 'auto';
+    profiles = new Map([
+      ['coder', agentProfile('coder', ['Read', 'Edit'])],
+      ['explore', agentProfile('explore', ['Read'])],
+      ['patcher', agentProfile('patcher', ['mcp__lean-ctx__ctx_patch'])],
+      ['wildcard-editor', agentProfile('wildcard-editor', ['mcp__*'])],
+    ]);
     rules = [];
     sessionApprovalRulePatterns = [];
     workspace = workspaceStub('/workspace');
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.defineInstance(IAgentPermissionModeService, stubPermissionModeService(() => mode));
+        reg.definePartialInstance(IAgentDispatchModeService, {
+          get mode() {
+            return dispatchMode;
+          },
+        });
+        reg.definePartialInstance(ISessionAgentProfileCatalog, {
+          get: (name) => profiles.get(name),
+        });
         reg.defineInstance(
           IAgentScopeContext,
           makeAgentScopeContext({ agentId: 'main', agentScope: '' }),
@@ -198,7 +218,195 @@ describe('AgentPermissionPolicyService chain', () => {
     });
   });
 
-  it.each(['AgentSwarm', 'EnterPlanMode', 'ExitPlanMode', 'CreateGoal'] as const)(
+  it.each([
+    ['manual', 'default-tool-approve'],
+    ['auto', 'auto-mode-approve'],
+    ['yolo', 'yolo-mode-approve'],
+  ] as const)(
+    'keeps %s permission behavior for a new read-only Agent in dispatch auto',
+    async (permissionMode, policyName) => {
+      mode = permissionMode;
+      dispatchMode = 'auto';
+      await expect(evaluate({
+        toolName: 'Agent',
+        args: { subagent_type: 'explore' },
+      })).resolves.toMatchObject({ policyName, result: { kind: 'approve' } });
+    },
+  );
+
+  it.each([
+    ['manual', 'default-tool-approve'],
+    ['auto', 'auto-mode-approve'],
+    ['yolo', 'yolo-mode-approve'],
+  ] as const)(
+    'keeps %s permission behavior for a single read-only Agent in dispatch ask',
+    async (permissionMode, policyName) => {
+      mode = permissionMode;
+      dispatchMode = 'ask';
+      await expect(evaluate({
+        toolName: 'Agent',
+        args: { subagent_type: 'explore' },
+      })).resolves.toMatchObject({ policyName, result: { kind: 'approve' } });
+    },
+  );
+
+  it.each(['manual', 'auto', 'yolo'] as const)(
+    'asks before a new Agent in %s permission mode when dispatch is off',
+    async (permissionMode) => {
+      mode = permissionMode;
+      dispatchMode = 'off';
+      await expect(evaluate({
+        toolName: 'Agent',
+        args: { subagent_type: 'explore' },
+      })).resolves.toMatchObject({
+        policyName: 'dispatch-mode-guard',
+        result: { kind: 'ask', reason: { dispatch_mode: 'off', dispatch_gate: 'agent' } },
+      });
+    },
+  );
+
+  it.each([
+    ['coder', 'coder'],
+    ['patcher', 'patcher'],
+    ['wildcard-editor', 'wildcard-editor'],
+    ['missing-profile', 'missing-profile'],
+    [undefined, 'coder'],
+  ] as const)(
+    'asks before editing or unknown Agent target %s in dispatch ask',
+    async (subagentType, expectedType) => {
+      dispatchMode = 'ask';
+      await expect(evaluate({
+        toolName: 'Agent',
+        args: subagentType === undefined ? {} : { subagent_type: subagentType },
+      })).resolves.toMatchObject({
+        policyName: 'dispatch-mode-guard',
+        result: {
+          kind: 'ask',
+          reason: {
+            dispatch_mode: 'ask',
+            dispatch_gate: 'agent',
+            subagent_type: expectedType,
+          },
+        },
+      });
+    },
+  );
+
+  it('asks before multiple Agent calls in dispatch ask', async () => {
+    dispatchMode = 'ask';
+    const first = toolCallFor('call_Agent_1', 'Agent', { subagent_type: 'explore' });
+    const second = toolCallFor('call_Agent_2', 'Agent', { subagent_type: 'explore' });
+    await expect(evaluate({
+      id: first.id,
+      toolName: first.name,
+      args: { subagent_type: 'explore' },
+      toolCalls: [first, second],
+    })).resolves.toMatchObject({
+      policyName: 'dispatch-mode-guard',
+      result: { kind: 'ask', reason: { dispatch_mode: 'ask', dispatch_gate: 'agent' } },
+    });
+  });
+
+  it.each(['ask', 'off'] as const)(
+    'asks before AgentSwarm in dispatch %s',
+    async (selectedMode) => {
+      dispatchMode = selectedMode;
+      await expect(evaluate({
+        toolName: 'AgentSwarm',
+        args: { items: ['first', 'second'] },
+      })).resolves.toMatchObject({
+        policyName: 'dispatch-mode-guard',
+        result: {
+          kind: 'ask',
+          reason: { dispatch_mode: selectedMode, dispatch_gate: 'agent_swarm' },
+        },
+      });
+    },
+  );
+
+  it.each(['ask', 'off'] as const)(
+    'asks before a mixed AgentSwarm in dispatch %s',
+    async (selectedMode) => {
+      dispatchMode = selectedMode;
+      await expect(evaluate({
+        toolName: 'AgentSwarm',
+        args: {
+          items: ['new worker'],
+          resume_agent_ids: { 'agent-1': 'continue' },
+        },
+      })).resolves.toMatchObject({
+        policyName: 'dispatch-mode-guard',
+        result: {
+          kind: 'ask',
+          reason: { dispatch_mode: selectedMode, dispatch_gate: 'agent_swarm' },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['manual', 'default-tool-approve'],
+    ['auto', 'auto-mode-approve'],
+    ['yolo', 'yolo-mode-approve'],
+  ] as const)(
+    'bypasses dispatch off for a pure-resume AgentSwarm in %s permission mode',
+    async (permissionMode, policyName) => {
+      mode = permissionMode;
+      dispatchMode = 'off';
+      await expect(evaluate({
+        toolName: 'AgentSwarm',
+        args: { resume_agent_ids: { 'agent-1': 'continue' } },
+      })).resolves.toMatchObject({ policyName, result: { kind: 'approve' } });
+    },
+  );
+
+  it.each([
+    ['manual', 'default-tool-approve'],
+    ['auto', 'auto-mode-approve'],
+    ['yolo', 'yolo-mode-approve'],
+  ] as const)(
+    'bypasses dispatch off for Agent resume in %s permission mode',
+    async (permissionMode, policyName) => {
+      mode = permissionMode;
+      dispatchMode = 'off';
+      await expect(evaluate({
+        toolName: 'Agent',
+        args: { resume: 'agent-1' },
+      })).resolves.toMatchObject({ policyName, result: { kind: 'approve' } });
+    },
+  );
+
+  it('keeps explicit deny above the dispatch guard', async () => {
+    dispatchMode = 'off';
+    rules.push({
+      decision: 'deny',
+      scope: 'user',
+      pattern: 'Agent',
+      reason: 'blocked by test',
+    });
+    await expect(evaluate({
+      toolName: 'Agent',
+      args: { subagent_type: 'explore' },
+    })).resolves.toMatchObject({
+      policyName: 'user-configured-deny',
+      result: { kind: 'deny' },
+    });
+  });
+
+  it('keeps session and user approvals below the dispatch guard', async () => {
+    dispatchMode = 'off';
+    sessionApprovalRulePatterns.push('Agent');
+    rules.push({ decision: 'allow', scope: 'user', pattern: 'Agent' });
+    await expect(evaluate({
+      toolName: 'Agent',
+      args: { subagent_type: 'explore' },
+    })).resolves.toMatchObject({
+      policyName: 'dispatch-mode-guard',
+      result: { kind: 'ask' },
+    });
+  });
+
+  it.each(['EnterPlanMode', 'ExitPlanMode', 'CreateGoal'] as const)(
     'approves %s through the default tool allowlist in manual mode',
     async (toolName) => {
       await expect(evaluate({ toolName, args: {} })).resolves.toMatchObject({
@@ -227,6 +435,8 @@ describe('AgentPermissionPolicyService git cwd write approval', () => {
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.defineInstance(IAgentPermissionModeService, stubPermissionModeService(() => mode));
+        reg.definePartialInstance(IAgentDispatchModeService, { mode: 'auto' });
+        reg.definePartialInstance(ISessionAgentProfileCatalog, { get: () => undefined });
         reg.defineInstance(
           IAgentScopeContext,
           makeAgentScopeContext({ agentId: 'main', agentScope: '' }),
@@ -422,6 +632,7 @@ interface PolicyContextInput {
   readonly toolName: string;
   readonly args: Record<string, unknown>;
   readonly accesses?: ToolAccessList;
+  readonly toolCalls?: readonly ToolCall[];
 }
 
 function policyContext(input: PolicyContextInput): ResolvedToolExecutionHookContext {
@@ -431,7 +642,7 @@ function policyContext(input: PolicyContextInput): ResolvedToolExecutionHookCont
     turnId: 0,
     signal,
     toolCall,
-    toolCalls: [toolCall],
+    toolCalls: input.toolCalls ?? [toolCall],
     args: input.args,
     execution: {
       description: description(input.toolName),
@@ -541,6 +752,18 @@ function stringArg(
 ): string {
   const value = args[key];
   return typeof value === 'string' ? value : fallback;
+}
+
+function agentProfile(name: string, tools: readonly string[]): AgentProfile {
+  return {
+    name,
+    tools,
+    systemPrompt: () => '',
+    renderSystemPrompt: () => ({
+      text: '',
+      environment: { cwd: '', date: { disclosed: false } },
+    }),
+  };
 }
 
 function workspaceStub(initialWorkDir: string): {

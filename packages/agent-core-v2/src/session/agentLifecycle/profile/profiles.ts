@@ -186,7 +186,7 @@ const FRONTEND_ARTIST_ROLE =
   'environment; never pretend an unavailable tool succeeded. If music/audio generation is requested ' +
   'but no usable tool is available, report that limitation clearly and provide only what can be ' +
   'verified.\n\n' +
-  'You may edit, execute, test, and use nested agents when the task requires it. Keep the change ' +
+  'You may edit, execute, and test when the task requires it. Keep the change ' +
   'scoped to the request, avoid speculative abstractions, and hand off every changed path, ' +
   'rationale, commands and results, remaining risks, and asset verification details. The final ' +
   'message is the complete handoff to the main agent.';
@@ -201,15 +201,15 @@ registerAgentProfile({
   name: 'agent',
   description: 'Default agent',
   tools: AGENT_TOOLS,
-  subagents: ['coder', 'explore', 'plan'],
+  subagents: ['coder', 'coder-ex', 'explore', 'debugger', 'reviewer', 'frontend-artist'],
   renderSystemPrompt: (context) =>
-    renderSystemPromptResult('', context, { skillActive: skillActiveFor(AGENT_TOOLS) }),
+    renderSystemPromptResult('', context, { skillActive: skillActiveFor(AGENT_TOOLS), dispatchPolicy: true }),
 });
 
 registerAgentProfile({
   name: 'coder',
   description:
-    'General software engineering agent — the only subagent type with file-editing tools; use it for any delegated task that must modify code.',
+    'General software engineering agent with file-editing tools; use it for bounded delegated implementation. Built-in editing profiles are coder, coder-ex, and frontend-artist.',
   whenToUse:
     'Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.',
   tools: CODER_TOOLS,

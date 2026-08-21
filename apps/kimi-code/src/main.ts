@@ -129,6 +129,14 @@ export async function handleUpgradeCommand(version: string): Promise<void> {
   process.exit(exitCode);
 }
 
+const NATIVE_INSTALL_ENV_DEFAULTS: Readonly<Record<string, string>> = {
+  KIMI_CODE_NO_AUTO_UPDATE: '1',
+  KIMI_CODE_EXPERIMENTAL_TOOL_SELECT: '1',
+  KIMI_CODE_EXPERIMENTAL_COMPACT_SKILL_LISTING: '1',
+  KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION: '1',
+  KIMI_CODE_TUI_FULL_SCREEN: '1',
+};
+
 /** A neutral CLIOptions value — `kimi migrate` never opens a chat session. */
 const MIGRATE_CLI_OPTIONS: CLIOptions = {
   session: undefined,
@@ -147,6 +155,12 @@ const MIGRATE_CLI_OPTIONS: CLIOptions = {
 export function main(): void {
   process.title = PROCESS_NAME;
   installCrashHandlers();
+  const isNative = detectNativeInstall();
+  if (isNative) {
+    for (const [key, value] of Object.entries(NATIVE_INSTALL_ENV_DEFAULTS)) {
+      if (process.env[key] === undefined) process.env[key] = value;
+    }
+  }
   // A staged native update is swapped in and re-exec'd here, before any other
   // initialization, so the user session immediately runs the new binary (and
   // the old process never replaces itself while running). Every failure path
@@ -156,7 +170,7 @@ export function main(): void {
     argv: process.argv,
     env: process.env,
     currentVersion: getVersion(),
-    isNative: detectNativeInstall(),
+    isNative,
   })
     .catch(() => false)
     .then((relaunched) => {

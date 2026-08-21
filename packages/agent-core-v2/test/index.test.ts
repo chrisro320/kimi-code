@@ -35,6 +35,7 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 import type { Event2Class } from '#/app/event/event2';
 import { AGENT_WIRE_RECORD_KEY } from '#/wire/record';
 import { getAgentToolContributions } from '#/agent/toolRegistry/toolContribution';
+import { getAgentProfileContributions } from '#/app/agentProfileCatalog/contribution';
 import { registerTestAgentWire, registerTestEventDispatcher, restoreTestEventDispatcher } from './wire/stubs';
 import { BUILTIN_REPLAYABLE_STATE_KEYS } from './state/builtinReplayableKeys';
 
@@ -104,7 +105,13 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'token_counting.turn_recorded',
 ]);
 
-describe('package root builtin tools', () => {
+describe('package root builtin profiles and tools', () => {
+  it('does not register the removed plan subagent', () => {
+    const profileNames = getAgentProfileContributions().map((profile) => profile.name);
+
+    expect(profileNames).not.toContain('plan');
+  });
+
   it('does not preload native read, search, discovery, or shell tools', () => {
     const toolNames = getAgentToolContributions().map((contribution) => contribution.options.name);
 

@@ -4,6 +4,7 @@ import { AgentFileParseError, parseAgentFileText } from '#/workspace/workspaceAg
 import { agentProfileFromFile } from '#/workspace/workspaceAgentProfileLoader/internal/agentProfileFromFile';
 import type { AgentFileDefinition } from '#/workspace/workspaceAgentProfileLoader/internal/types';
 import type { SystemPromptRenderResult } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { renderSystemPromptResult } from '#/app/agentProfileCatalog/profile-shared';
 
 const FULL_FILE = `---
 name: code-reviewer
@@ -18,7 +19,7 @@ disallowedTools:
   - Bash
 subagents:
   - explore
-  - plan
+  - debugger
 unknownField: tolerated
 ---
 
@@ -39,7 +40,7 @@ describe('parseAgentFileText', () => {
     expect(def.override).toBe(true);
     expect(def.tools).toEqual(['Read', 'Grep', 'mcp__github__*']);
     expect(def.disallowedTools).toEqual(['Bash']);
-    expect(def.subagents).toEqual(['explore', 'plan']);
+    expect(def.subagents).toEqual(['explore', 'debugger']);
     expect(def.prompt).toBe('你是严格的代码审查者。');
     expect(def.source).toBe('project');
   });
@@ -137,9 +138,9 @@ describe('parseAgentFileText', () => {
   });
 
   it('accepts a comma-separated subagents string', () => {
-    const def = parse('---\nname: solo\ndescription: d\nsubagents: explore, plan\n---\n\nbody\n');
+    const def = parse('---\nname: solo\ndescription: d\nsubagents: explore, debugger\n---\n\nbody\n');
 
-    expect(def.subagents).toEqual(['explore', 'plan']);
+    expect(def.subagents).toEqual(['explore', 'debugger']);
   });
 
   it('treats a lone "*" subagents field as all subagent types', () => {
@@ -244,6 +245,19 @@ describe('agentProfileFromFile', () => {
     expect(profile.systemPrompt({})).toBe('extra instructions\n\nBASE_PROMPT');
   });
 
+  it('does not inherit the main-only dispatch policy through ${base_prompt}', () => {
+    const profile = agentProfileFromFile(
+      { ...base, prompt: '${base_prompt}' },
+      (context) =>
+        renderSystemPromptResult('', context, {
+          skillActive: true,
+          dispatchPolicy: true,
+        }),
+    );
+
+    expect(profile.systemPrompt({})).not.toContain('# Dispatch Policy');
+  });
+
   it('forwards the base prompt environment disclosure through renderSystemPrompt', () => {
     const profile = agentProfileFromFile(
       { ...base, prompt: 'extra instructions\n\n${base_prompt}' },
@@ -284,14 +298,78 @@ describe('agentProfileFromFile', () => {
     expect(prompt).toContain('after');
   });
 
-  it('passes tools and disallowedTools through', () => {
+  it('replaces native tools in a trellis-style editing profile', () => {
     const profile = agentProfileFromFile(
-      { ...base, tools: ['Read'], disallowedTools: ['Bash'] },
+      {
+        ...base,
+        name: 'trellis-check',
+        tools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'Skill', 'mcp__*'],
+      },
       basePrompt,
     );
 
-    expect(profile.tools).toEqual(['Read']);
-    expect(profile.disallowedTools).toEqual(['Bash']);
+    expect(profile.tools).toEqual([
+      'mcp__lean-ctx__ctx_read',
+      'Write',
+      'Edit',
+      'mcp__lean-ctx__ctx_shell',
+      'mcp__lean-ctx__ctx_glob',
+      'mcp__lean-ctx__ctx_tree',
+      'mcp__lean-ctx__ctx_search',
+      'Skill',
+      'mcp__*',
+    ]);
+  });
+
+  it('replaces and deduplicates native tools in a cavecrew-style read-only profile', () => {
+    const profile = agentProfileFromFile(
+      {
+        ...base,
+        name: 'cavecrew-investigator',
+        tools: [
+          'Read',
+          'mcp__lean-ctx__ctx_read',
+          'Grep',
+          'Glob',
+          'mcp__lean-ctx__ctx_tree',
+          'Bash',
+        ],
+      },
+      basePrompt,
+    );
+
+    expect(profile.tools).toEqual([
+      'mcp__lean-ctx__ctx_read',
+      'mcp__lean-ctx__ctx_search',
+      'mcp__lean-ctx__ctx_glob',
+      'mcp__lean-ctx__ctx_tree',
+      'mcp__lean-ctx__ctx_shell',
+    ]);
+  });
+
+  it('replaces native disallowedTools with lean-ctx equivalents', () => {
+    const profile = agentProfileFromFile(
+      { ...base, disallowedTools: ['Read', 'Glob', 'Bash', 'Skill'] },
+      basePrompt,
+    );
+
+    expect(profile.disallowedTools).toEqual([
+      'mcp__lean-ctx__ctx_read',
+      'mcp__lean-ctx__ctx_glob',
+      'mcp__lean-ctx__ctx_tree',
+      'mcp__lean-ctx__ctx_shell',
+      'Skill',
+    ]);
+  });
+
+  it('passes non-native tools through', () => {
+    const profile = agentProfileFromFile(
+      { ...base, tools: ['Write', 'Edit', 'Skill', 'mcp__*'], disallowedTools: ['Skill'] },
+      basePrompt,
+    );
+
+    expect(profile.tools).toEqual(['Write', 'Edit', 'Skill', 'mcp__*']);
+    expect(profile.disallowedTools).toEqual(['Skill']);
   });
 
   it('passes subagents through', () => {

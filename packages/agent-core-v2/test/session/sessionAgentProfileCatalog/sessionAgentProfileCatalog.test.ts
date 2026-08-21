@@ -204,7 +204,7 @@ describe('SessionAgentProfileCatalogService (registry projection)', () => {
   it('inherits the replaced builtin subagent allowlist when the override declares none', () => {
     const { container, catalog, contribute } = makeCatalog();
     const builtinProfile = profile(DEFAULT_AGENT_PROFILE_NAME, {
-      subagents: ['coder', 'explore', 'plan'],
+      subagents: ['coder', 'explore'],
     });
     const overrideProfile = profile(DEFAULT_AGENT_PROFILE_NAME, { override: true });
     contribute(BUILTIN_AGENT_PROFILE_SOURCE_ID, [builtinProfile]);
@@ -213,7 +213,7 @@ describe('SessionAgentProfileCatalogService (registry projection)', () => {
       workspaceKey: 'wd_a',
     });
 
-    expect(catalog.get(DEFAULT_AGENT_PROFILE_NAME)?.subagents).toEqual(['coder', 'explore', 'plan']);
+    expect(catalog.get(DEFAULT_AGENT_PROFILE_NAME)?.subagents).toEqual(['coder', 'explore']);
     catalog.dispose();
     container.dispose();
   });
@@ -221,7 +221,7 @@ describe('SessionAgentProfileCatalogService (registry projection)', () => {
   it('honors an override allowlist explicitly declared on the default profile', () => {
     const { container, catalog, contribute } = makeCatalog();
     const builtinProfile = profile(DEFAULT_AGENT_PROFILE_NAME, {
-      subagents: ['coder', 'explore', 'plan'],
+      subagents: ['coder', 'explore'],
     });
     const overrideProfile = profile(DEFAULT_AGENT_PROFILE_NAME, {
       override: true,

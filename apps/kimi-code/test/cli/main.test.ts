@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
     parse,
     createProgram: vi.fn(() => ({ parse })),
     getVersion: vi.fn(() => '0.0.1-alpha.2'),
+    detectNativeInstall: vi.fn(() => false),
     validateOptions: vi.fn(),
     runUpdatePreflight: vi.fn(),
     runShell: vi.fn(),
@@ -125,6 +126,10 @@ vi.mock('../../src/cli/update/preflight', () => ({
   runUpdatePreflight: mocks.runUpdatePreflight,
 }));
 
+vi.mock('../../src/cli/update/source', () => ({
+  detectNativeInstall: mocks.detectNativeInstall,
+}));
+
 vi.mock('../../src/cli/update/native-swap', () => ({
   maybeRelaunchWithStagedNativeUpdate: mocks.maybeRelaunch,
 }));
@@ -144,6 +149,17 @@ vi.mock('../../src/cli/run-prompt', () => ({
 vi.mock('../../src/cli/headless-exit', () => ({
   finalizeHeadlessRun: mocks.finalizeHeadlessRun,
 }));
+
+const NATIVE_INSTALL_ENV_KEYS = [
+  'KIMI_CODE_NO_AUTO_UPDATE',
+  'KIMI_CODE_EXPERIMENTAL_TOOL_SELECT',
+  'KIMI_CODE_EXPERIMENTAL_COMPACT_SKILL_LISTING',
+  'KIMI_CODE_EXPERIMENTAL_SUBAGENT_WORKTREE_ISOLATION',
+  'KIMI_CODE_TUI_FULL_SCREEN',
+] as const;
+const ORIGINAL_NATIVE_INSTALL_ENV = Object.fromEntries(
+  NATIVE_INSTALL_ENV_KEYS.map((key) => [key, process.env[key]]),
+);
 
 class ExitCalled extends Error {
   constructor(readonly code: number) {
@@ -226,10 +242,17 @@ async function runHandleUpgradeCommand(): Promise<number> {
 describe('main entry command handling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    for (const key of NATIVE_INSTALL_ENV_KEYS) {
+      const value = ORIGINAL_NATIVE_INSTALL_ENV[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.detectNativeInstall.mockReturnValue(false);
+    for (const key of NATIVE_INSTALL_ENV_KEYS) delete process.env[key];
     mocks.harness.ensureConfigFile.mockResolvedValue(undefined);
     mocks.harness.getConfig.mockResolvedValue({
       defaultModel: 'kimi-k2',
@@ -406,6 +429,48 @@ describe('main entry command handling', () => {
         }),
       );
     });
+  });
+
+  it('applies wrapper defaults before native staged-update startup', async () => {
+    mocks.detectNativeInstall.mockReturnValueOnce(true);
+
+    main();
+
+    await waitForAssertion(() => {
+      expect(mocks.maybeRelaunch).toHaveBeenCalledWith(
+        expect.objectContaining({ isNative: true }),
+      );
+    });
+    expect(Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, process.env[key]]))).toEqual(
+      Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, '1'])),
+    );
+  });
+
+  it('preserves explicit wrapper environment values for native startup', async () => {
+    mocks.detectNativeInstall.mockReturnValueOnce(true);
+    for (const key of NATIVE_INSTALL_ENV_KEYS) process.env[key] = '0';
+
+    main();
+
+    await waitForAssertion(() => {
+      expect(mocks.maybeRelaunch).toHaveBeenCalled();
+    });
+    expect(Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, process.env[key]]))).toEqual(
+      Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, '0'])),
+    );
+  });
+
+  it('does not apply wrapper defaults outside native startup', async () => {
+    main();
+
+    await waitForAssertion(() => {
+      expect(mocks.maybeRelaunch).toHaveBeenCalledWith(
+        expect.objectContaining({ isNative: false }),
+      );
+    });
+    expect(Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, process.env[key]]))).toEqual(
+      Object.fromEntries(NATIVE_INSTALL_ENV_KEYS.map((key) => [key, undefined])),
+    );
   });
 
   it('sets the process title to the command name during startup', () => {

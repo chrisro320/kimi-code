@@ -90,13 +90,17 @@ describe('scopesOverlap (v1 parity)', () => {
 });
 
 describe('isEditingCapableProfile (v1 parity)', () => {
-  it('is editing-capable with Write or Edit', () => {
+  it('is editing-capable with native edit tools or MCP grants matching ctx_patch', () => {
     expect(isEditingCapableProfile({ tools: ['Read', 'Write'] })).toBe(true);
     expect(isEditingCapableProfile({ tools: ['Edit'] })).toBe(true);
+    expect(isEditingCapableProfile({ tools: ['mcp__lean-ctx__ctx_patch'] })).toBe(true);
+    expect(isEditingCapableProfile({ tools: ['mcp__lean-ctx__*'] })).toBe(true);
+    expect(isEditingCapableProfile({ tools: ['mcp__*'] })).toBe(true);
   });
 
-  it('is read-only without Write or Edit', () => {
+  it('is read-only without a native or MCP editing grant', () => {
     expect(isEditingCapableProfile({ tools: ['Read', 'Grep', 'Bash'] })).toBe(false);
+    expect(isEditingCapableProfile({ tools: ['mcp__github__*'] })).toBe(false);
     expect(isEditingCapableProfile({ tools: [] })).toBe(false);
   });
 });

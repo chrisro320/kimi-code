@@ -75,6 +75,37 @@ describe('systemPromptVars', () => {
     expect(environment.date.disclosed).toBe(true);
   });
 
+  it('renders the orchestration dispatch matrix without legacy tool parameters', () => {
+    const { text } = renderSystemPromptResult(
+      '',
+      { cwd: '/repo', now: '2026-08-15T00:00:00.000Z' },
+      { skillActive: true, dispatchPolicy: true },
+    );
+    const dispatchPolicy = text
+      .split('# Dispatch Policy\n\n')[1]
+      ?.split('\n# General Guidelines for Coding')[0];
+
+    expect(dispatchPolicy).toBeDefined();
+    for (const expected of [
+      'act as the orchestrator: plan, partition, dispatch, integrate, and validate',
+      'Direct execution — trivial work or tightly coupled changes',
+      '`explore` — read-only repository mapping',
+      '`debugger` — read-only failure reproduction',
+      '`coder` — a bounded implementation scope',
+      '`AgentSwarm` with `subagent_type: "coder"`',
+      '`frontend-artist` plus `coder`',
+      'Serialize overlapping work',
+      '`reviewer` — independent read-only review after implementation',
+      'When resuming an Agent, pass `resume` without `subagent_type`',
+      'Every editing `Agent` call requires `dispatch.scope`',
+    ]) {
+      expect(dispatchPolicy).toContain(expected);
+    }
+    expect(dispatchPolicy).not.toContain('rationale');
+    expect(dispatchPolicy).not.toContain('quality_deficiencies');
+    expect(dispatchPolicy).not.toContain('review_reason');
+  });
+
   it('collapses the system prompt to the single minimal-mode sentence', () => {
     const { text, environment } = renderSystemPromptResult(
       '',

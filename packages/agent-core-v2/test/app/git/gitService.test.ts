@@ -35,6 +35,8 @@ describe('GitService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
   let service: IGitService;
+  let workspaceRoots: Array<{ readonly id: string; readonly root: string }>;
+  let acquiredWorkspaceIds: string[];
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'git-service-'));
@@ -42,6 +44,8 @@ describe('GitService', () => {
     git(repo, 'config', 'user.email', 'test@example.com');
     git(repo, 'config', 'user.name', 'Test');
     git(repo, 'config', 'commit.gpgsign', 'false');
+    workspaceRoots = [{ id: 'workspace-1', root: repo }];
+    acquiredWorkspaceIds = [];
     disposables = new DisposableStore();
     const process = new HostProcessService();
     const runtime = { process } as unknown as Runtime;
@@ -52,10 +56,14 @@ describe('GitService', () => {
         reg.defineInstance(IRuntimeResolver, {
           _serviceBrand: undefined,
           inspect: () => runtime,
-          acquire: () => ({ runtime, track: (resource) => resource, dispose: () => {} }),
+          acquire: (binding) => {
+            acquiredWorkspaceIds.push(binding.workspaceId);
+            return { runtime, track: (resource) => resource, dispose: () => {} };
+          },
         });
         reg.definePartialInstance(IWorkspaceInstanceManager, {
-          findByRoot: () => ({ id: 'workspace-1' } as never),
+          findByRoot: (root) => workspaceRoots.find((workspace) => normalize(workspace.root) === normalize(root)) as never,
+          list: () => workspaceRoots as never,
           onDidChange: Event.None as Event<WorkspaceInstanceChange>,
         });
         reg.define(IGitService, GitService);
@@ -73,6 +81,30 @@ describe('GitService', () => {
     git(repo, 'add', '-A');
     git(repo, 'commit', '-m', message);
   }
+
+  describe('workspace resolution', () => {
+    it('uses the containing workspace for an ordinary child directory', async () => {
+      const child = join(repo, 'ordinary-child');
+      mkdirSync(child, { recursive: true });
+
+      const result = await service.repoInfo(child);
+
+      expect(result?.repoRoot).toBe(normalize(repo));
+      expect(acquiredWorkspaceIds.length).toBeGreaterThan(0);
+      expect(acquiredWorkspaceIds.every((id) => id === 'workspace-1')).toBe(true);
+    });
+
+    it('uses the most-specific containing workspace', async () => {
+      const nestedRoot = join(repo, 'nested-workspace');
+      const child = join(nestedRoot, 'child');
+      mkdirSync(child, { recursive: true });
+      workspaceRoots.push({ id: 'workspace-2', root: nestedRoot });
+
+      await service.repoInfo(child);
+
+      expect(acquiredWorkspaceIds[0]).toBe('workspace-2');
+    });
+  });
 
   describe('status', () => {
     it('reports a clean tree', async () => {
@@ -111,6 +143,7 @@ describe('GitService', () => {
 
     it('throws FS_GIT_UNAVAILABLE when not a repo', async () => {
       const notRepo = mkdtempSync(join(tmpdir(), 'not-repo-'));
+      workspaceRoots.push({ id: 'workspace-2', root: notRepo });
       try {
         await expect(service.status(notRepo)).rejects.toMatchObject({
           code: ErrorCodes.FS_GIT_UNAVAILABLE,

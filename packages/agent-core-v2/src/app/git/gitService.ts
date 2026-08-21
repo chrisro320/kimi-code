@@ -23,7 +23,7 @@ import { ErrorCodes, Error2 } from '#/errors';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IRuntimeResolver, IWorkspaceInstanceManager } from '#/workspace/workspaceInstance/workspaceInstanceManager';
 import { IHostProcessService } from '#/os/interface/hostProcess';
-import { isAbsolute, join, resolve } from 'pathe';
+import { isAbsolute, join, relative, resolve } from 'pathe';
 
 import { IGitService } from './git';
 import { parseNumstat, parsePorcelain, parsePullRequest } from './gitParsers';
@@ -335,11 +335,25 @@ export class GitService implements IGitService {
   }
 
   private resolveWorkspaceId(cwd: string): string {
-    const workspace = this.workspaces.findByRoot(cwd);
-    if (workspace === undefined) {
-      throw new Error(`workspace for root ${cwd} is not materialized`);
+    const exact = this.workspaces.findByRoot(cwd);
+    if (exact !== undefined) return exact.id;
+
+    const absoluteCwd = resolve(cwd);
+    let workspaceId: string | undefined;
+    let longestRoot = -1;
+    for (const workspace of this.workspaces.list()) {
+      const root = resolve(workspace.root);
+      const rel = relative(root, absoluteCwd);
+      const containsCwd = rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
+      if (containsCwd && root.length > longestRoot) {
+        workspaceId = workspace.id;
+        longestRoot = root.length;
+      }
     }
-    return workspace.id;
+    if (workspaceId === undefined) {
+      throw new Error(`workspace containing ${cwd} is not materialized`);
+    }
+    return workspaceId;
   }
 
   private gitUnavailable(cwd: string, detail: string): Error2 {

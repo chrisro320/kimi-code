@@ -20,7 +20,7 @@ describe('tower-worker profile', () => {
       expect(tools).toContain(name);
     }
     expect(tools).not.toContain('AgentSwarm');
-    expect(TOWER_WORKER_PROFILE_DEF.subagents).toEqual(['explore', 'plan']);
+    expect(TOWER_WORKER_PROFILE_DEF.subagents).toEqual(['explore']);
     for (const name of [
       'TowerSend',
       'TowerInbox',

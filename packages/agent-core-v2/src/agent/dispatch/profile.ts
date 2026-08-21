@@ -3,9 +3,17 @@
  * Ported from v1 `agent/dispatch/profile.ts`.
  */
 
-/** A profile can write when its tool set includes `Write` or `Edit`. */
+import { isToolActive } from '#/agent/toolPolicy/evaluate';
+
+const LEAN_CTX_PATCH_TOOL = 'mcp__lean-ctx__ctx_patch';
+
+/** A profile can write through native edit tools or an MCP grant matching lean-ctx patch. */
 export function isEditingCapableProfile(profile: { readonly tools: readonly string[] }): boolean {
-  return profile.tools.includes('Write') || profile.tools.includes('Edit');
+  return (
+    profile.tools.includes('Write') ||
+    profile.tools.includes('Edit') ||
+    isToolActive({ tools: profile.tools }, LEAN_CTX_PATCH_TOOL, 'mcp')
+  );
 }
 
 /**

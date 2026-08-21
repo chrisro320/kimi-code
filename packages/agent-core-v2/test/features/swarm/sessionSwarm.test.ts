@@ -1,4 +1,5 @@
 import { createControlledPromise } from '@antfu/utils';
+import { setImmediate as scheduleImmediate } from 'node:timers';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
@@ -95,6 +96,12 @@ vi.mock('#/session/subagent/worktree', async (importOriginal) => {
         : worktreeMock.acquire(cwd, options),
   };
 });
+
+async function waitForCondition(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) {
+    await new Promise<void>((resolve) => scheduleImmediate(resolve));
+  }
+}
 
 describe('resolveSwarmMaxConcurrency', () => {
   it('returns undefined when the variable is unset', () => {
@@ -1505,8 +1512,9 @@ describe('SessionSwarmService metadata compatibility', () => {
       const rateLimited = createControlledPromise<{ summary: string }>();
       const blocker = createControlledPromise<{ summary: string }>();
       let pooledRuns = 0;
-      runAgent.mockImplementation((agentId, request, options) => {
+      runAgent.mockImplementation((agent: unknown, request, options) => {
         options?.onReady?.();
+        const agentId = (agent as AgentContext).agentId;
         if (agentId === 'agent-pooled') {
           pooledRuns += 1;
           return {
@@ -1527,6 +1535,8 @@ describe('SessionSwarmService metadata compatibility', () => {
         tasks: [spawnSessionTask('src/a.ts'), spawnSessionTask('src/b.ts')],
       });
       await vi.advanceTimersByTimeAsync(0);
+      await waitForCondition(() => pooledRuns === 1);
+      expect(pooledRuns).toBe(1);
       rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
       await vi.advanceTimersByTimeAsync(0);
       // The slot stays held while the rate-limited agent is requeued for retry.
@@ -1758,11 +1768,18 @@ describe('SessionSwarmService metadata compatibility', () => {
     }
   });
 
-  // R-C1 risk gate wiring: an editing-capable batch at/above the concurrency
-  // threshold is silently serialized (maxConcurrency forced to 1); below the
-  // threshold or read-only, the batch schedule is untouched. v2 tasks carry
-  // no dispatch scope yet, so only the threshold signal is live.
   describe('risk gate (R-C1)', () => {
+    beforeEach(() => {
+      worktreeMock.acquire = () => ({
+        cwd: '/tmp/kimi-risk-gate-worktree',
+        finish: async () => ({ applied: true }),
+      });
+    });
+
+    afterEach(() => {
+      worktreeMock.acquire = undefined;
+    });
+
     function stubEditingCapableCatalog(): void {
       ix.stub(ISessionAgentProfileCatalog, {
         _serviceBrand: undefined,
@@ -1787,21 +1804,25 @@ describe('SessionSwarmService metadata compatibility', () => {
       const completions: Array<ReturnType<typeof createControlledPromise<{ summary: string }>>> =
         [];
       runAgent.mockImplementation(
-        (agentId: string, _request: unknown, options?: { onReady?: () => void }) => {
+        (agent: AgentContext, _request: unknown, options?: { onReady?: () => void }) => {
           options?.onReady?.();
           const completion = createControlledPromise<{ summary: string }>();
           completions.push(completion);
-          return { agentId, turn: {} as never, completion };
+          return { agentId: agent.agentId, turn: {} as never, completion };
         },
       );
       return { completions };
     }
 
     function spawnTasks(count: number): SessionSwarmSpawnTask[] {
-      return Array.from({ length: count }, (_, index) => ({
-        ...spawnSessionTask(`src/f${String(index)}.ts`),
-        swarmIndex: index + 1,
-      }));
+      return Array.from({ length: count }, (_, index) => {
+        const path = `src/f${String(index)}.ts`;
+        return {
+          ...spawnSessionTask(path),
+          swarmIndex: index + 1,
+          dispatchScope: [path],
+        };
+      });
     }
 
     it('serializes an editing-capable batch at the concurrency threshold', async () => {
@@ -1813,18 +1834,22 @@ describe('SessionSwarmService metadata compatibility', () => {
 
         const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(4) });
         await vi.advanceTimersByTimeAsync(0);
+        await waitForCondition(() => runAgent.mock.calls.length >= 1);
         expect(runAgent).toHaveBeenCalledTimes(1);
 
         completions[0]!.resolve({ summary: 'one' });
         await vi.advanceTimersByTimeAsync(0);
+        await waitForCondition(() => runAgent.mock.calls.length >= 2);
         expect(runAgent).toHaveBeenCalledTimes(2);
 
         completions[1]!.resolve({ summary: 'two' });
         await vi.advanceTimersByTimeAsync(0);
+        await waitForCondition(() => runAgent.mock.calls.length >= 3);
         expect(runAgent).toHaveBeenCalledTimes(3);
 
         completions[2]!.resolve({ summary: 'three' });
         await vi.advanceTimersByTimeAsync(0);
+        await waitForCondition(() => runAgent.mock.calls.length >= 4);
         expect(runAgent).toHaveBeenCalledTimes(4);
 
         completions[3]!.resolve({ summary: 'four' });
@@ -1848,6 +1873,7 @@ describe('SessionSwarmService metadata compatibility', () => {
 
         const running = service.run({ callerAgentId: 'main', tasks: spawnTasks(3) });
         await vi.advanceTimersByTimeAsync(0);
+        await waitForCondition(() => runAgent.mock.calls.length >= 3);
         expect(runAgent).toHaveBeenCalledTimes(3);
 
         for (const completion of completions) completion.resolve({ summary: 'done' });

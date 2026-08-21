@@ -58,9 +58,11 @@ describe('subagent worktree isolation (real git integration)', () => {
   let repo: string;
   let disposables: DisposableStore;
   let services: SubagentWorktreeServices;
+  let workspaceRoots: Array<{ readonly id: string; readonly root: string }>;
 
   beforeEach(() => {
     repo = makeRepo();
+    workspaceRoots = [{ id: 'workspace-1', root: repo }];
     disposables = new DisposableStore();
     const ix = createServices(disposables, {
       additionalServices: (reg) => {
@@ -74,7 +76,8 @@ describe('subagent worktree isolation (real git integration)', () => {
           acquire: () => ({ runtime, track: (resource) => resource, dispose: () => {} }),
         });
         reg.definePartialInstance(IWorkspaceInstanceManager, {
-          findByRoot: () => ({ id: 'workspace-1' } as never),
+          findByRoot: (root) => workspaceRoots.find((workspace) => workspace.root === root) as never,
+          list: () => workspaceRoots as never,
           onDidChange: Event.None as Event<WorkspaceInstanceChange>,
         });
         reg.define(IGitService, GitService);
@@ -102,8 +105,18 @@ describe('subagent worktree isolation (real git integration)', () => {
     return acquisition;
   }
 
+  it('scans ordinary child entries through the containing materialized workspace', async () => {
+    mkdirSync(join(repo, 'ordinary-child'));
+
+    const handle = await acquire();
+
+    expect(handle.cwd).not.toBe(repo);
+    await handle.finish({ kind: 'discard' });
+  });
+
   it('reports isolation as unsupported when the directory is not a git repository', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'worktree-no-git-'));
+    workspaceRoots.push({ id: 'workspace-2', root: dir });
     try {
       const acquisition = await acquireSubagentWorktree(services, dir);
       expect(isSubagentWorktreeUnsupported(acquisition)).toBe(true);
@@ -117,6 +130,7 @@ describe('subagent worktree isolation (real git integration)', () => {
 
   it('reports isolation as unsupported for a repository with no commits yet', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'worktree-unborn-'));
+    workspaceRoots.push({ id: 'workspace-2', root: dir });
     try {
       git(dir, ['init', '-q']);
       const acquisition = await acquireSubagentWorktree(services, dir);

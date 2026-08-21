@@ -84,6 +84,29 @@ describe('builtin agent profiles', () => {
     }
   });
 
+  it('keeps read-only profiles free of editing grants', () => {
+    for (const name of ['explore', 'debugger', 'reviewer']) {
+      const tools = profileByName(name).tools ?? [];
+      for (const forbidden of ['Write', 'Edit', 'mcp__lean-ctx__ctx_patch', 'mcp__*']) {
+        expect(tools, `${name} must not expose ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('keeps every task-agent profile terminal', () => {
+    expect(profileByName('agent').systemPrompt(promptContext)).toContain('# Dispatch Policy');
+    for (const name of SUBAGENT_PROFILES) {
+      const profile = profileByName(name);
+      expect(profile.subagents).toBeUndefined();
+      expect(profile.tools).not.toContain('Agent');
+      expect(profile.tools).not.toContain('AgentSwarm');
+      expect(profile.systemPrompt(promptContext)).not.toContain('# Dispatch Policy');
+    }
+    expect(profileByName('frontend-artist').systemPrompt(promptContext)).not.toContain(
+      'use nested agents',
+    );
+  });
+
   it('renders the Skills section only for profiles that keep the Skill tool', () => {
     for (const name of ['agent', 'coder', 'coder-ex', 'frontend-artist']) {
       const profile = profileByName(name);
@@ -115,6 +138,13 @@ describe('builtin agent profiles', () => {
       expect(profile.whenToUse?.length ?? 0).toBeGreaterThan(0);
       expect(profile.summaryPolicy?.minChars).toBe(200);
     }
+
+    const coderDescription = profileByName('coder').description ?? '';
+    expect(coderDescription).not.toContain('the only subagent type with file-editing tools');
+    expect(coderDescription).toContain('Built-in editing profiles');
+    for (const name of ['coder', 'coder-ex', 'frontend-artist']) {
+      expect(coderDescription).toContain(name);
+    }
   });
   it('wires TowerInit into the default profile', () => {
     const agent = profileByName('agent');
@@ -123,6 +153,13 @@ describe('builtin agent profiles', () => {
 
   it('caps the default profile delegation at non-spawning profiles', () => {
     const agent = profileByName('agent');
-    expect(agent.subagents).toEqual(['coder', 'explore', 'plan']);
+    expect(agent.subagents).toEqual([
+      'coder',
+      'coder-ex',
+      'explore',
+      'debugger',
+      'reviewer',
+      'frontend-artist',
+    ]);
   });
 });

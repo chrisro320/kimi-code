@@ -254,6 +254,32 @@ describe('SubagentTool worktree isolation wiring', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'mcp__lean-ctx__ctx_patch',
+    'mcp__lean-ctx__*',
+    'mcp__*',
+  ])('isolates a profile with MCP editing grant %s', async (toolPattern) => {
+    const create = vi.fn(async () => {
+      throw new Error('lifecycle.create must not be reached');
+    });
+    const tool = makeTool({
+      routing: { resolveSpawnRoute: async () => undefined },
+      git: { repoInfo: async () => null },
+      create,
+      isolation: 'strict',
+      profile: editingProfile([toolPattern]),
+    });
+
+    const execution = (await tool.resolveExecution(args())) as RunnableToolExecution;
+    const result = await execution.execute({
+      toolCallId: 'call-1',
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(String(result.output)).toContain('Editing subagent isolation is unavailable');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('discards the worktree when the spawn fails after acquiring it', async () => {
     // Nothing else ever will: the completion handler that finishes a worktree
     // is only attached once the child's run has started.

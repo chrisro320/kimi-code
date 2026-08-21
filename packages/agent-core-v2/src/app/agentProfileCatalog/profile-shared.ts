@@ -17,11 +17,7 @@
  * work the same way: the context may carry overrides seeded by the embedding
  * host (e.g. a desktop app), and the table falls back to the CLI defaults
  * ({@link DEFAULT_PRODUCT_NAME}, {@link DEFAULT_REPLY_STYLE_GUIDE}) when it
- * does not. `renderPromptTemplateResult` renders a user-owned template (an
- * agent-file body or `SYSTEM.md`) against the table; `${base_prompt}` is
- * bound to the default profile's prompt when a `basePrompt` is given,
- * resolved lazily and only when the template actually references it. Also
- * shared: `skillActiveFor` (whether the Skill tool survives a profile's tool
+ * Also shared: `skillActiveFor` (whether the Skill tool survives a profile's tool
  * list — drives skills injection) and the `subagents`-allowlist helpers
  * (`subagentAllowlistFor`, `subagentTypeNotAllowedMessage`). Structured
  * renderers also carry disclosure metadata so runtime reminders never need to
@@ -48,6 +44,7 @@ import {
 } from './agentProfileCatalog';
 import { BUILTIN_AGENT_PROFILE_SOURCE_ID } from './builtinAgentProfileLoader';
 
+import DISPATCH_POLICY_SECTION from './dispatch-policy.md?raw';
 import SYSTEM_PROMPT_TEMPLATE from './system.md?raw';
 
 export const TASK_AGENT_ROLE_PREFIX =
@@ -184,7 +181,7 @@ function minimalModeResult(leanMode: boolean): SystemPromptRenderResult {
 
 export function systemPromptVars(
   context: AgentProfileContext,
-  options: { readonly skillActive: boolean },
+  options: { readonly skillActive: boolean; readonly dispatchPolicy?: boolean },
 ): Record<string, string> {
   const shellName = context.shellName ?? '';
   const shellPath = context.shellPath ?? '';
@@ -194,6 +191,7 @@ export function systemPromptVars(
   const additionalDirsInfo = context.additionalDirsInfo ?? '';
   return {
     role_additional: '',
+    dispatch_policy_section: options.dispatchPolicy === true ? DISPATCH_POLICY_SECTION : '',
     product_name: context.productName ?? DEFAULT_PRODUCT_NAME,
     reply_style_guide: context.replyStyleGuide ?? DEFAULT_REPLY_STYLE_GUIDE,
     os: context.osKind ?? '',
@@ -229,7 +227,7 @@ export function renderPromptTemplateResult(
   let baseResult: SystemPromptRenderResult | undefined;
   if (basePrompt !== undefined && template.includes('${base_prompt}')) {
     baseResult = basePrompt(context);
-    vars['base_prompt'] = baseResult.text;
+    vars['base_prompt'] = baseResult.text.replace(DISPATCH_POLICY_SECTION, '');
   }
   return {
     text: renderPrompt(template, vars),
@@ -243,7 +241,7 @@ export function renderPromptTemplateResult(
 export function renderSystemPromptResult(
   roleAdditional: string,
   context: AgentProfileContext,
-  options: { readonly skillActive: boolean },
+  options: { readonly skillActive: boolean; readonly dispatchPolicy?: boolean },
 ): SystemPromptRenderResult {
   if (context.minimalMode === true) return minimalModeResult(context.leanMode === true);
   return {

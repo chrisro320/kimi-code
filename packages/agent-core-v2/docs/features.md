@@ -79,8 +79,8 @@ they belong to a feature:
   feature unit is retracted.
 
 The Feature unit carries the **runtime capabilities**: services, tools, commands, hook
-subscriptions. `PlanFeature` is the example: `configSection.ts` and `profile/plan.ts`
-keep their static registrations; the service and the two tools go through the Feature.
+subscriptions. `PlanFeature` is the example: `configSection.ts` keeps its static
+registration; the service and the two plan-mode tools go through the Feature.
 
 ## Events and hooks inside a feature
 
