@@ -752,6 +752,19 @@ export class BackgroundManager {
   }
 
   /**
+   * Await every queued `output.log` append and persisted task-record write.
+   * Tasks that reached a terminal state are already drained by `finalizeTask`;
+   * this covers writes still queued on live (kept-alive) tasks when the owning
+   * session closes.
+   */
+  async drainWrites(): Promise<void> {
+    const entries = Array.from(this.tasks.values());
+    await Promise.all(
+      entries.flatMap((entry) => [entry.outputWriteQueue, entry.persistWriteQueue]),
+    );
+  }
+
+  /**
    * Wait for a task to stop executing.
    * Returns immediately if terminal or awaiting input. Times out after `timeoutMs`.
    */
@@ -1286,6 +1299,7 @@ export class BackgroundManager {
     if (acknowledgePersisted !== undefined) {
       await acknowledgePersisted().catch(() => {});
     }
+    await entry.outputWriteQueue;
     this.fireCompletionEffects(entry);
     entry.foregroundRelease?.resolve('terminal');
     entry.terminal.resolve();

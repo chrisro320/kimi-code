@@ -187,8 +187,10 @@ function createService(agentId = 'main', store = createStore()) {
   } as unknown as ISessionTodoService);
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.set(IAcpService, new SyncDescriptor(AcpService));
+  const eventBus = ix.get(IEventBus);
+  eventBus.activateAgent(ix.get(IAgentScopeContext).agentContext);
   const service = ix.get(IAcpService);
-  return { disposables, requester, service, store, env, project, eventBus: ix.get(IEventBus) };
+  return { disposables, requester, service, store, env, project, eventBus };
 }
 
 describe('AcpService', () => {
@@ -964,6 +966,7 @@ describe('AcpService', () => {
       nudgeGrowthTokens: 0,
       growthFloor: 0,
       hasPendingNudge: 0,
+      overLimit: 0,
       emergencyOverride: 0,
       pendingT1: 0,
       pendingT2: 0,

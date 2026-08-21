@@ -26,6 +26,7 @@ import { stubFlag } from '../../app/flag/stubs';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
+import { agentContextOf } from '#/agent/scopeContext/scopeContext';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IBuiltinAgentProfileLoader } from '#/app/agentProfileCatalog/builtinAgentProfileLoader';
 import { IModelCatalog } from '#/kosong/model/catalog';
@@ -49,13 +50,12 @@ import '#/state/eventDispatcherService';
 import { IAgentTaskService } from '#/agent/task/task';
 import { ISessionCronService } from '#/session/cron/sessionCronService';
 import { SessionCronServiceImpl } from '#/session/cron/sessionCronServiceImpl';
-import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
 import { CRON_SECTION } from '#/app/cron/configSection';
 import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { SessionInteractionService } from '#/session/interaction/interactionService';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 import { SessionTodoService } from '#/session/todo/sessionTodoService';
-import { todoKey } from '#/session/todo/todoOps';
+import { TodoAgentModelDefinition } from '#/session/todo/todoAgentModel';
 import { interactionKey } from '#/session/interaction/interactionOps';
 import '#/agent/toolDedupe/toolDedupeService';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -94,6 +94,7 @@ import {
 } from '#/workspace/workspaceInstance/workspaceInstanceManager';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
+import { stubAgentContext } from '../../agent/agentContext/stubs';
 
 const noopLog = {
   _serviceBrand: undefined,
@@ -156,6 +157,7 @@ function recordingAppendLog(initial: readonly WireRecord[] = []): {
     flush: () => Promise.resolve(),
     close: () => Promise.resolve(),
     acquire: () => ({ dispose: () => {} }),
+    drainRetirements: () => Promise.resolve(),
   };
   return {
     appended,
@@ -458,17 +460,17 @@ describe('AgentLifecycleService', () => {
     const svc = ix.get(IAgentLifecycleService);
     const main = await svc.create({ agentId: 'main' });
     expect(main.id).toBe('main');
-    expect(svc.get('main')).toBe(main);
+    expect(svc.get(agentContextOf(main))).toBe(main);
     expect(svc.list()).toEqual([main]);
-    await svc.remove('main');
-    expect(svc.get('main')).toBeUndefined();
+    await svc.remove(agentContextOf(main));
+    expect(svc.findAgentHandle('main')).toBeUndefined();
   });
 
   it('remove stops the agent background tasks before disposal', async () => {
     const svc = ix.get(IAgentLifecycleService);
-    await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
 
-    await svc.remove('main');
+    await svc.remove(agentContextOf(main));
 
     expect(stopAllOnExit).toHaveBeenCalledWith('Session closed');
     expect(promptDrain).toHaveBeenCalledOnce();
@@ -487,11 +489,11 @@ describe('AgentLifecycleService', () => {
       });
     });
     const svc = ix.get(IAgentLifecycleService);
-    await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
     const disposed: string[] = [];
-    disposables.add(svc.onDidDispose((agentId) => disposed.push(agentId)));
+    disposables.add(svc.onDidDispose((agent) => disposed.push(agent.agentId)));
 
-    const removal = svc.remove('main');
+    const removal = svc.remove(agentContextOf(main));
     await drainStarted;
     await Promise.resolve();
 
@@ -506,9 +508,9 @@ describe('AgentLifecycleService', () => {
     loopActiveTurnId = 1;
     loopPendingTurnIds = [2, 3];
     const svc = ix.get(IAgentLifecycleService);
-    await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
 
-    await svc.remove('main');
+    await svc.remove(agentContextOf(main));
 
     expect(loopCancel.mock.calls.map(([turnId]) => turnId)).toEqual([2, 3, undefined]);
     expect(loopSettled).toHaveBeenCalledOnce();
@@ -539,10 +541,10 @@ describe('AgentLifecycleService', () => {
       },
     } as unknown as IAgentFullCompactionService);
     const svc = ix.get(IAgentLifecycleService);
-    await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
 
     let removed = false;
-    const removal = svc.remove('main').then(() => {
+    const removal = svc.remove(agentContextOf(main)).then(() => {
       removed = true;
     });
     await aborted;
@@ -726,13 +728,6 @@ describe('AgentLifecycleService', () => {
       },
       { type: 'interaction.request', id: 'i1', kind: 'question', request: { q: 1 }, time: 3 },
     ]).store);
-    ix.stub(ICronTaskPersistence, {
-      _serviceBrand: undefined,
-      get: async () => undefined,
-      list: async () => [],
-      save: async () => {},
-      delete: async () => {},
-    } as ICronTaskPersistence);
     ix.stub(IConfigService, {
       ready: Promise.resolve(),
       get: ((section: unknown) =>
@@ -750,9 +745,11 @@ describe('AgentLifecycleService', () => {
 
     const state = main.accessor.get(IAgentStateService);
     expect(state.replayableKeys().map((key) => key.name)).toEqual(
-      expect.arrayContaining(['todo', 'cron', 'interaction']),
+      expect.arrayContaining(['cron', 'interaction']),
     );
-    expect(state.get(todoKey)).toEqual([{ title: 'bridged', status: 'pending' }]);
+    expect(
+      agentContextOf(main).space.use(TodoAgentModelDefinition, (model) => model.items()),
+    ).toEqual([{ title: 'bridged', status: 'pending' }]);
     expect(state.get(interactionKey).get('i1')).toMatchObject({
       id: 'i1',
       kind: 'question',
@@ -775,8 +772,8 @@ describe('AgentLifecycleService', () => {
   it('broadcastPermissionMode skips agents that have been removed', async () => {
     const svc = ix.get(IAgentLifecycleService);
     const main = await svc.create({ agentId: 'main' });
-    await svc.create({ agentId: 'child' });
-    await svc.remove('child');
+    const child = await svc.create({ agentId: 'child' });
+    await svc.remove(agentContextOf(child));
 
     svc.broadcastPermissionMode('auto');
 
@@ -789,6 +786,7 @@ describe('AgentLifecycleService', () => {
     const worker = await svc.create({ agentId: 'worker-1' });
     void worker.accessor.get(IEventDispatcher).dispatch(
       new ProfileBind({
+        agentId: 'worker-1',
         profileName: TOWER_WORKER_PROFILE,
         thinkingEffort: 'off',
         systemPrompt: '',
@@ -866,7 +864,7 @@ describe('AgentLifecycleService', () => {
     const svc = ix.get(IAgentLifecycleService);
     const create = svc.create({ agentId: 'main' });
 
-    const early = svc.get('main');
+    const early = svc.findAgentHandle('main');
     expect(early).toBeDefined();
 
     const joined = svc.create({ agentId: 'main' });
@@ -900,7 +898,7 @@ describe('AgentLifecycleService', () => {
     const svc = ix.get(IAgentLifecycleService);
 
     await expect(svc.create({ agentId: 'main' })).rejects.toThrow('bootstrap boom');
-    expect(svc.get('main')).toBeUndefined();
+    expect(svc.findAgentHandle('main')).toBeUndefined();
 
     const main = await svc.create({ agentId: 'main' });
     expect(main.id).toBe('main');
@@ -908,7 +906,9 @@ describe('AgentLifecycleService', () => {
 
   it('fork throws when the source agent does not exist', async () => {
     const svc = ix.get(IAgentLifecycleService);
-    await expect(svc.fork('missing')).rejects.toThrow('Source agent "missing" does not exist');
+    await expect(svc.fork(stubAgentContext('missing'))).rejects.toThrow(
+      'Source agent "missing" does not exist',
+    );
   });
 
   it('fork copies the bound profile snapshot without catalog resolution', async () => {
@@ -923,7 +923,7 @@ describe('AgentLifecycleService', () => {
       subagents: ['explore'],
     });
 
-    const child = await svc.fork('main', { agentId: 'forked' });
+    const child = await svc.fork(agentContextOf(source), { agentId: 'forked' });
 
     expect(child.accessor.get(IAgentProfileService).data()).toMatchObject({
       profileName: 'deleted-profile',
@@ -941,7 +941,7 @@ describe('AgentLifecycleService', () => {
     const sourceRuntime = source.accessor.get(IAgentRuntimeBindingService);
     sourceRuntime.switch('remote');
 
-    const child = await svc.fork('main', { agentId: 'forked-runtime' });
+    const child = await svc.fork(agentContextOf(source), { agentId: 'forked-runtime' });
     const childRuntime = child.accessor.get(IAgentRuntimeBindingService);
     expect(childRuntime.current.runtimeId).toBe('remote');
 
@@ -955,7 +955,11 @@ describe('AgentLifecycleService', () => {
     ix.set(ISessionSubagentService, new SyncDescriptor(SessionSubagentService));
     const svc = ix.get(ISessionSubagentService);
     expect(() =>
-      svc.run('missing', { kind: 'prompt', prompt: 'hi' }, { signal: new AbortController().signal }),
+      svc.run(
+        stubAgentContext('missing'),
+        { kind: 'prompt', prompt: 'hi' },
+        { signal: new AbortController().signal },
+      ),
     ).toThrow('Agent "missing" does not exist');
   });
 
@@ -963,14 +967,28 @@ describe('AgentLifecycleService', () => {
     const svc = ix.get(IAgentLifecycleService);
     const created: string[] = [];
     const disposed: string[] = [];
-    disposables.add(svc.onDidCreate((h) => created.push(h.id)));
-    disposables.add(svc.onDidDispose((id) => disposed.push(id)));
+    disposables.add(svc.onDidCreate((agent) => created.push(agent.agentId)));
+    disposables.add(svc.onDidDispose((agent) => disposed.push(agent.agentId)));
 
     const a = await svc.create({});
     expect(created).toEqual([a.id]);
 
-    await svc.remove(a.id);
+    await svc.remove(agentContextOf(a));
     expect(disposed).toEqual([a.id]);
+  });
+
+  it('assigns a new lifecycle generation when recreating the same agent id', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    const first = await svc.create({ agentId: 'main' });
+    const firstContext = agentContextOf(first);
+
+    await svc.remove(firstContext);
+    const second = await svc.create({ agentId: 'main' });
+    const secondContext = agentContextOf(second);
+
+    expect(secondContext.agentId).toBe(firstContext.agentId);
+    expect(secondContext.generation).toBeGreaterThan(firstContext.generation);
+    expect(secondContext).not.toBe(firstContext);
   });
 
   it('de-dupes concurrent create calls for the same agent id', async () => {

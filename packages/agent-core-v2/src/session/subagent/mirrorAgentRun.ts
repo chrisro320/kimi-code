@@ -26,12 +26,14 @@
  */
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { userCancellationReason } from '#/_base/utils/abort';
-import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
+import { tryAgentContextOf } from '#/agent/scopeContext/scopeContext';
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import type { SubagentCreatedEvent } from '#/app/telemetry/events';
 import { IEventBus } from '#/app/event/eventBus';
 import { Event2 } from '#/app/event/event2';
 import { isAbortError } from '#/_base/utils/abort';
@@ -52,6 +54,7 @@ export interface SubagentSpawnedPayload {
   readonly runInBackground: boolean;
   readonly model?: string;
   readonly thinkingEffort?: string;
+  readonly taskId?: string;
 }
 
 export class SubagentSpawned extends Event2<SubagentSpawnedPayload> {
@@ -113,6 +116,7 @@ export interface AgentRunSpawnedMeta {
   readonly swarmIndex?: number;
   readonly runInBackground?: boolean;
   readonly model?: string;
+  readonly taskId?: string;
 }
 
 export interface MirrorAgentRunOptions {
@@ -121,6 +125,7 @@ export interface MirrorAgentRunOptions {
   readonly suppressRateLimitFailureEvent?: boolean;
   readonly signal: AbortSignal;
   readonly cancel?: (reason?: unknown) => void;
+  readonly deferStarted?: boolean;
 }
 
 export function emitAgentRunSpawned(
@@ -130,7 +135,7 @@ export function emitAgentRunSpawned(
 ): void {
   const childProfile = requester.accessor
     .get(IAgentLifecycleService)
-    ?.get(targetAgentId)
+    .findAgentHandle(targetAgentId)
     ?.accessor.get(IAgentProfileService);
   void requester.accessor.get(IEventDispatcher)?.dispatch(
     new SubagentSpawned({
@@ -145,16 +150,19 @@ export function emitAgentRunSpawned(
       runInBackground: meta.runInBackground ?? false,
       model: meta.model,
       thinkingEffort: childProfile?.getEffectiveThinkingLevel(),
+      taskId: meta.taskId,
     }),
   );
   childProfile?.republishStatus();
-  requester.accessor.get(ITelemetryService)?.track2('subagent_created', {
+  const telemetryEvent: SubagentCreatedEvent = {
     subagent_name: meta.profileName,
     run_in_background: meta.runInBackground ?? false,
     agent_id: targetAgentId,
     parent_agent_id: requester.id,
     parent_tool_call_id: meta.parentToolCallId ?? '',
-  });
+    model: meta.model,
+  };
+  requester.accessor.get(ITelemetryService)?.track2('subagent_created', telemetryEvent);
 }
 
 export async function mirrorAgentRun(
@@ -165,12 +173,14 @@ export async function mirrorAgentRun(
   const dispatcher = requester.accessor.get(IEventDispatcher);
   const subagents = requester.accessor.get(ISessionSubagentService);
   const agentLifecycle = requester.accessor.get(IAgentLifecycleService);
-  void dispatcher?.dispatch(new SubagentStarted({ subagentId: run.agentId }));
+  if (options.deferStarted !== true) {
+    void dispatcher?.dispatch(new SubagentStarted({ subagentId: run.agentId }));
+  }
   // Forward the child's live usage as `subagent.progress` on the requester's
   // stream (the TUI badge and statusline consume it); the subscription dies
   // with the run.
   const progressSubscription = agentLifecycle
-    ?.get(run.agentId)
+    ?.findAgentHandle(run.agentId)
     ?.accessor.get(IEventBus)
     ?.subscribe(AgentStatusUpdated, (event) => {
       const total = event.usage?.total;
@@ -241,6 +251,9 @@ function childContextTokens(
   agentLifecycle: IAgentLifecycleService,
   agentId: string,
 ): number | undefined {
-  const child = agentLifecycle.get(agentId);
-  return child?.accessor.get(IAgentTokenCountingService)?.statusSize();
+  const child = agentLifecycle.findAgentHandle(agentId);
+  if (child === undefined) return undefined;
+  const context = tryAgentContextOf(child);
+  if (context === undefined) return undefined;
+  return child.accessor.get(ISessionTokenCountingService)?.statusSize(context);
 }

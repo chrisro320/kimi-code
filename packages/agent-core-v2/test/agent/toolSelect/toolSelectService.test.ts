@@ -341,6 +341,10 @@ function registerSharedServices(
   eventBus: RecordingEventBus,
 ): void {
   registerStateServices(reg);
+  reg.defineInstance(
+    IAgentScopeContext,
+    makeAgentScopeContext({ agentId: 'main', agentScope: 'sessions/ws/session/agents/main' }),
+  );
   reg.defineInstance(IEventBus, eventBus);
   reg.defineInstance(IAgentLoopService, loop);
   reg.defineInstance(IAgentContextMemoryService, contextMemory);
@@ -472,7 +476,7 @@ async function announce(h: Harness, step = 1): Promise<string | undefined> {
 
 async function announceAfterCompaction(h: Harness): Promise<string | undefined> {
   h.eventBus.publish(
-    new ContextSpliced({
+    new ContextSpliced({ agentId: 'main',
       start: 0,
       deleteCount: 1,
       messages: [
@@ -893,7 +897,7 @@ describe('AgentToolSelectService.load', () => {
 
     h.sut.load([MCP_ALPHA]);
     h.eventBus.publish(
-      new CompactionCompleted({
+      new CompactionCompleted({ agentId: 'main',
         result: { summary: '', compactedCount: 0, tokensBefore: 0, tokensAfter: 0 },
       }),
     );
@@ -905,7 +909,7 @@ describe('AgentToolSelectService.load', () => {
     registerMcp(h, new StubMcpTool(MCP_ALPHA));
 
     h.sut.load([MCP_ALPHA]);
-    h.eventBus.publish(new ContextSpliced({ start: 0, deleteCount: 2, messages: [] }));
+    h.eventBus.publish(new ContextSpliced({ agentId: 'main', start: 0, deleteCount: 2, messages: [] }));
     expect(h.sut.load([MCP_ALPHA]).toLoad).toEqual([MCP_ALPHA]);
   });
 
@@ -915,7 +919,7 @@ describe('AgentToolSelectService.load', () => {
 
     h.sut.load([MCP_ALPHA]);
     h.eventBus.publish(
-      new ContextSpliced({
+      new ContextSpliced({ agentId: 'main',
         start: 0,
         deleteCount: 2,
         messages: [userMessage('Compacted summary.')],
@@ -940,7 +944,7 @@ describe('AgentToolSelectService.load', () => {
     expect(h.sut.load([MCP_BETA]).alreadyAvailable).toEqual([MCP_BETA]);
 
     h.contextMemory.history.splice(1, 1);
-    h.eventBus.publish(new ContextSpliced({ start: 1, deleteCount: 2, messages: [] }));
+    h.eventBus.publish(new ContextSpliced({ agentId: 'main', start: 1, deleteCount: 2, messages: [] }));
 
     expect(h.sut.load([MCP_ALPHA]).alreadyAvailable).toEqual([MCP_ALPHA]);
     expect(h.sut.load([MCP_BETA]).toLoad).toEqual([MCP_BETA]);
@@ -952,7 +956,7 @@ describe('AgentToolSelectService.load', () => {
 
     h.sut.load([MCP_ALPHA]);
     h.eventBus.publish(
-      new ContextSpliced({ start: 3, deleteCount: 0, messages: [userMessage('x')] }),
+      new ContextSpliced({ agentId: 'main', start: 3, deleteCount: 0, messages: [userMessage('x')] }),
     );
     expect(h.sut.load([MCP_ALPHA]).alreadyAvailable).toEqual([MCP_ALPHA]);
   });
@@ -1182,7 +1186,7 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
     registerMcp(h, new StubMcpTool(MCP_GAMMA));
     expect(await announce(h, 2)).toBeUndefined();
 
-    h.eventBus.publish(new TurnStarted({ turnId: 99, origin: { kind: 'user' } }));
+    h.eventBus.publish(new TurnStarted({ agentId: 'main', turnId: 99, origin: { kind: 'user' } }));
     const diff = await announce(h);
     expect(diff).toContain(`<tools_added>\n${MCP_GAMMA}\n</tools_added>`);
   });
@@ -1197,7 +1201,7 @@ describe('AgentToolSelectService loadable-tools announcements', () => {
 
     betaRegistration.dispose();
     registerMcp(h, new StubMcpTool(MCP_GAMMA));
-    h.eventBus.publish(new TurnStarted({ turnId: 99, origin: { kind: 'user' } }));
+    h.eventBus.publish(new TurnStarted({ agentId: 'main', turnId: 99, origin: { kind: 'user' } }));
 
     const diff = await announce(h);
     expect(diff).toContain(`<tools_added>\n${MCP_GAMMA}\n</tools_added>`);

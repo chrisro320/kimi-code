@@ -21,8 +21,8 @@ import {
   DefaultCompactionStrategy,
 } from '#/agent/fullCompaction/strategy';
 import { COMPACTION_SUMMARY_PREFIX } from '#/agent/contextMemory/compactionHandoff';
-import { makeHookRunner } from '../externalHooks/runner-stub';
-import type { IExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHooksRunner';
+import { makeHookRunner } from '../../features/externalHooks/runner-stub';
+import type { IExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunner';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import { estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
@@ -41,10 +41,11 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IWireService } from '#/wire/wire';
 import type { TokenUsage } from '#/kosong/contract/usage';
+import { ISessionUsageService } from '#/session/usage/sessionUsage';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import {
   IAgentFullCompactionService,
   IAgentLLMRequesterService,
-  IAgentUsageService,
   IModelOAuthTokens,
   IAgentProfileService,
   IAgentToolRegistryService,
@@ -56,8 +57,7 @@ import {
   type ToolExecution,
 } from '#/index';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
-import { IAgentGoalService } from '#/agent/goal/goal';
+import { IAgentGoalService } from '#/features/goal/goal';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
@@ -277,7 +277,7 @@ describe('FullCompaction', () => {
       const candidate = event as { type?: unknown; event?: unknown };
       return candidate.type === '[wire]' && candidate.event === 'full_compaction.complete';
     });
-    expect(completeEvent?.args).toEqual({ time: '<time>' });
+    expect(completeEvent?.args).toEqual({ agentId: 'main', time: '<time>' });
     expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
       system: <system-prompt>
       tools: Agent, AgentSwarm, EnterPlanMode, ExitPlanMode
@@ -311,9 +311,11 @@ describe('FullCompaction', () => {
 
         // Token counts run higher than upstream: this fork registers extra tools
         // (routing / circuit / dispatch) and four extra builtin profiles, so the
-        // full-request overhead the counter now includes is larger. Re-measure
+        // full-request overhead the counter now includes is larger. Re-measured
+    // for 0.38.0 (upstream added WaitFor and friends, shifting the tool set again).
+    // Re-measure
         // rather than reverting to upstream numbers.
-        tokens_before: 3_901,
+        tokens_before: 3_171,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -603,7 +605,7 @@ describe('FullCompaction', () => {
       cwd: dir,
       trigger: 'auto',
 
-      token_count: 3_901,
+      token_count: 3_171,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -690,7 +692,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -955,6 +957,37 @@ describe('FullCompaction', () => {
     ]);
   });
 
+  it('fails fast without shrinking when the provider filters the compaction response', async () => {
+    const inputs: string[][] = [];
+    const generate = realKosongGenerate((_attempt, history) => {
+      inputs.push(inputHistorySnapshot(history));
+      return mockStreamedMessage(
+        [{ type: 'think', think: 'Filtered while reasoning about the summary.' }],
+        null,
+        { finishReason: 'filtered', rawFinishReason: 'content_filter' },
+      );
+    });
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(inputs).toHaveLength(1);
+    expect(ctx.compactHistory()).toEqual([
+      { role: 'user', text: 'old user one' },
+      { role: 'assistant', text: 'old assistant one' },
+      { role: 'user', text: 'recent user two' },
+      { role: 'assistant', text: 'recent assistant two' },
+    ]);
+  });
+
   it('waits before retrying compaction generation after a retryable failure', async () => {
     vi.useFakeTimers();
     const firstAttemptFailed = deferred<void>();
@@ -1074,7 +1107,7 @@ describe('FullCompaction', () => {
         agent_id: 'main',
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1300,7 +1333,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_276,
+        tokens_before: 15_182,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1674,12 +1707,12 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'auto',
 
-        tokens_before: 3_908,
+        tokens_before: 3_178,
         // 3267 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
         // 21 estimated tokens for the kept user messages — the summary
         // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_892,
+        tokens_after: 3_162,
         compacted_count: 7,
         retry_count: 0,
       }),
@@ -2946,7 +2979,7 @@ describe('FullCompaction', () => {
     const ctx = testAgent(
       sessionServices((reg) => {
         reg.definePartialInstance(ISessionTodoService, {
-          getTodos: () => todos,
+          getTodos: async () => todos,
         });
       }),
     );
@@ -3097,6 +3130,7 @@ function textResult(text: string, traceId: string | null = null): Awaited<Return
 function mockStreamedMessage(
   parts: readonly StreamedMessagePart[],
   traceId: string | null = null,
+  opts?: { finishReason?: StreamedMessage['finishReason']; rawFinishReason?: string | null },
 ): StreamedMessage {
   return {
     get id(): string | null {
@@ -3105,8 +3139,8 @@ function mockStreamedMessage(
     get usage() {
       return null;
     },
-    finishReason: null,
-    rawFinishReason: null,
+    finishReason: opts?.finishReason ?? null,
+    rawFinishReason: opts?.rawFinishReason ?? null,
     traceId,
     async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
       for (const part of parts) {
@@ -3397,7 +3431,7 @@ describe('goal reminder re-injection after full compaction', () => {
         lastCompactedTokenCount: number | null;
       }
     ).lastCompactedTokenCount;
-    expect(floor).toBe(ctx.get(IAgentTokenCountingService).get().size);
+    expect(floor).toBe(ctx.tokenCounting.get().size);
     expect(floor).toBe(tokensAfter);
 
     ctx.mockNextResponse({ type: 'text', text: 'Reply after compaction.' });
@@ -3659,11 +3693,13 @@ describe('goal reminder re-injection after full compaction', () => {
     it('records remote usage exactly once (inside compact(), never in the caller)', async () => {
       const records: TelemetryRecord[] = [];
       const ctx = configuredAgent(records);
-      const usageService = ctx.get(IAgentUsageService);
+      const usageService = ctx.get(ISessionUsageService);
+      const agentContext = ctx.get(IAgentScopeContext).agentContext;
       const recordSpy = vi.spyOn(usageService, 'record');
       vi.spyOn(ctx.get(IAgentLLMRequesterService), 'compactInternal').mockImplementation(async (_context, input) => {
         // Mirror compact()'s real contract: usage is recorded inside, once.
         usageService.record(
+          agentContext,
           'kimi-code',
           { inputOther: 500, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
           input?.source,
@@ -3674,7 +3710,7 @@ describe('goal reminder re-injection after full compaction', () => {
       await runManualCompaction(ctx);
 
       const remoteUsageRecords = recordSpy.mock.calls.filter(
-        ([, , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
+        ([, , , source]) => source?.type === 'operation' && source.requestKind === 'remote_compaction',
       );
       expect(remoteUsageRecords).toHaveLength(1);
     });

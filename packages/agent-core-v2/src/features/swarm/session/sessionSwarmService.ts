@@ -40,6 +40,7 @@ import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { Event2 } from '#/app/event/event2';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
+import { agentContextOf } from '#/agent/scopeContext/scopeContext';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import {
   isSubagentMeta,
@@ -187,7 +188,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       resume: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, false),
       retry: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, true),
       suspended: (event) => {
-        const caller = this.lifecycle.get(callerAgentId);
+        const caller = this.lifecycle.findAgentHandle(callerAgentId);
         void caller?.accessor.get(IEventDispatcher)?.dispatch(
           new SubagentSuspended({
             subagentId: event.agentId,
@@ -382,7 +383,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       }
       return this.observe(
         caller,
-        child.id,
+        child,
         options.profileName,
         {
           kind: 'prompt',
@@ -427,20 +428,21 @@ export class SessionSwarmService implements ISessionSwarmService {
     const request = retryTurn
       ? ({ kind: 'retry' } as const)
       : ({ kind: 'prompt', prompt: options.prompt } as const);
-    return this.observe(caller, child.id, profileName, request, options);
+    return this.observe(caller, child, profileName, request, options);
   }
 
   private async observe(
     caller: IAgentScopeHandle,
-    agentId: string,
+    child: IAgentScopeHandle,
     profileName: string,
     request: { kind: 'prompt'; prompt: string } | { kind: 'retry' },
     options: AgentRunAttemptOptions,
     worktree?: SubagentWorktreeHandle,
   ): Promise<AgentRunAttemptHandle> {
+    const agentId = child.id;
     let run: AgentRunHandle;
     try {
-      run = await this.subagents.run(agentId, request, {
+      run = await this.subagents.run(agentContextOf(child), request, {
         signal: options.signal,
         onReady: options.onReady,
       });
@@ -561,7 +563,7 @@ export class SessionSwarmService implements ISessionSwarmService {
   }
 
   private requireHandle(agentId: string, label: string): IAgentScopeHandle {
-    const handle = this.lifecycle.get(agentId);
+    const handle = this.lifecycle.findAgentHandle(agentId);
     if (handle === undefined) {
       throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `${label} "${agentId}" does not exist`, {
         details: { agentId },

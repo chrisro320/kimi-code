@@ -93,7 +93,7 @@ describe('mirrorAgentRun subagent.progress', () => {
     const child = busStub();
     const dispatcher = dispatcherStub();
     const lifecycle = {
-      get: (agentId: string) =>
+      findAgentHandle: (agentId: string) =>
         agentId === 'child-1'
           ? ({
               id: 'child-1',
@@ -113,7 +113,7 @@ describe('mirrorAgentRun subagent.progress', () => {
       { profileName: 'coder', signal: new AbortController().signal },
     );
 
-    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ usage: { total: USAGE } }));
+    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ agentId: 'main', usage: { total: USAGE } }));
     expect(dispatcher.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'subagent.progress',
@@ -124,8 +124,8 @@ describe('mirrorAgentRun subagent.progress', () => {
 
     // No usage total → no progress event.
     dispatcher.dispatch.mockClear();
-    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ usage: {} }));
-    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({}));
+    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ agentId: 'main', usage: {} }));
+    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ agentId: 'main' }));
     expect(dispatcher.dispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'subagent.progress' }),
     );
@@ -135,7 +135,7 @@ describe('mirrorAgentRun subagent.progress', () => {
     await expect(mirrored).resolves.toEqual({ summary: 'done' });
     expect(child.disposed).toHaveBeenCalledOnce();
     dispatcher.dispatch.mockClear();
-    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ usage: { total: USAGE } }));
+    child.handlers.get(AgentStatusUpdated)?.(new AgentStatusUpdated({ agentId: 'main', usage: { total: USAGE } }));
     expect(dispatcher.dispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'subagent.progress' }),
     );
@@ -146,7 +146,7 @@ describe('mirrorAgentRun subagent.progress', () => {
     const child = busStub();
     const dispatcher = dispatcherStub();
     const lifecycle = {
-      get: (agentId: string) =>
+      findAgentHandle: (agentId: string) =>
         agentId === 'child-1'
           ? ({
               id: 'child-1',
@@ -174,7 +174,7 @@ describe('mirrorAgentRun subagent.progress', () => {
   it('mirrors without progress forwarding when the child handle is gone', async () => {
     const requester = busStub();
     const dispatcher = dispatcherStub();
-    const lifecycle = { get: () => undefined } as unknown as IAgentLifecycleService;
+    const lifecycle = { findAgentHandle: () => undefined } as unknown as IAgentLifecycleService;
     const mirrored = mirrorAgentRun(
       requesterHandle(requester.bus, dispatcher, lifecycle, subagentsStub()),
       { agentId: 'child-1', turn: {} as never, completion: Promise.resolve({ summary: 'done' }) },

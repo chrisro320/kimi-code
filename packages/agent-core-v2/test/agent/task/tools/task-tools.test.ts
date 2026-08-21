@@ -4,33 +4,44 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import type {
-  AgentTask,
-  AgentTaskInfo,
-  AgentTaskOutputSnapshot,
-  AgentTaskTrackOptions,
-  ForegroundTaskReleaseReason,
-  IAgentTaskEntry,
+import {
   IAgentTaskService,
-  RegisterAgentTaskOptions,
-  ScopeExpansionResolutionRequest,
-  ScopeExpansionResolutionResult,
+  type AgentTask,
+  type AgentTaskInfo,
+  type AgentTaskOutputSnapshot,
+  type AgentTaskTrackOptions,
+  type AgentTaskWaitDelivery,
+  type ForegroundTaskReleaseReason,
+  type IAgentTaskEntry,
+  type RegisterAgentTaskOptions,
+  type ScopeExpansionResolutionRequest,
+  type ScopeExpansionResolutionResult,
 } from '#/agent/task/task';
-import { TERMINAL_STATUSES } from '#/agent/task/types';
+import { type AgentTaskStatus, TERMINAL_STATUSES } from '#/agent/task/types';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { TaskListInputSchema } from '#/agent/tools/task/task-list/task-list';
 import { TaskListTool } from '#/agent/tools/task/task-list/taskListTool';
 import { TaskOutputInputSchema } from '#/agent/tools/task/task-output/task-output';
 import { TaskOutputTool } from '#/agent/tools/task/task-output/taskOutputTool';
 import { TaskStopInputSchema } from '#/agent/tools/task/task-stop/task-stop';
 import { TaskStopTool } from '#/agent/tools/task/task-stop/taskStopTool';
+import { WaitForInputSchema } from '#/agent/tools/task/task-wait/task-wait';
+import { WaitForTool, startWaitProgress, waitForProgressUpdate } from '#/agent/tools/task/task-wait/taskWaitTool';
+import { abortError } from '#/_base/utils/abort';
 import type { ITaskHandle } from '#/app/task/task';
+import type { IHostProcess } from '#/os/interface/hostProcess';
 import { compileToolArgsValidator, validateToolArgs } from '#/tool/args-validator';
-import type { ProcessTaskInfo } from '#/agent/tools/os/bash/process-task';
+import { ProcessTask, type ProcessTaskInfo } from '#/agent/tools/os/bash/process-task';
+import { SubagentTask } from '#/agent/tools/agent/subagent-task';
 import type { SubagentTaskInfo } from '#/agent/tools/agent/subagent-task';
 import { TaskListTool as V1TaskListTool } from '../../../../../agent-core/src/tools/background/task-list';
 import { TaskOutputTool as V1TaskOutputTool } from '../../../../../agent-core/src/tools/background/task-output';
 import { TaskStopTool as V1TaskStopTool } from '../../../../../agent-core/src/tools/background/task-stop';
 import { executeTool } from '../../../tools/fixtures/execute-tool';
+import { recordingTelemetry, type TelemetryRecord } from '../../../app/telemetry/stubs';
+import { stubFlag } from '../../../app/flag/stubs';
+import { agentService, createTestAgent, telemetryServices } from '../../../harness';
+import { stubLoopWithHooks } from '../../loop/stubs';
 
 const signal = new AbortController().signal;
 
@@ -123,6 +134,14 @@ class FakeTaskService implements IAgentTaskService {
   readonly stopCalls: Array<{ taskId: string; reason: string | undefined }> = [];
   readonly suppressCalls: string[] = [];
   readonly waitCalls: Array<{ taskId: string; timeoutMs: number | undefined }> = [];
+  readonly waitDeliveries: Array<readonly AgentTaskWaitDelivery[]> = [];
+  waitDelegate:
+    | ((
+        taskId: string,
+        timeoutMs: number | undefined,
+        signal: AbortSignal | undefined,
+      ) => Promise<AgentTaskInfo | undefined>)
+    | undefined;
 
   private readonly entries = new Map<string, FakeTaskEntry>();
 
@@ -132,6 +151,16 @@ class FakeTaskService implements IAgentTaskService {
   ): string {
     this.entries.set(info.taskId, { info, output });
     return info.taskId;
+  }
+
+  settle(taskId: string, status: AgentTaskStatus = 'completed'): void {
+    const entry = this.entries.get(taskId);
+    if (entry === undefined) return;
+    entry.info = {
+      ...entry.info,
+      status,
+      endedAt: entry.info.endedAt ?? 1_700_000_002_000,
+    } as AgentTaskInfo;
   }
 
   track(_handle: ITaskHandle, _options: AgentTaskTrackOptions): IAgentTaskEntry {
@@ -166,10 +195,13 @@ class FakeTaskService implements IAgentTaskService {
 
   persistOutput(_taskId: string): void {}
 
+  readonly failSnapshotTaskIds = new Set<string>();
+
   async getOutputSnapshot(
     taskId: string,
     _maxPreviewBytes: number,
   ): Promise<AgentTaskOutputSnapshot> {
+    if (this.failSnapshotTaskIds.has(taskId)) throw new Error('snapshot read failed');
     return this.entries.get(taskId)?.output ?? outputSnapshot();
   }
 
@@ -187,6 +219,10 @@ class FakeTaskService implements IAgentTaskService {
       ...entry.info,
       terminalNotificationSuppressed: true,
     } as AgentTaskInfo;
+  }
+
+  markTasksDeliveredViaWait(tasks: readonly AgentTaskWaitDelivery[]): void {
+    this.waitDeliveries.push(tasks);
   }
 
   detach(taskId: string): AgentTaskInfo | undefined {
@@ -232,9 +268,12 @@ class FakeTaskService implements IAgentTaskService {
   async wait(
     taskId: string,
     timeoutMs?: number,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<AgentTaskInfo | undefined> {
     this.waitCalls.push({ taskId, timeoutMs });
+    if (this.waitDelegate !== undefined) {
+      return this.waitDelegate(taskId, timeoutMs, signal);
+    }
     return this.entries.get(taskId)?.info;
   }
 
