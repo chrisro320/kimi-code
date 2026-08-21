@@ -5,13 +5,19 @@ import {
   TASK_AGENT_ROLE_PREFIX,
 } from '#/app/agentProfileCatalog/profile-shared';
 
+// Native Read/Grep/Glob are no longer preloaded by the package root, so naming
+// them here grants nothing. Each maps to its lean-ctx equivalent: Read ->
+// ctx_read, Grep -> ctx_search, Glob -> ctx_glob + ctx_tree. `mcp__*` is not
+// used: it would hand this profile ctx_shell and ctx_patch, and the role above
+// states outright that a plan agent has no shell and no file-editing tools.
 const PLAN_TOOLS = [
-  'Read',
   'ReadMediaFile',
-  'Glob',
-  'Grep',
   'WebSearch',
   'FetchURL',
+  'mcp__lean-ctx__ctx_read',
+  'mcp__lean-ctx__ctx_search',
+  'mcp__lean-ctx__ctx_glob',
+  'mcp__lean-ctx__ctx_tree',
 ] as const;
 
 const PLAN_ROLE =

@@ -83,14 +83,22 @@ const CODER_TOOLS = [
   'mcp__*',
 ] as const;
 
+// The native Read/Grep/Glob/Bash tools are no longer preloaded by the package
+// root, so naming them here grants nothing — this list had shrunk to three
+// entries and left explore/debugger/reviewer unable to read or search at all.
+// Each native tool is replaced by its lean-ctx equivalent, one for one:
+// Read -> ctx_read, Grep -> ctx_search, Glob -> ctx_glob + ctx_tree,
+// Bash -> ctx_shell. `mcp__*` is deliberately not used here — it would also
+// hand these profiles ctx_patch, and explore/reviewer are read-only roles.
 const EXPLORE_TOOLS = [
-  'Bash',
-  'Read',
   'ReadMediaFile',
-  'Glob',
-  'Grep',
   'WebSearch',
   'FetchURL',
+  'mcp__lean-ctx__ctx_read',
+  'mcp__lean-ctx__ctx_search',
+  'mcp__lean-ctx__ctx_glob',
+  'mcp__lean-ctx__ctx_tree',
+  'mcp__lean-ctx__ctx_shell',
 ] as const;
 
 const MAIN_AGENT_CALLER_PREFIX =

@@ -60,6 +60,7 @@ import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentGoalService } from '#/features/goal/goal';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import '#/agent/tools/os/bash/bashTool';
 
 type GenerateFn = NonNullable<TestAgentOptions['generate']>;
 
@@ -309,13 +310,13 @@ describe('FullCompaction', () => {
         agent_id: 'main',
         source: 'manual',
 
-        // Token counts run higher than upstream: this fork registers extra tools
-        // (routing / circuit / dispatch) and four extra builtin profiles, so the
-        // full-request overhead the counter now includes is larger. Re-measured
-    // for 0.38.0 (upstream added WaitFor and friends, shifting the tool set again).
-    // Re-measure
-        // rather than reverting to upstream numbers.
-        tokens_before: 3_171,
+        // Hardcoded, not a snapshot: `vitest -u` will not touch these, they have to
+        // be re-measured by hand whenever the tool set changes. Re-measured on
+        // 2026-08-21 after the native Read/Grep/Glob/Bash preload was removed and
+        // the read-only profiles switched to lean-ctx equivalents. Do not revert
+        // to upstream's numbers: this fork registers extra tools and profiles, so
+        // the full-request overhead the counter includes differs from upstream.
+        tokens_before: 3_218,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -605,7 +606,7 @@ describe('FullCompaction', () => {
       cwd: dir,
       trigger: 'auto',
 
-      token_count: 3_171,
+      token_count: 3_218,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -692,7 +693,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_182,
+        tokens_before: 12_820,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1107,7 +1108,7 @@ describe('FullCompaction', () => {
         agent_id: 'main',
         source: 'manual',
 
-        tokens_before: 15_182,
+        tokens_before: 12_820,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1333,7 +1334,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
 
-        tokens_before: 15_182,
+        tokens_before: 12_820,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1707,12 +1708,12 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'auto',
 
-        tokens_before: 3_178,
+        tokens_before: 3_225,
         // 3267 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
         // 21 estimated tokens for the kept user messages — the summary
         // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_162,
+        tokens_after: 3_209,
         compacted_count: 7,
         retry_count: 0,
       }),
