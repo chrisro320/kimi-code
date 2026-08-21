@@ -47,6 +47,7 @@ import type { ExecutableTool, ToolExecution, ToolResult, ToolSource } from '#/to
 
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 
+import SYSTEM_PROMPT_TEMPLATE from '../../../src/app/agentProfileCatalog/system.md?raw';
 import { deferredAgentIdentityStub } from '../../app/agentIdentity/stubs';
 import {
   InMemoryWireRecordPersistence,
@@ -367,13 +368,30 @@ describe('AgentProfileService.bind', () => {
     expect(svc.getSystemPrompt()).toBe(MINIMAL_MODE_SYSTEM_PROMPT);
   });
 
+  it('keeps the full system prompt template lean-ctx-only', () => {
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain('mcp__lean-ctx__ctx_read');
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain('mcp__lean-ctx__ctx_search');
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain('mcp__lean-ctx__ctx_glob');
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain('mcp__lean-ctx__ctx_tree');
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain('mcp__lean-ctx__ctx_shell');
+    expect(SYSTEM_PROMPT_TEMPLATE).not.toMatch(/\b(?:Read|Grep|Glob|Bash)\b/);
+    expect(SYSTEM_PROMPT_TEMPLATE).not.toContain('low-priority fallbacks');
+    expect(SYSTEM_PROMPT_TEMPLATE).toContain(
+      'If you modified any files, styles, structures, configurations, workflows, or other conventions mentioned in AGENTS.md files, do NOT update AGENTS.md on your own — only update it when the user explicitly says "收尾" (wrap-up); otherwise never never never touch it.',
+    );
+    expect(SYSTEM_PROMPT_TEMPLATE).not.toContain(
+      'update the corresponding AGENTS.md files to keep them current.',
+    );
+  });
+
   it('renders the full system prompt for a model without minimal_mode', async () => {
     const { profile: svc } = buildContext();
 
     await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
 
-    expect(svc.getSystemPrompt()).not.toBe(MINIMAL_MODE_SYSTEM_PROMPT);
-    expect(svc.getSystemPrompt()).toContain('# Ultimate Reminders');
+    const systemPrompt = svc.getSystemPrompt();
+    expect(systemPrompt).not.toBe(MINIMAL_MODE_SYSTEM_PROMPT);
+    expect(systemPrompt).toContain('# Ultimate Reminders');
   });
 
   // The prompt is frozen before `profile.bind` writes the Model, so a lean

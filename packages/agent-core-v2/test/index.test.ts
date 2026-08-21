@@ -34,6 +34,7 @@ import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import type { Event2Class } from '#/app/event/event2';
 import { AGENT_WIRE_RECORD_KEY } from '#/wire/record';
+import { getAgentToolContributions } from '#/agent/toolRegistry/toolContribution';
 import { registerTestAgentWire, registerTestEventDispatcher, restoreTestEventDispatcher } from './wire/stubs';
 import { BUILTIN_REPLAYABLE_STATE_KEYS } from './state/builtinReplayableKeys';
 
@@ -102,6 +103,17 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'cron.cursor',
   'token_counting.turn_recorded',
 ]);
+
+describe('package root builtin tools', () => {
+  it('does not preload native read, search, discovery, or shell tools', () => {
+    const toolNames = getAgentToolContributions().map((contribution) => contribution.options.name);
+
+    for (const toolName of ['Read', 'Grep', 'Glob', 'Bash']) {
+      expect(toolNames).not.toContain(toolName);
+    }
+    expect(toolNames).toEqual(expect.arrayContaining(['Edit', 'Write']));
+  });
+});
 
 describe('v1 wire vocabulary', () => {
   const SCOPE = 'wire';

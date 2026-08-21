@@ -202,7 +202,7 @@ describe('Agent resume', () => {
     expect(ctx.llmInputs()).toMatchInlineSnapshot(`
       call 1:
         system: <system-prompt>
-        tools: Bash
+        tools: []
         messages:
           user: text "Historical compacted summary."
           user: text "Fresh prompt after resume"
@@ -414,7 +414,7 @@ describe('Agent resume', () => {
     expect(ctx.llmInputs()).toMatchInlineSnapshot(`
       call 1:
         system: <system-prompt>
-        tools: acp_status, Agent, AgentSwarm, AskUserQuestion, Bash, compress, CreateGoal, decompress, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal, Glob, Grep, Read, search_context, SetGoalBudget, Skill, TaskList, TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, Write
+        tools: acp_status, Agent, AgentSwarm, AskUserQuestion, compress, CreateGoal, decompress, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal, search_context, SetGoalBudget, Skill, TaskList, TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, Write
         messages:
           user: text "Historical prompt before skill"
           assistant: []  calls call_resume_write:Write { "path": "result.txt" }, call_resume_skill:Skill { "skill": "review" }

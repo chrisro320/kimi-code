@@ -82,13 +82,13 @@ export * from '#/os/backends/node-local/hostFsWatchService';
 export * from '#/os/backends/node-local/hostProcessService';
 export * from '#/os/backends/node-local/hostTerminalService';
 export * from '#/agent/tools/os/bash/bash';
-import '#/agent/tools/os/bash/bashTool';
+// Not a tool preload: `process-task` registers no tool, it only declaration-merges the
+// `process` kind into `AgentTaskInfoByKind`. Dropping it with the Bash tool preload would
+// erase that kind from the union and break every background-task consumer at type level.
+import '#/agent/tools/os/bash/process-task';
 export * from '#/agent/tools/os/glob/glob';
-import '#/agent/tools/os/glob/globTool';
 export * from '#/agent/tools/os/grep/grep';
-import '#/agent/tools/os/grep/grepTool';
 export * from '#/agent/tools/os/read/read';
-import '#/agent/tools/os/read/readTool';
 export * from '#/agent/tools/os/write/write';
 import '#/agent/tools/os/write/writeTool';
 export * from '#/os/interface/terminal';

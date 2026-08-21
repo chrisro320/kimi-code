@@ -277,10 +277,12 @@ describe('Agent config', () => {
 
   it('config.update initializes builtin tools', async () => {
     const tools = await ctx.rpc.getTools({});
+    const names = toolNames(tools);
 
-    expect(toolNames(tools)).toEqual(
-      expect.arrayContaining(['Read', 'Write', 'Edit', 'Grep', 'Glob']),
-    );
+    expect(names).toEqual(expect.arrayContaining(['Write', 'Edit']));
+    for (const toolName of ['Read', 'Grep', 'Glob', 'Bash']) {
+      expect(names).not.toContain(toolName);
+    }
   });
 
   it('keeps turn-start config for later steps and applies updates to the next turn', async () => {

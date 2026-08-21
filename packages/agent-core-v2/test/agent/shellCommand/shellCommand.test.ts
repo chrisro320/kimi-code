@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import '#/agent/tools/os/bash/bashTool';
 import {
   IAgentContextMemoryService,
   IAgentShellCommandService,

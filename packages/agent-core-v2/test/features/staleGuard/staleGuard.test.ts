@@ -29,6 +29,7 @@ import { EventDispatcherService } from '#/state/eventDispatcherService';
 import { ToolAccesses, type ExecutableToolResult } from '#/tool/toolContract';
 import { IWireService } from '#/wire/wire';
 import type { WireRecord } from '#/wire/record';
+import '#/agent/tools/os/read/readTool';
 
 import { createTestAgent } from '../../harness';
 import { stubWireJournal } from '../../wire/stubs';
