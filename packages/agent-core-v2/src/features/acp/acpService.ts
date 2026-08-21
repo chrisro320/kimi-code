@@ -220,7 +220,7 @@ export class AcpService extends Service implements IAcpService {
             const loaded = await loadAcpSidecar(this.documents, this.sidecarScope);
             linked.throwIfAborted();
             durableRefs = loaded.refs.length;
-            const stable = ensureStableRefs(loaded, messages);
+            const stable = ensureStableRefs(loaded, messages, this.coverageFor(loaded));
             const projection = projectAcpMessages(messages, (_message, index) => stable.refs[index]!);
             if (!projection.ok) {
               this.degrade(projection.reason, durableRefs);
@@ -749,13 +749,19 @@ export class AcpService extends Service implements IAcpService {
       cached !== undefined && extendsSnapshot(history, cached.source)
         ? cached.view
         : this.projector.project(history);
-    const stable = ensureStableRefs(loaded, messages);
+    const stable = ensureStableRefs(loaded, messages, coveredBaseRefs(state));
     const projection = projectAcpMessages(messages, (_message, index) => stable.refs[index]!);
     if (!projection.ok) {
       this.degrade(projection.reason, loaded.refs.length);
       return { ok: false, reason: projection.reason };
     }
     return { ok: true, sidecar: stable.sidecar, state, projection: projection.projection };
+  }
+
+  private coverageFor(loaded: AcpSidecar): ReadonlySet<string> | undefined {
+    if (loaded.compressionState === null) return new Set();
+    if (!isCompressionState(loaded.compressionState)) return undefined;
+    return coveredBaseRefs(loaded.compressionState);
   }
 
   override dispose(): void {
@@ -918,6 +924,15 @@ export function renderTurnNudge(turn: ProcessTurnResult): Message | undefined {
     content: [{ type: 'text', text: renderNudgeText(viable).text }],
     toolCalls: [],
   };
+}
+
+function coveredBaseRefs(state: CompressionState): ReadonlySet<string> {
+  const refs = new Set<string>();
+  for (const id of coveredMessageIds(state)) {
+    const hash = id.indexOf('#');
+    refs.add(hash === -1 ? id : id.slice(0, hash));
+  }
+  return refs;
 }
 
 function isTagOnlyTurn(before: readonly CoreMessage[], after: readonly CoreMessage[]): boolean {

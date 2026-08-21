@@ -16,7 +16,8 @@ import { ACP_MANAGER_ID, ACP_MANAGER_VERSION } from './acp';
 /**
  * Thrown by `ensureStableRefs` when the live transcript no longer matches the
  * persisted sequence and content digests cannot distinguish duplicate
- * messages, so refs cannot be safely remapped.
+ * messages whose refs are covered by a compression block (or whose block
+ * coverage cannot be determined), so refs cannot be safely remapped.
  */
 export class AcpDuplicateRemapError extends Error {
   constructor() {
@@ -100,9 +101,17 @@ export async function resetAcpSidecar(
   await store.delete(scope, ACP_SIDECAR_KEY);
 }
 
+/**
+ * Reconciles durable refs with the live transcript. `coveredRefs` must list
+ * the durable base refs pinned by compression blocks (callers normalize
+ * derived core ids like `m00009#reasoning:0` back to their base ref). A
+ * duplicated digest may shrink by occurrence-order remap only when none of
+ * its old refs are covered; unknown coverage (`undefined`) fails closed.
+ */
 export function ensureStableRefs(
   sidecar: AcpSidecar,
   messages: readonly Message[],
+  coveredRefs?: ReadonlySet<string>,
 ): { readonly sidecar: AcpSidecar; readonly refs: readonly string[]; readonly changed: boolean } {
   const digests = messages.map(messageDigest);
   if (sameStrings(digests, sidecar.liveSequence.map((ref) => recordForRef(sidecar, ref).digest))) {
@@ -114,7 +123,9 @@ export function ensureStableRefs(
   for (const [digest, oldRecords] of oldByDigest) {
     const newCount = newCounts.get(digest) ?? 0;
     if (newCount < oldRecords.length && oldRecords.length > 1) {
-      throw new AcpDuplicateRemapError();
+      const guarded =
+        coveredRefs === undefined || oldRecords.some((record) => coveredRefs.has(record.ref));
+      if (guarded) throw new AcpDuplicateRemapError();
     }
   }
 

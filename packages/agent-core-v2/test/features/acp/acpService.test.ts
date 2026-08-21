@@ -282,17 +282,113 @@ describe('AcpService', () => {
     expect(compressed.ok).toBe(true);
   });
 
-  it('fails open instead of transferring refs after an ambiguous duplicate edit', async () => {
+  async function setupCoveredDuplicates(
+    setup: ReturnType<typeof createService>,
+    duplicate: Message = textMessage('same'),
+  ): Promise<{ readonly duplicate: Message; readonly reduced: readonly Message[] }> {
+    const head = bigMessages(8);
+    const tail = Array.from({ length: 8 }, (_, i) =>
+      textMessage(`TAIL-${i + 1} ${'x'.repeat(3000)}`),
+    );
+    const messages = [...head, duplicate, duplicate, ...tail];
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+    const compressed = await setup.service.compress({
+      ranges: [
+        { startRef: 'm00001', endRef: 'm00010', summary: SUMMARY, topic: 'covered duplicates' },
+      ],
+    });
+    expect(compressed.ok).toBe(true);
+    const reduced = [...head, duplicate, ...tail];
+    setup.env.history = reduced;
+    return { duplicate, reduced };
+  }
+
+  it('fails closed when a shrunk duplicate ref is covered by a compression block', async () => {
     const setup = createService('duplicates');
     owned.push(setup.disposables);
-    const duplicate = textMessage('same');
-    await transform(setup.requester.manager(), [duplicate, duplicate]);
+    const { reduced } = await setupCoveredDuplicates(setup);
     const before = structuredClone(setup.store.values);
-    const messages = [duplicate];
 
-    const result = await transform(setup.requester.manager(), messages);
+    const result = await transform(setup.requester.manager(), reduced);
 
-    expect(result.messages).toBe(messages);
+    expect(result.messages).toBe(reduced);
+    expect(setup.service.status()).toMatchObject({
+      health: 'degraded',
+      reason:
+        'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
+    });
+    expect(setup.store.values).toEqual(before);
+  });
+
+  it('remaps uncovered duplicates by occurrence order when one copy disappears', async () => {
+    const setup = createService('duplicates-uncovered');
+    owned.push(setup.disposables);
+    const duplicate = textMessage('same');
+    const duplicates = [duplicate, duplicate];
+    setup.env.history = duplicates;
+    await transform(setup.requester.manager(), duplicates);
+
+    setup.env.history = [duplicate];
+    await transform(setup.requester.manager(), [duplicate]);
+
+    expect(setup.service.status()).toMatchObject({ health: 'healthy', refs: 2 });
+    const sidecar = setup.store.values.get(
+      `sessions/ws/session/agents/duplicates-uncovered/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect(sidecar.liveSequence).toEqual(['m00001']);
+    expect(sidecar.refs.map((record) => record.ref)).toEqual(['m00001', 'm00002']);
+
+    const report = await setup.service.statusReport();
+    expect(report.ok).toBe(true);
+    expect(report.message).toContain('health: healthy');
+
+    const later = textMessage('later');
+    setup.env.history = [duplicate, later];
+    await transform(setup.requester.manager(), [duplicate, later]);
+    expect(setup.service.status()).toMatchObject({ health: 'healthy' });
+    const after = setup.store.values.get(
+      `sessions/ws/session/agents/duplicates-uncovered/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect(after.liveSequence).toEqual(['m00001', 'm00003']);
+  });
+
+  it('fails closed when block-covered reasoning-only duplicates shrink', async () => {
+    const setup = createService('duplicates-reasoning');
+    owned.push(setup.disposables);
+    const thought: Message = {
+      role: 'assistant',
+      content: [{ type: 'think', think: `same thought ${'z'.repeat(400)}` }],
+      toolCalls: [],
+    };
+    const { reduced } = await setupCoveredDuplicates(setup, thought);
+    const before = structuredClone(setup.store.values);
+
+    await transform(setup.requester.manager(), reduced);
+
+    expect(setup.service.status()).toMatchObject({
+      health: 'degraded',
+      reason:
+        'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
+    });
+    expect(setup.store.values).toEqual(before);
+  });
+
+  it('fails closed when a duplicate shrinks and the compression state is corrupt', async () => {
+    const setup = createService('duplicates-corrupt');
+    owned.push(setup.disposables);
+    const duplicate = textMessage('same');
+    const duplicates = [duplicate, duplicate];
+    setup.env.history = duplicates;
+    await transform(setup.requester.manager(), duplicates);
+    const key = `sessions/ws/session/agents/duplicates-corrupt/acp/${ACP_SIDECAR_KEY}`;
+    const valid = setup.store.values.get(key) as AcpSidecar;
+    setup.store.values.set(key, { ...valid, compressionState: { bogus: true } });
+    const before = structuredClone(setup.store.values);
+
+    setup.env.history = [duplicate];
+    await transform(setup.requester.manager(), [duplicate]);
+
     expect(setup.service.status()).toMatchObject({
       health: 'degraded',
       reason:
@@ -304,12 +400,8 @@ describe('AcpService', () => {
   it('reports a degraded status with /acp reset guidance when duplicate remapping is ambiguous', async () => {
     const setup = createService('duplicates-status');
     owned.push(setup.disposables);
-    const duplicate = textMessage('same');
-    const duplicates = [duplicate, duplicate];
-    setup.env.history = duplicates;
-    await transform(setup.requester.manager(), duplicates);
-    setup.env.history = [duplicate];
-    await transform(setup.requester.manager(), [duplicate]);
+    await setupCoveredDuplicates(setup);
+    await transform(setup.requester.manager(), setup.env.history);
 
     const report = await setup.service.statusReport();
 
@@ -326,21 +418,17 @@ describe('AcpService', () => {
   it('leaves durable refs untouched and fails mutations closed after an ambiguous duplicate edit', async () => {
     const setup = createService('duplicates-sidecar');
     owned.push(setup.disposables);
-    const duplicate = textMessage('same');
-    const duplicates = [duplicate, duplicate];
-    setup.env.history = duplicates;
-    await transform(setup.requester.manager(), duplicates);
-    setup.env.history = [duplicate];
-    await transform(setup.requester.manager(), [duplicate]);
+    await setupCoveredDuplicates(setup);
+    await transform(setup.requester.manager(), setup.env.history);
 
     const sidecar = setup.store.values.get(
       `sessions/ws/session/agents/duplicates-sidecar/acp/${ACP_SIDECAR_KEY}`,
     ) as AcpSidecar;
-    expect(sidecar.refs.map((record) => record.ref)).toEqual(['m00001', 'm00002']);
-    expect(sidecar.liveSequence).toEqual(['m00001', 'm00002']);
+    expect(sidecar.refs).toHaveLength(18);
+    expect(sidecar.liveSequence).toHaveLength(18);
 
     const compressed = await setup.service.compress({
-      ranges: [{ startRef: 'm00001', endRef: 'm00002', summary: SUMMARY }],
+      ranges: [{ startRef: 'm00009', endRef: 'm00010', summary: SUMMARY }],
     });
     expect(compressed.ok).toBe(false);
     expect(compressed.message).toContain(
@@ -389,21 +477,17 @@ describe('AcpService', () => {
         });
       }
     });
-    const duplicate = textMessage('same');
+    const { reduced } = await setupCoveredDuplicates(setup);
+    expect(seen[0]).toEqual({ acp: 'healthy', acpRefs: 18, acpActiveBlocks: 0 });
 
-    await transform(setup.requester.manager(), [duplicate, duplicate]);
-    expect(seen).toEqual([{ acp: 'healthy', acpRefs: 2, acpActiveBlocks: 0 }]);
-
-    await transform(setup.requester.manager(), [duplicate]);
-    expect(seen).toEqual([
-      { acp: 'healthy', acpRefs: 2, acpActiveBlocks: 0 },
-      { acp: 'degraded', acpRefs: 2, acpActiveBlocks: 0 },
-    ]);
+    await transform(setup.requester.manager(), reduced);
+    expect(seen.at(-1)).toEqual({ acp: 'degraded', acpRefs: 18, acpActiveBlocks: 1 });
   });
 
   it('stays silent on the event bus while another context manager is active', async () => {
     const setup = createService('suppressed');
     owned.push(setup.disposables);
+    const { reduced } = await setupCoveredDuplicates(setup);
     const seen: Array<'healthy' | 'degraded'> = [];
     setup.eventBus.subscribe('agent.status.updated', (event) => {
       const e = event as unknown as { acp?: 'healthy' | 'degraded' };
@@ -413,10 +497,8 @@ describe('AcpService', () => {
       getActiveContextManager: () => ContextManager;
     };
     requester.getActiveContextManager = () => ({ id: 'other-manager' }) as ContextManager;
-    const duplicate = textMessage('same');
 
-    await transform(setup.requester.manager(), [duplicate, duplicate]);
-    await transform(setup.requester.manager(), [duplicate]);
+    await transform(setup.requester.manager(), reduced);
     expect(setup.service.status().health).toBe('degraded');
 
     await setup.service.reset();
