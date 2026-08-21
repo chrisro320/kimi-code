@@ -13,6 +13,20 @@ import type { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumen
 
 import { ACP_MANAGER_ID, ACP_MANAGER_VERSION } from './acp';
 
+/**
+ * Thrown by `ensureStableRefs` when the live transcript no longer matches the
+ * persisted sequence and content digests cannot distinguish duplicate
+ * messages, so refs cannot be safely remapped.
+ */
+export class AcpDuplicateRemapError extends Error {
+  constructor() {
+    super(
+      'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
+    );
+    this.name = 'AcpDuplicateRemapError';
+  }
+}
+
 export const ACP_SIDECAR_KEY = 'sidecar.json';
 const SCHEMA_VERSION = 2;
 const MAX_REF = 99_999;
@@ -100,7 +114,7 @@ export function ensureStableRefs(
   for (const [digest, oldRecords] of oldByDigest) {
     const newCount = newCounts.get(digest) ?? 0;
     if (newCount < oldRecords.length && oldRecords.length > 1) {
-      throw new Error('ACP cannot safely remap an edited duplicate message sequence');
+      throw new AcpDuplicateRemapError();
     }
   }
 

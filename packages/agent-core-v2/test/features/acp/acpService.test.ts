@@ -295,9 +295,57 @@ describe('AcpService', () => {
     expect(result.messages).toBe(messages);
     expect(setup.service.status()).toMatchObject({
       health: 'degraded',
-      reason: 'ACP cannot safely remap an edited duplicate message sequence',
+      reason:
+        'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
     });
     expect(setup.store.values).toEqual(before);
+  });
+
+  it('reports a degraded status with /acp reset guidance when duplicate remapping is ambiguous', async () => {
+    const setup = createService('duplicates-status');
+    owned.push(setup.disposables);
+    const duplicate = textMessage('same');
+    const duplicates = [duplicate, duplicate];
+    setup.env.history = duplicates;
+    await transform(setup.requester.manager(), duplicates);
+    setup.env.history = [duplicate];
+    await transform(setup.requester.manager(), [duplicate]);
+
+    const report = await setup.service.statusReport();
+
+    expect(report.ok).toBe(true);
+    expect(report.message).toContain('health: degraded');
+    expect(report.message).toContain(
+      'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
+    );
+    expect(report.message).toContain('/acp reset');
+    expect(report.message).toContain('compress/restore/search stay disabled');
+    expect(setup.service.status()).toMatchObject({ health: 'degraded' });
+  });
+
+  it('leaves durable refs untouched and fails mutations closed after an ambiguous duplicate edit', async () => {
+    const setup = createService('duplicates-sidecar');
+    owned.push(setup.disposables);
+    const duplicate = textMessage('same');
+    const duplicates = [duplicate, duplicate];
+    setup.env.history = duplicates;
+    await transform(setup.requester.manager(), duplicates);
+    setup.env.history = [duplicate];
+    await transform(setup.requester.manager(), [duplicate]);
+
+    const sidecar = setup.store.values.get(
+      `sessions/ws/session/agents/duplicates-sidecar/acp/${ACP_SIDECAR_KEY}`,
+    ) as AcpSidecar;
+    expect(sidecar.refs.map((record) => record.ref)).toEqual(['m00001', 'm00002']);
+    expect(sidecar.liveSequence).toEqual(['m00001', 'm00002']);
+
+    const compressed = await setup.service.compress({
+      ranges: [{ startRef: 'm00001', endRef: 'm00002', summary: SUMMARY }],
+    });
+    expect(compressed.ok).toBe(false);
+    expect(compressed.message).toContain(
+      'ACP cannot safely remap duplicate messages after the live transcript changed; run /acp reset to rebuild stable refs',
+    );
   });
 
   it('keeps refs stable when an identical message is appended', async () => {

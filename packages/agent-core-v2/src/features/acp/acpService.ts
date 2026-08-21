@@ -142,6 +142,7 @@ import {
 import { peelTag, projectAcpMessages, rebuildAcpMessages, type CoreProjection } from './messageAdapter';
 import acpCompactionInstructionTemplate from './compaction-instruction.md?raw';
 import {
+  AcpDuplicateRemapError,
   acpCompressionStatesEqual,
   ensureStableRefs,
   loadAcpSidecar,
@@ -461,6 +462,16 @@ export class AcpService extends Service implements IAcpService {
         };
       } catch (error) {
         const reason = errorMessage(error);
+        if (error instanceof AcpDuplicateRemapError) {
+          if (!this.lifetime.signal.aborted) this.degrade(reason, this.currentStatus.refs);
+          return {
+            ok: true,
+            message: [
+              `ACP ${this.isActive() ? 'active' : 'inactive'}; health: degraded — ${reason}`,
+              'Run /acp reset to rebuild stable refs. Existing compression blocks are preserved until then; compress/restore/search stay disabled.',
+            ].join('\n'),
+          };
+        }
         if (!this.lifetime.signal.aborted) this.degrade(reason, this.currentStatus.refs);
         return { ok: false, message: `ACP status failed: ${reason}` };
       }
