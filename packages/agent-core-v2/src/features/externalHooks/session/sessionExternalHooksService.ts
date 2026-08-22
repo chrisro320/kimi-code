@@ -18,6 +18,7 @@ import {
 } from '#/workspace/sessionLifecycle/sessionLifecycle';
 
 import { IExternalHooksRunnerService } from '../app/externalHooksRunner';
+import { renderSessionStartHookText } from '../internal/sessionStart';
 import { ISessionExternalHooksService } from './sessionExternalHooks';
 
 type SessionStartHookSource = Exclude<SessionCreateSource, 'fork'>;
@@ -32,6 +33,11 @@ export class SessionExternalHooksService
 
   private sessionTitle: string | undefined;
   private readonly createdAt = Date.now();
+  private sessionStartText: string | undefined;
+
+  get sessionStartContext(): string | undefined {
+    return this.sessionStartText;
+  }
 
   constructor(
     @ISessionContext private readonly context: ISessionContext,
@@ -107,7 +113,7 @@ export class SessionExternalHooksService
   }
 
   private async triggerSessionStart(source: SessionStartHookSource): Promise<void> {
-    await this.runner.trigger('SessionStart', {
+    const results = await this.runner.trigger('SessionStart', {
       matcherValue: source,
       cwd: this.context.cwd,
       sessionId: this.context.sessionId,
@@ -118,6 +124,7 @@ export class SessionExternalHooksService
         profile: await this.defaultProfileName(),
       },
     });
+    this.sessionStartText = renderSessionStartHookText(results);
   }
 
   private async defaultProfileName(): Promise<string | undefined> {

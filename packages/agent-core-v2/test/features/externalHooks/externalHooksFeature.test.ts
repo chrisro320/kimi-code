@@ -16,6 +16,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { IFeatureAssemblyService } from '#/features/featureAssembly';
 import { FeatureAssemblyService } from '#/features/featureAssemblyService';
 import { IAgentExternalHooksService } from '#/features/externalHooks/agent/agentExternalHooks';
+import { IAgentSessionStartInjectionService } from '#/features/externalHooks/agent/sessionStartInjection';
 import { IExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunner';
 import { ExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunnerService';
 import '#/features/externalHooks/externalHooksFeature';
@@ -73,6 +74,7 @@ describe('ExternalHooksFeature — assembly (src/features/externalHooks)', () =>
     const agentUnits = collectionViewOf(host.app, ScopeUnits(LifecycleScope.Agent));
     expect(agentUnits.items.map((item) => item.name)).toEqual([
       `externalHooks:${String(IAgentExternalHooksService)}`,
+      `externalHooks:${String(IAgentSessionStartInjectionService)}`,
     ]);
 
     await manager.unprovideUnit('externalHooks');

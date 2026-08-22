@@ -16,7 +16,7 @@ export function renderUserPromptHookResult(
   const messages =
     results
       ?.filter((result) => result.action !== 'block')
-      ?.map(userPromptHookMessage)
+      ?.map(hookContextText)
       .filter(isNonEmptyString) ??
     [];
   if (messages.length === 0) return undefined;
@@ -51,7 +51,12 @@ export function renderUserPromptHookBlockResult(
   };
 }
 
-function userPromptHookMessage(result: HookResult): string | undefined {
+/**
+ * Resolves the text a hook result contributes to the model context: a parsed
+ * envelope beats raw stdout, so `additionalContext` wins, then `message`, and
+ * raw stdout only when the hook's stdout was not structured hook JSON.
+ */
+export function hookContextText(result: HookResult): string | undefined {
   if (result.timedOut === true || (result.exitCode !== undefined && result.exitCode !== 0)) {
     return undefined;
   }

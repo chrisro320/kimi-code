@@ -28,6 +28,15 @@ import {
   hooksFromToml,
   hooksToToml,
 } from '#/features/externalHooks/configSection';
+import type {
+  ContextInjectionContent,
+  ContextInjectionContext,
+  ContextInjectionProvider,
+  ContextInjectionResult,
+  IAgentContextInjectorService,
+} from '#/agent/contextInjector/contextInjector';
+import { AgentSessionStartInjectionService } from '#/features/externalHooks/agent/sessionStartInjectionService';
+import { renderSessionStartHookText } from '#/features/externalHooks/internal/sessionStart';
 import { renderUserPromptHookResult } from '#/features/externalHooks/internal/userPrompt';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -964,6 +973,74 @@ describe('IExternalHooksRunnerService integration', () => {
     expect(unmatched).toHaveLength(0);
   });
 
+  it('renders SessionStart additionalContext as plain text without the JSON envelope', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'SessionStart',
+        command: nodeCommand(
+          'process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<session-context>ok</session-context>" } }));',
+        ),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('SessionStart', {
+      matcherValue: 'startup',
+      inputData: { source: 'startup' },
+    });
+    const text = renderSessionStartHookText(results);
+
+    expect(text).toBe(
+      '<hook_result hook_event="SessionStart">\n<session-context>ok</session-context>\n</hook_result>',
+    );
+    expect(text).not.toContain('hookSpecificOutput');
+  });
+
+  it('renders plain-text SessionStart stdout verbatim and joins several hooks', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'SessionStart',
+        command: nodeCommand('process.stdout.write("first line");'),
+        timeout: 5,
+      },
+      {
+        event: 'SessionStart',
+        command: nodeCommand(
+          'process.stdout.write(JSON.stringify({ hookSpecificOutput: { additionalContext: "second line" } }));',
+        ),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('SessionStart', {
+      matcherValue: 'startup',
+      inputData: { source: 'startup' },
+    });
+
+    expect(renderSessionStartHookText(results)).toBe(
+      '<hook_result hook_event="SessionStart">\nfirst line\n\nsecond line\n</hook_result>',
+    );
+  });
+
+  it('renders nothing for a SessionStart envelope that carries no context field', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'SessionStart',
+        command: nodeCommand(
+          'process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart" } }));',
+        ),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('SessionStart', {
+      matcherValue: 'startup',
+      inputData: { source: 'startup' },
+    });
+
+    expect(renderSessionStartHookText(results)).toBeUndefined();
+  });
+
   it('fires a PostToolUseFailure hook with the tool error in the payload', async () => {
     const engine = makeHookRunner([
       {
@@ -1097,6 +1174,64 @@ describe('IExternalHooksRunnerService integration', () => {
       inputData: { sessionId: 's1', reason: 'clear' },
     });
     expect(unmatched).toHaveLength(0);
+  });
+
+  it('captures SessionStart context on startup and resume but not on fork', async () => {
+    const disposables = new DisposableStore();
+    let ix: TestInstantiationService | undefined;
+    try {
+      const lifecycle = stubSessionLifecycle();
+
+      ix = createServices(disposables, {
+        strict: true,
+        additionalServices: (reg) => {
+          registerStateServices(reg);
+          reg.defineInstance(ISessionContext, stubSessionContext());
+          reg.definePartialInstance(ISessionManager, lifecycle.service);
+          reg.defineInstance(ISessionMetadata, stubSessionMetadata());
+          reg.defineInstance(ISessionAgentProfileCatalog, stubProfileCatalog());
+          reg.defineInstance(IModelService, stubModelService());
+          reg.definePartialInstance(ISessionSubagentService, {
+            hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+            onDidStopAgentTask: Event.None as Event<AgentTaskStopHookContext>,
+          });
+        },
+      });
+      ix.set(
+        IExternalHooksRunnerService,
+        stubHookRunner({
+          trigger: async (event: string) =>
+            event === 'SessionStart'
+              ? [
+                {
+                  action: 'allow' as const,
+                  additionalContext: '<session-context>ready</session-context>',
+                  stdout: '{"hookSpecificOutput":{"additionalContext":"…"}}',
+                  structuredOutput: true,
+                },
+              ]
+              : [],
+        }),
+      );
+      ix.set(ISessionExternalHooksService, new SyncDescriptor(SessionExternalHooksService));
+      const hooks = ix.get(ISessionExternalHooksService);
+
+      await lifecycle.fireDidCreate('fork');
+      expect(hooks.sessionStartContext).toBeUndefined();
+
+      await lifecycle.fireDidCreate('startup');
+      expect(hooks.sessionStartContext).toBe(
+        '<hook_result hook_event="SessionStart">\n<session-context>ready</session-context>\n</hook_result>',
+      );
+
+      await lifecycle.fireDidCreate('resume');
+      expect(hooks.sessionStartContext).toBe(
+        '<hook_result hook_event="SessionStart">\n<session-context>ready</session-context>\n</hook_result>',
+      );
+    } finally {
+      ix?.dispose();
+      disposables.dispose();
+    }
   });
 
   it('runs session external hooks from lifecycle callbacks', async () => {
@@ -1641,5 +1776,111 @@ describe('IExternalHooksRunnerService integration', () => {
       disposables.dispose();
       vi.useRealTimers();
     }
+  });
+});
+
+
+const SESSION_START_BLOCK = '<hook_result hook_event="SessionStart">\nready\n</hook_result>';
+
+function makeSessionStartInjector(): {
+  readonly service: IAgentContextInjectorService;
+  provider(): ContextInjectionProvider;
+  readonly names: string[];
+} {
+  let registered: ContextInjectionProvider | undefined;
+  const names: string[] = [];
+  return {
+    service: {
+      _serviceBrand: undefined,
+      register: (name, provider) => {
+        names.push(name);
+        registered = provider as ContextInjectionProvider;
+        return Disposable.None;
+      },
+      reconcileWhenIdle: async () => {},
+    } as IAgentContextInjectorService,
+    provider: () => {
+      if (registered === undefined) throw new Error('no provider registered');
+      return registered;
+    },
+    names,
+  };
+}
+
+function makeSessionStartInjection(options: {
+  readonly agentId: string;
+  readonly hooks: { sessionStartContext: string | undefined };
+}): ReturnType<typeof makeSessionStartInjector> {
+  const injector = makeSessionStartInjector();
+  const service = new AgentSessionStartInjectionService(
+    injector.service,
+    { agentId: options.agentId } as IAgentScopeContext,
+    options.hooks as ISessionExternalHooksService,
+  );
+  void service;
+  return injector;
+}
+
+async function runSessionStartProvider(
+  injector: ReturnType<typeof makeSessionStartInjector>,
+  injectedPositions: readonly number[],
+): Promise<ContextInjectionContent | ContextInjectionResult | undefined> {
+  return injector.provider()({
+    injectedPositions,
+    lastInjectedAt: injectedPositions.at(-1) ?? null,
+    isNewTurn: true,
+  } satisfies ContextInjectionContext);
+}
+
+describe('SessionStart hook context injection', () => {
+  it('registers under the session_start_hook variant', () => {
+    const injector = makeSessionStartInjection({
+      agentId: 'main',
+      hooks: { sessionStartContext: SESSION_START_BLOCK },
+    });
+
+    expect(injector.names).toEqual(['session_start_hook']);
+  });
+
+  it('injects the SessionStart block on the first reconcile', async () => {
+    const injector = makeSessionStartInjection({
+      agentId: 'main',
+      hooks: { sessionStartContext: SESSION_START_BLOCK },
+    });
+
+    expect(await runSessionStartProvider(injector, [])).toEqual({
+      message: { role: 'user', content: [{ type: 'text', text: SESSION_START_BLOCK }] },
+    });
+  });
+
+  it('never injects twice into the same context', async () => {
+    const injector = makeSessionStartInjection({
+      agentId: 'main',
+      hooks: { sessionStartContext: SESSION_START_BLOCK },
+    });
+
+    expect(await runSessionStartProvider(injector, [])).not.toBeUndefined();
+    expect(await runSessionStartProvider(injector, [3])).toBeUndefined();
+    expect(await runSessionStartProvider(injector, [3])).toBeUndefined();
+  });
+
+  it('injects nothing into a subagent', async () => {
+    const injector = makeSessionStartInjection({
+      agentId: 'reviewer',
+      hooks: { sessionStartContext: SESSION_START_BLOCK },
+    });
+
+    expect(await runSessionStartProvider(injector, [])).toBeUndefined();
+  });
+
+  it('keeps retrying until the SessionStart hook text is available', async () => {
+    const hooks = { sessionStartContext: undefined as string | undefined };
+    const injector = makeSessionStartInjection({ agentId: 'main', hooks });
+
+    expect(await runSessionStartProvider(injector, [])).toBeUndefined();
+    hooks.sessionStartContext = SESSION_START_BLOCK;
+    expect(await runSessionStartProvider(injector, [])).toEqual({
+      message: { role: 'user', content: [{ type: 'text', text: SESSION_START_BLOCK }] },
+    });
   });
 });
