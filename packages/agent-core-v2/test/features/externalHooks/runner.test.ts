@@ -162,6 +162,72 @@ describe('runHook process runner', () => {
     expect(result.updatedInput).toBeUndefined();
   });
 
+  it('passes hookSpecificOutput.additionalContext through on allow results', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<workflow-state>ok</workflow-state>" } }));',
+      ),
+      {},
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('allow');
+    expect(result.additionalContext).toBe('<workflow-state>ok</workflow-state>');
+  });
+
+  it('carries additionalContext alongside a permissionDecision=deny block', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "nope", additionalContext: "extra" } }));',
+      ),
+      {},
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('block');
+    expect(result.reason).toBe('nope');
+    expect(result.additionalContext).toBe('extra');
+  });
+
+  it('ignores a top-level additionalContext field outside hookSpecificOutput', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand('process.stdout.write(JSON.stringify({ additionalContext: "top-level" }));'),
+      {},
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('allow');
+    expect(result.additionalContext).toBeUndefined();
+  });
+
+  it('stringifies a scalar additionalContext and drops an object one', async () => {
+    const scalar = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { additionalContext: 42 } }));',
+      ),
+      {},
+      { timeout: 5 },
+    );
+    expect(scalar.action).toBe('allow');
+    expect(scalar.additionalContext).toBe('42');
+
+    const object = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { message: "hi", additionalContext: { a: 1 } } }));',
+      ),
+      {},
+      { timeout: 5 },
+    );
+    expect(object.action).toBe('allow');
+    expect(object.message).toBe('hi');
+    expect(object.additionalContext).toBeUndefined();
+  });
+
   it('writes the input payload to the hook process stdin as JSON', async () => {
     const result = await runHook(
       hostProcess,

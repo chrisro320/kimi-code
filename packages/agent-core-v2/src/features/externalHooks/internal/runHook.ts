@@ -45,6 +45,7 @@ const HookSpecificOutputSchema = z.preprocess(
   z
     .looseObject({
       message: OptionalStringSchema,
+      additionalContext: OptionalStringSchema,
       permissionDecision: z.unknown().optional(),
       permissionDecisionReason: z.unknown().optional(),
       updatedInput: z.preprocess(
@@ -159,6 +160,7 @@ function resultFromExitCode(exitCode: number, stdout: string, stderr: string): H
     return {
       action: 'block',
       message: structured.message ?? structured.reason,
+      additionalContext: structured.additionalContext,
       updatedInput: structured.updatedInput,
       reason: structured.reason,
       stdout,
@@ -170,6 +172,7 @@ function resultFromExitCode(exitCode: number, stdout: string, stderr: string): H
 
   return allowResult({
     message: structured?.message,
+    additionalContext: structured?.additionalContext,
     updatedInput: structured?.updatedInput,
     stdout,
     stderr,
@@ -185,6 +188,7 @@ function structuredOutput(
       action?: 'block';
       reason?: string;
       message?: string;
+      additionalContext?: string;
       updatedInput?: Record<string, unknown>;
       structuredOutput: true;
     }
@@ -200,6 +204,7 @@ function structuredOutput(
     const { message, hookSpecificOutput } = output.data;
     const result = {
       message: message ?? hookSpecificOutput?.message,
+      additionalContext: hookSpecificOutput?.additionalContext,
       updatedInput: hookSpecificOutput?.updatedInput,
       structuredOutput: true as const,
     };
@@ -209,6 +214,7 @@ function structuredOutput(
     return {
       action: 'block',
       message: result.message,
+      additionalContext: result.additionalContext,
       updatedInput: result.updatedInput,
       reason:
         typeof hookSpecificOutput.permissionDecisionReason === 'string'
@@ -223,6 +229,7 @@ function structuredOutput(
 
 function allowResult(input: {
   readonly message?: string;
+  readonly additionalContext?: string;
   readonly updatedInput?: Record<string, unknown>;
   readonly stdout?: string;
   readonly stderr?: string;
@@ -233,6 +240,7 @@ function allowResult(input: {
   return {
     action: 'allow',
     message: input.message,
+    additionalContext: input.additionalContext,
     updatedInput: input.updatedInput,
     stdout: input.stdout,
     stderr: input.stderr,

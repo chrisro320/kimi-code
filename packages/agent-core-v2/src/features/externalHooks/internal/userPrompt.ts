@@ -55,8 +55,11 @@ function userPromptHookMessage(result: HookResult): string | undefined {
   if (result.timedOut === true || (result.exitCode !== undefined && result.exitCode !== 0)) {
     return undefined;
   }
+  const additionalContext = result.additionalContext?.trim();
+  if (additionalContext !== undefined && additionalContext.length > 0) return additionalContext;
   const message = result.message?.trim();
   if (message !== undefined && message.length > 0) return message;
+  if (result.structuredOutput === true) return undefined;
   const stdout = result.stdout?.trim();
   return stdout === undefined || stdout.length === 0 ? undefined : stdout;
 }

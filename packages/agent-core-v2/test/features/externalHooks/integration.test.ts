@@ -28,6 +28,7 @@ import {
   hooksFromToml,
   hooksToToml,
 } from '#/features/externalHooks/configSection';
+import { renderUserPromptHookResult } from '#/features/externalHooks/internal/userPrompt';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentExternalHooksService } from '#/features/externalHooks/agent/agentExternalHooks';
@@ -999,6 +1000,63 @@ describe('IExternalHooksRunnerService integration', () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.action).toBe('block');
     expect(results[0]?.reason).toContain('no profanity');
+  });
+
+  it('injects hookSpecificOutput.additionalContext as plain text without the JSON envelope', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'UserPromptSubmit',
+        command: nodeCommand(
+          'process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<workflow-state>ok</workflow-state>" } }));',
+        ),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('UserPromptSubmit', {
+      inputData: { prompt: 'hello' },
+    });
+    const rendered = renderUserPromptHookResult(results);
+
+    expect(rendered?.text).toContain('<workflow-state>ok</workflow-state>');
+    expect(rendered?.text).not.toContain('hookSpecificOutput');
+    expect(rendered?.text).not.toContain('additionalContext');
+  });
+
+  it('injects plain-text UserPromptSubmit stdout verbatim', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'UserPromptSubmit',
+        command: nodeCommand('process.stdout.write("recalled memory line");'),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('UserPromptSubmit', {
+      inputData: { prompt: 'hello' },
+    });
+
+    expect(renderUserPromptHookResult(results)?.text).toBe(
+      '<hook_result hook_event="UserPromptSubmit">\nrecalled memory line\n</hook_result>',
+    );
+  });
+
+  it('drops a structured UserPromptSubmit envelope that carries no context field', async () => {
+    const engine = makeHookRunner([
+      {
+        event: 'UserPromptSubmit',
+        command: nodeCommand(
+          'process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit" } }));',
+        ),
+        timeout: 5,
+      },
+    ]);
+
+    const results = await engine.trigger('UserPromptSubmit', {
+      inputData: { prompt: 'hello' },
+    });
+
+    expect(renderUserPromptHookResult(results)).toBeUndefined();
   });
 
   it('fires a StopFailure hook on chat provider errors with the error_type field present', async () => {
