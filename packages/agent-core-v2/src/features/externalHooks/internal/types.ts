@@ -43,6 +43,7 @@ export interface HookResult {
   readonly exitCode?: number;
   readonly timedOut?: boolean;
   readonly structuredOutput?: boolean;
+  readonly updatedInput?: Record<string, unknown>;
 }
 
 export interface HookBlockDecision {

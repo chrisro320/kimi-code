@@ -59,7 +59,7 @@ import {
 import { IEventBus } from '#/app/event/eventBus';
 import { AgentEvent2 } from '#/app/event/event2';
 import type { ExecutableToolResult } from '#/tool/toolContract';
-import type { ResolvedToolExecutionHookContext, ToolDidExecuteContext } from '#/agent/toolExecutor/toolHooks';
+import type { ToolDidExecuteContext, ToolExecutionHookContext } from '#/agent/toolExecutor/toolHooks';
 import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { toKimiErrorPayload } from '#/errors';
@@ -69,6 +69,7 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 
 import { IAgentExternalHooksService } from './agentExternalHooks';
 import { IExternalHooksRunnerService } from '../app/externalHooksRunner';
+import { blockDecision } from '../internal/matchHooks';
 import type { HookMatcherValue } from '../internal/types';
 import {
   renderUserPromptHookBlockResult,
@@ -219,10 +220,13 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
 
   private registerToolHooks(toolExecutor: IAgentToolExecutorService): void {
     this._register(
-      toolExecutor.onBeforeExecuteTool(async (event) => {
-        const reason = await this.runPreToolUse(event);
-        if (reason !== undefined) {
-          event.veto(denyToolExecution(reason));
+      toolExecutor.onPrepareToolCall(async (event) => {
+        const result = await this.runPreToolUse(event);
+        if (result?.updatedInput !== undefined) {
+          event.setUpdatedArgs(result.updatedInput);
+        }
+        if (result?.reason !== undefined) {
+          event.veto(denyToolExecution(result.reason));
         }
       }),
     );
@@ -364,10 +368,12 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
     );
   }
 
-  private async runPreToolUse(ctx: ResolvedToolExecutionHookContext): Promise<string | undefined> {
+  private async runPreToolUse(
+    ctx: ToolExecutionHookContext,
+  ): Promise<{ reason?: string; updatedInput?: Record<string, unknown> } | undefined> {
     ctx.signal.throwIfAborted();
     const toolInput = isPlainRecord(ctx.args) ? ctx.args : {};
-    const block = await this.runner.triggerBlock('PreToolUse', {
+    const results = await this.runner.trigger('PreToolUse', {
       matcherValue: ctx.toolCall.name,
       signal: ctx.signal,
       sessionId: this.sessionContext.sessionId,
@@ -378,7 +384,10 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
       }),
     });
     ctx.signal.throwIfAborted();
-    return block?.reason;
+    const block = blockDecision('PreToolUse', results);
+    const updatedInput = results.find((result) => result.updatedInput !== undefined)?.updatedInput;
+    if (block === undefined && updatedInput === undefined) return undefined;
+    return { reason: block?.reason, updatedInput };
   }
 
   private notifyPostToolUse(ctx: ToolDidExecuteContext): void {

@@ -47,6 +47,10 @@ const HookSpecificOutputSchema = z.preprocess(
       message: OptionalStringSchema,
       permissionDecision: z.unknown().optional(),
       permissionDecisionReason: z.unknown().optional(),
+      updatedInput: z.preprocess(
+        (value) => (isRecord(value) ? value : undefined),
+        z.record(z.string(), z.unknown()).optional(),
+      ),
     })
     .optional(),
 );
@@ -155,6 +159,7 @@ function resultFromExitCode(exitCode: number, stdout: string, stderr: string): H
     return {
       action: 'block',
       message: structured.message ?? structured.reason,
+      updatedInput: structured.updatedInput,
       reason: structured.reason,
       stdout,
       stderr,
@@ -165,6 +170,7 @@ function resultFromExitCode(exitCode: number, stdout: string, stderr: string): H
 
   return allowResult({
     message: structured?.message,
+    updatedInput: structured?.updatedInput,
     stdout,
     stderr,
     exitCode,
@@ -174,7 +180,15 @@ function resultFromExitCode(exitCode: number, stdout: string, stderr: string): H
 
 function structuredOutput(
   stdout: string,
-): { action?: 'block'; reason?: string; message?: string; structuredOutput: true } | undefined {
+):
+  | {
+      action?: 'block';
+      reason?: string;
+      message?: string;
+      updatedInput?: Record<string, unknown>;
+      structuredOutput: true;
+    }
+  | undefined {
   const text = stdout.trim();
   if (text.length === 0) return undefined;
 
@@ -186,6 +200,7 @@ function structuredOutput(
     const { message, hookSpecificOutput } = output.data;
     const result = {
       message: message ?? hookSpecificOutput?.message,
+      updatedInput: hookSpecificOutput?.updatedInput,
       structuredOutput: true as const,
     };
     if (hookSpecificOutput?.permissionDecision !== 'deny') {
@@ -194,6 +209,7 @@ function structuredOutput(
     return {
       action: 'block',
       message: result.message,
+      updatedInput: result.updatedInput,
       reason:
         typeof hookSpecificOutput.permissionDecisionReason === 'string'
           ? hookSpecificOutput.permissionDecisionReason
@@ -207,6 +223,7 @@ function structuredOutput(
 
 function allowResult(input: {
   readonly message?: string;
+  readonly updatedInput?: Record<string, unknown>;
   readonly stdout?: string;
   readonly stderr?: string;
   readonly exitCode?: number;
@@ -216,6 +233,7 @@ function allowResult(input: {
   return {
     action: 'allow',
     message: input.message,
+    updatedInput: input.updatedInput,
     stdout: input.stdout,
     stderr: input.stderr,
     exitCode: input.exitCode,

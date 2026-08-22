@@ -23,6 +23,16 @@ export interface ResolvedToolExecutionHookContext extends ToolExecutionHookConte
   readonly execution: RunnableToolExecution;
 }
 
+export interface PrepareToolCallDecision {
+  readonly veto?: ExecutableToolResult;
+  readonly updatedArgs?: unknown;
+}
+
+export interface PrepareToolCallEvent extends ToolExecutionHookContext {
+  veto(result: ExecutableToolResult): void;
+  setUpdatedArgs(args: unknown): void;
+}
+
 export interface BeforeExecuteDecision {
   readonly veto?: ExecutableToolResult;
   readonly executionMetadata?: unknown;

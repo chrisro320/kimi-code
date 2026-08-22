@@ -17,6 +17,7 @@ import {
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type {
   BeforeToolExecuteEvent,
+  PrepareToolCallEvent,
   ToolExecutionOutcome,
 } from '#/agent/toolExecutor/toolHooks';
 import {
@@ -945,6 +946,141 @@ describe('onBeforeExecuteTool veto semantics', () => {
     expect(() => closed.veto({ output: 'x', isError: true })).toThrow(
       'veto can NOT be called asynchronously',
     );
+  });
+});
+
+describe('onPrepareToolCall updatedArgs', () => {
+  it('executes with rewritten args and reports them to onDidExecuteTool', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    const didArgs: unknown[] = [];
+    executor.hooks.onDidExecuteTool.register('test', async (ctx, next) => {
+      didArgs.push(ctx.args);
+      await next();
+    });
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 'rewritten' });
+    });
+
+    const results = await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
+
+    expect(results).toEqual([expect.objectContaining({ output: 'rewritten' })]);
+    expect(tool.calls).toEqual([expect.objectContaining({ args: { text: 'rewritten' } })]);
+    expect(didArgs).toEqual([{ text: 'rewritten' }]);
+  });
+
+  it('keeps the first updatedArgs when later listeners rewrite again', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 'first' });
+    });
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 'second' });
+    });
+
+    await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
+
+    expect(tool.calls).toEqual([expect.objectContaining({ args: { text: 'first' } })]);
+  });
+
+  it('resolves execution with rewritten args before beforeExecute authorization', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    const resolveSpy = vi.spyOn(tool, 'resolveExecution');
+    const seenByAuthorize: Array<{ args: unknown; approvalRule: unknown }> = [];
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 'rewritten' });
+    });
+    executor.onBeforeExecuteTool((event) => {
+      seenByAuthorize.push({ args: event.args, approvalRule: event.execution.approvalRule });
+    });
+
+    await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
+
+    expect(resolveSpy).toHaveBeenCalledWith({ text: 'rewritten' });
+    expect(seenByAuthorize).toEqual([{ args: { text: 'rewritten' }, approvalRule: 'echo' }]);
+  });
+
+  it('fails the call when rewritten args fail tool validation', async () => {
+    const tool = new TestTool('strict', {
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+        additionalProperties: false,
+      },
+    });
+    registry.register(tool);
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 42 });
+    });
+
+    const results = await execute([toolCall('call_strict', 'strict', { text: 'hi' })]);
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        isError: true,
+        output: expect.stringContaining('Invalid args for tool "strict" after prepareToolCall hook'),
+      }),
+    ]);
+    expect(tool.calls).toEqual([]);
+  });
+
+  it('records the veto with the rewritten args when a hook denies and rewrites', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    executor.onPrepareToolCall((event) => {
+      event.setUpdatedArgs({ text: 'rewritten' });
+      event.veto({ output: 'forbidden', isError: true });
+    });
+
+    const results = await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
+
+    expect(results).toEqual([expect.objectContaining({ output: 'forbidden', isError: true })]);
+    expect(tool.calls).toEqual([]);
+    const started = protocolEvents.find(
+      (event): event is ToolCallStarted => event.type === 'tool.call.started',
+    );
+    expect(started?.args).toEqual({ text: 'rewritten' });
+  });
+
+  it('settles a pre-aborted call as aborted without running prepare listeners', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    let prepareRan = false;
+    executor.onPrepareToolCall((event) => {
+      prepareRan = true;
+      event.setUpdatedArgs({ text: 'rewritten' });
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    const results = await execute(
+      [toolCall('call_echo', 'echo', { text: 'hi' })],
+      controller.signal,
+    );
+
+    expect(prepareRan).toBe(false);
+    expect(results).toEqual([
+      expect.objectContaining({ isError: true, output: expect.stringContaining('aborted') }),
+    ]);
+    expect(tool.calls).toEqual([]);
+  });
+
+  it('rejects late mutations after a prepare veto closed the statement window', async () => {
+    const tool = new TestTool('echo');
+    registry.register(tool);
+    let captured: PrepareToolCallEvent | undefined;
+    executor.onPrepareToolCall((event) => {
+      captured = event;
+      event.veto({ output: 'forbidden', isError: true });
+    });
+
+    await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
+
+    expect(captured).toBeDefined();
+    expect(() => captured!.setUpdatedArgs({ text: 'late' })).toThrow();
   });
 });
 

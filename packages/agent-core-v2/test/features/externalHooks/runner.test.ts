@@ -106,6 +106,62 @@ describe('runHook process runner', () => {
     expect(result.reason).toBe('use rg');
   });
 
+  it('passes hookSpecificOutput.updatedInput through on allow results', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { updatedInput: { command: "ls" } } }));',
+      ),
+      { tool_name: 'Bash' },
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('allow');
+    expect(result.updatedInput).toEqual({ command: 'ls' });
+  });
+
+  it('carries updatedInput alongside a permissionDecision=deny block', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "nope", updatedInput: { command: "ls" } } }));',
+      ),
+      { tool_name: 'Bash' },
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('block');
+    expect(result.reason).toBe('nope');
+    expect(result.updatedInput).toEqual({ command: 'ls' });
+  });
+
+  it('ignores a top-level updatedInput field outside hookSpecificOutput', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand('process.stdout.write(JSON.stringify({ updatedInput: { command: "ls" } }));'),
+      { tool_name: 'Bash' },
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('allow');
+    expect(result.updatedInput).toBeUndefined();
+  });
+
+  it('drops a non-object updatedInput without failing the hook', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ hookSpecificOutput: { message: "hi", updatedInput: "not-an-object" } }));',
+      ),
+      { tool_name: 'Bash' },
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('allow');
+    expect(result.message).toBe('hi');
+    expect(result.updatedInput).toBeUndefined();
+  });
+
   it('writes the input payload to the hook process stdin as JSON', async () => {
     const result = await runHook(
       hostProcess,

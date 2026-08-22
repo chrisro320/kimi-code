@@ -53,6 +53,12 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunner';
 import { ExternalHooksRunnerService } from '#/features/externalHooks/app/externalHooksRunnerService';
 import { makeHookRunner } from './runner-stub';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
+import { AgentToolExecutorService } from '#/agent/toolExecutor/toolExecutorService';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
+import type { ExecutableTool, ToolExecution, ToolResult } from '#/tool/toolContract';
 import type { AgentTaskInfo } from '#/agent/task/task';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -85,6 +91,8 @@ import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { IModelService } from '#/kosong/model/model';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
+import { recordingTelemetry } from '../../app/telemetry/stubs';
+import { registerLogServices } from '../../_base/log/stubs';
 import { stubLoopWithHooks, stubToolExecutor } from '../../agent/loop/stubs';
 import { registerStateServices } from '../../state/stubs';
 import { registerTestAgentWireServices } from '../../wire/stubs';
@@ -168,6 +176,24 @@ function stubHookRunner(partial: unknown): IExternalHooksRunnerService {
     hasHooksFor: () => false,
     ...p,
   } as IExternalHooksRunnerService;
+}
+
+class RecordingTool implements ExecutableTool<Record<string, unknown>> {
+  readonly description = 'Recording tool.';
+  readonly parameters = { type: 'object', additionalProperties: true };
+  readonly seen: Record<string, unknown>[] = [];
+
+  constructor(readonly name: string) {}
+
+  resolveExecution(args: Record<string, unknown>): ToolExecution {
+    return {
+      approvalRule: this.name,
+      execute: async () => {
+        this.seen.push(args);
+        return { output: 'ok' };
+      },
+    };
+  }
 }
 
 function stubSessionMetadata(title?: string): ISessionMetadata {
@@ -313,6 +339,104 @@ describe('IExternalHooksRunnerService integration', () => {
     });
     expect(dangerous.some((result) => result.action === 'block')).toBe(true);
     expect(dangerous[0]?.reason).toContain('rm -rf');
+  });
+
+  it('rewrites tool args through a PreToolUse hook updatedInput before execution', async () => {
+    const disposables = new DisposableStore();
+    let ix: TestInstantiationService | undefined;
+    try {
+      const preToolUseInputs: unknown[] = [];
+      const postToolUseInputs: unknown[] = [];
+      const hookEngine = {
+        trigger: async (event: string, args: { inputData?: unknown }) => {
+          if (event !== 'PreToolUse') return [];
+          preToolUseInputs.push(args.inputData);
+          return [{ action: 'allow', updatedInput: { command: 'ls -la' } }];
+        },
+        triggerBlock: async () => undefined,
+        fireAndForgetTrigger: async (event: string, args: { inputData?: unknown }) => {
+          if (event === 'PostToolUse') postToolUseInputs.push(args.inputData);
+          return [];
+        },
+      };
+      const tool = new RecordingTool('Bash');
+
+      ix = createServices(disposables, {
+        strict: true,
+        additionalServices: (reg) => {
+          registerStateServices(reg);
+          registerTestAgentWireServices(reg, 'wire/external-hooks');
+          reg.defineInstance(IBootstrapService, stubBootstrap());
+          reg.defineInstance(ISessionContext, stubSessionContext());
+          reg.defineInstance(ISessionMetadata, stubSessionMetadata());
+          reg.definePartialInstance(IConfigService, {});
+          reg.definePartialInstance(IPluginService, {});
+          reg.defineInstance(IAgentContextMemoryService, stubContextMemory());
+          reg.defineInstance(IAgentLoopService, stubLoopWithHooks());
+          registerAgentEventBus(reg);
+          reg.definePartialInstance(IAgentPromptService, {
+            hooks: createHooks(['onBeforeSubmitPrompt']),
+          });
+          reg.define(IAgentToolRegistryService, AgentToolRegistryService);
+          reg.define(IAgentToolExecutorService, AgentToolExecutorService);
+          reg.defineInstance(ITelemetryService, recordingTelemetry([]));
+          reg.defineInstance(IAgentToolResultTruncationService, {
+            _serviceBrand: undefined,
+            truncateForModel: async (input) => input.result,
+          });
+          reg.definePartialInstance(IAgentProfileService, {
+            getModelCapabilities: () => UNKNOWN_CAPABILITY,
+          });
+          reg.definePartialInstance(IAgentPermissionGate, {});
+          reg.definePartialInstance(IAgentFullCompactionService, {
+            hooks: createHooks(['onWillCompact']),
+          });
+          reg.definePartialInstance(IAgentTaskService, {});
+          registerLogServices(reg);
+        },
+      });
+      activateAgentEventBus(ix);
+      ix.set(IExternalHooksRunnerService, stubHookRunner(hookEngine));
+      ix.set(IAgentExternalHooksService, new SyncDescriptor(AgentExternalHooksService));
+      ix.get(IAgentExternalHooksService);
+
+      const registry = ix.get(IAgentToolRegistryService);
+      registry.register(tool);
+      const executor = ix.get(IAgentToolExecutorService);
+
+      const results: ToolResult[] = [];
+      for await (const item of executor.execute(
+        [
+          {
+            type: 'function',
+            id: 'call_bash',
+            name: 'Bash',
+            arguments: JSON.stringify({ command: 'rm -rf /' }),
+          },
+        ],
+        { turnId: 0, signal: new AbortController().signal },
+      )) {
+        results.push(item.result);
+      }
+
+      expect(preToolUseInputs).toEqual([
+        expect.objectContaining({
+          toolName: 'Bash',
+          toolInput: { command: 'rm -rf /' },
+        }),
+      ]);
+      expect(tool.seen).toEqual([{ command: 'ls -la' }]);
+      expect(postToolUseInputs).toEqual([
+        expect.objectContaining({
+          toolName: 'Bash',
+          toolInput: { command: 'ls -la' },
+        }),
+      ]);
+      expect(results).toEqual([expect.objectContaining({ output: 'ok' })]);
+    } finally {
+      ix?.dispose();
+      disposables.dispose();
+    }
   });
 
   it('honors a Stop hook returning permissionDecision=deny by producing a block result with reason', async () => {

@@ -4,6 +4,7 @@ import type { Event } from '#/_base/event';
 import type { ToolResult } from '#/tool/toolContract';
 import type {
   BeforeToolExecuteEvent,
+  PrepareToolCallEvent,
   ToolDidExecuteContext,
   WillExecuteToolEvent,
 } from '#/agent/toolExecutor/toolHooks';
@@ -44,6 +45,8 @@ export interface IAgentToolExecutorService {
   readonly _serviceBrand: undefined;
 
   execute(calls: ToolCall[], options: ToolExecutorExecuteOptions): AsyncIterable<ToolExecutionResult>;
+
+  readonly onPrepareToolCall: Event<PrepareToolCallEvent>;
 
   readonly onBeforeExecuteTool: Event<BeforeToolExecuteEvent>;
 

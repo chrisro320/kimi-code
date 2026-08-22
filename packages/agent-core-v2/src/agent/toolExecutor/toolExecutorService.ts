@@ -27,8 +27,10 @@ import {
 } from '#/tool/toolContract';
 import type {
   BeforeToolExecuteEvent,
+  PrepareToolCallEvent,
   ResolvedToolExecutionHookContext,
   ToolDidExecuteContext,
+  ToolExecutionHookContext,
   ToolExecutionOutcome,
   WillExecuteToolEvent,
 } from '#/agent/toolExecutor/toolHooks';
@@ -41,6 +43,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { OrderedHookSlot } from '#/hooks';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import { BeforeToolExecuteEmitter } from './beforeToolExecuteEvent';
+import { PrepareToolCallEmitter } from './prepareToolCallEvent';
 import { DeterministicFailureFingerprint } from './deterministicFingerprint';
 import {
   IAgentToolExecutorService,
@@ -111,6 +114,8 @@ export const toolExecutorDupTypeTurnIdKey = defineState<number | undefined>(
 export class AgentToolExecutorService implements IAgentToolExecutorService {
   declare readonly _serviceBrand: undefined;
 
+  private readonly prepareEmitter = new PrepareToolCallEmitter();
+  readonly onPrepareToolCall: Event<PrepareToolCallEvent> = this.prepareEmitter.event;
   private readonly beforeExecuteEmitter = new BeforeToolExecuteEmitter();
   readonly onBeforeExecuteTool: Event<BeforeToolExecuteEvent> = this.beforeExecuteEmitter.event;
   private readonly willExecuteEmitter = new AsyncEmitter<WillExecuteToolEvent>();
@@ -205,6 +210,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     const preparedTasks: Array<{
       task: ToolExecutionTask;
       call: PreflightedToolCall;
+      effectiveArgs?: unknown;
       resolvedAccesses?: ToolAccesses;
       stopBatchAfterThis?: boolean;
     }> = [];
@@ -221,6 +227,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       preparedTasks.push({
         task: prepared.task,
         call,
+        effectiveArgs: prepared.effectiveArgs,
         resolvedAccesses: prepared.resolvedAccesses,
         stopBatchAfterThis: prepared.stopBatchAfterThis,
       });
@@ -293,6 +300,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
   private async finalizeTimedResult(
     prepared: {
       readonly call: PreflightedToolCall;
+      readonly effectiveArgs?: unknown;
       readonly resolvedAccesses?: ToolAccesses;
     },
     timedResult: TimedToolResult,
@@ -306,6 +314,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       options,
       timedResult.outcome,
       prepared.resolvedAccesses,
+      prepared.effectiveArgs,
     );
 
     this.dispatchToolResult(call, finalized, options);
@@ -347,6 +356,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     options: ToolExecutorExecuteOptions,
   ): Promise<{
     task: ToolExecutionTask;
+    effectiveArgs: unknown;
     resolvedAccesses?: ToolAccesses;
     stopBatchAfterThis?: boolean;
   }> {
@@ -355,10 +365,11 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       output: string,
       outcome: Exclude<ToolExecutionOutcome, 'executed'>,
       displayFields?: ToolCallDisplayFields,
-    ): { task: ToolExecutionTask } => {
+    ): { task: ToolExecutionTask; effectiveArgs: unknown } => {
       this.dispatchToolCall(call, args, options, displayFields);
       return {
         task: makeResolvedTask(makeErrorToolResult(call, args, output), outcome),
+        effectiveArgs: args,
       };
     };
 
@@ -370,6 +381,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     ): {
       task: ToolExecutionTask;
       stopBatchAfterThis?: boolean;
+      effectiveArgs: unknown;
     } => {
       const toolResult = this.normalizeAndMergeResult(result, call.toolName, undefined);
       this.dispatchToolCall(call, args, options, displayFields);
@@ -385,6 +397,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
           outcome,
         ),
         stopBatchAfterThis: toolResult.stopBatchAfterThis ?? toolResult.stopTurn,
+        effectiveArgs: args,
       };
     };
 
@@ -392,22 +405,45 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       return settleError(call.args, call.output, 'preflight-rejected');
     }
 
+    const prepareDecision = options.signal.aborted
+      ? undefined
+      : await this.prepareEmitter.firePrepare(
+          buildPrepareToolCallContext(call, allCalls, options),
+        );
+
+    const effectiveArgs = prepareDecision?.updatedArgs ?? call.args;
+
+    if (prepareDecision?.veto !== undefined) {
+      return settleSynthetic(effectiveArgs, prepareDecision.veto, 'vetoed');
+    }
+
+    if (prepareDecision?.updatedArgs !== undefined) {
+      const validationError = validateExecutableToolArgs(call.tool, effectiveArgs);
+      if (validationError !== null) {
+        return settleError(
+          effectiveArgs,
+          `Invalid args for tool "${call.toolName}" after prepareToolCall hook: ${validationError}`,
+          'resolution-failed',
+        );
+      }
+    }
+
     let execution: ToolExecution;
     try {
-      execution = await call.tool.resolveExecution(call.args);
+      execution = await call.tool.resolveExecution(effectiveArgs);
     } catch (error) {
       const output =
         error instanceof PathSecurityError
           ? error.message
           : `Tool "${call.toolName}" failed to resolve execution: ${errorMessage(error)}`;
-      return settleError(call.args, output, 'resolution-failed');
+      return settleError(effectiveArgs, output, 'resolution-failed');
     }
 
     const displayFields = toolCallDisplayFieldsFromExecution(execution);
 
     if (options.signal.aborted) {
       return settleError(
-        call.args,
+        effectiveArgs,
         abortedToolOutput(call.toolName, options.signal),
         'aborted',
         displayFields,
@@ -417,20 +453,20 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     // Deterministic failure fingerprint: this exact (toolName, args) already
     // failed on a path-shape condition that cannot change between calls —
     // block before execution with the recorded failure instead of re-running.
-    const blocked = this.deterministicFailures.checkFingerprint(call.toolName, call.args);
+    const blocked = this.deterministicFailures.checkFingerprint(call.toolName, effectiveArgs);
     if (blocked !== null) {
-      return settleSynthetic(call.args, blocked, 'synthetic', displayFields);
+      return settleSynthetic(effectiveArgs, blocked, 'synthetic', displayFields);
     }
 
     if (execution.isError === true) {
-      return settleSynthetic(call.args, execution, 'synthetic', displayFields);
+      return settleSynthetic(effectiveArgs, execution, 'synthetic', displayFields);
     }
 
-    const beforeContext = buildBeforeExecuteContext(call, execution, allCalls, options);
+    const beforeContext = buildBeforeExecuteContext(call, effectiveArgs, execution, allCalls, options);
     const decision = await this.beforeExecuteEmitter.fireBeforeExecute(beforeContext);
 
     if (decision?.veto !== undefined) {
-      return settleSynthetic(call.args, decision.veto, 'vetoed', displayFields);
+      return settleSynthetic(effectiveArgs, decision.veto, 'vetoed', displayFields);
     }
 
     const executionMetadata = decision?.executionMetadata;
@@ -440,19 +476,27 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
         turnId: options.turnId,
         toolCall: call.toolCall,
         execution,
-        args: call.args,
+        args: effectiveArgs,
       },
       options.signal,
     );
 
-    this.dispatchToolCall(call, call.args, options, displayFields);
+    this.dispatchToolCall(call, effectiveArgs, options, displayFields);
 
     return {
       task: {
         accesses: execution.accesses ?? ToolAccesses.all(),
         execute: async (taskSignal) =>
-          this.runSingleExecution(call, execution, executionMetadata, options, taskSignal),
+          this.runSingleExecution(
+            call,
+            effectiveArgs,
+            execution,
+            executionMetadata,
+            options,
+            taskSignal,
+          ),
       },
+      effectiveArgs,
       resolvedAccesses: execution.accesses,
       stopBatchAfterThis: execution.stopBatchAfterThis,
     };
@@ -518,6 +562,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
 
   private async runSingleExecution(
     call: RunnableToolCall,
+    args: unknown,
     execution: RunnableToolExecution,
     metadata: unknown,
     options: ToolExecutorExecuteOptions,
@@ -527,7 +572,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       return {
         result: makeErrorToolResult(
           call,
-          call.args,
+          args,
           abortedToolOutput(call.toolName, signal),
         ).result,
         outcome: 'aborted',
@@ -554,7 +599,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
         ? abortedToolOutput(call.toolName, signal)
         : `Tool "${call.toolName}" failed: ${errorMessage(error)}`;
       return {
-        result: makeErrorToolResult(call, call.args, output).result,
+        result: makeErrorToolResult(call, args, output).result,
         outcome: 'executed',
       };
     }
@@ -643,16 +688,19 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     options: ToolExecutorExecuteOptions,
     outcome: ToolExecutionOutcome,
     resolvedAccesses?: ToolAccesses,
+    effectiveArgs?: unknown,
   ): Promise<ToolResult> {
+    const recordArgs = effectiveArgs ?? call.args;
+
     // Deterministic failure fingerprint: record path-shape failures, and
     // drop records whose paths a successful mutation just changed. Only real
     // executions count — synthetic/vetoed results are not filesystem
     // evidence.
     if (outcome === 'executed') {
       if (result.isError === true) {
-        this.deterministicFailures.recordIfDeterministic(call.toolName, call.args, result);
+        this.deterministicFailures.recordIfDeterministic(call.toolName, recordArgs, result);
       } else {
-        this.deterministicFailures.invalidateOnSuccess(call.toolName, call.args);
+        this.deterministicFailures.invalidateOnSuccess(call.toolName, recordArgs);
       }
     }
 
@@ -663,7 +711,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       toolCall: call.toolCall,
       toolCalls: [call.toolCall],
       tool: call.kind === 'runnable' ? call.tool : undefined,
-      args: call.args,
+      args: recordArgs,
       outcome,
       accesses: resolvedAccesses,
       result: result as ExecutableToolResult,
@@ -735,8 +783,25 @@ interface PreparedToolResult {
 
 type ToolCallDisplayFields = { description?: string | undefined; display?: ToolInputDisplay | undefined };
 
+function buildPrepareToolCallContext(
+  call: RunnableToolCall,
+  allCalls: readonly ToolCall[],
+  options: ToolExecutorExecuteOptions,
+): ToolExecutionHookContext {
+  return {
+    turnId: options.turnId,
+    signal: options.signal,
+    trace: options.trace,
+    toolCall: call.toolCall,
+    toolCalls: allCalls,
+    tool: call.tool,
+    args: call.args,
+  };
+}
+
 function buildBeforeExecuteContext(
   call: RunnableToolCall,
+  args: unknown,
   execution: RunnableToolExecution,
   allCalls: readonly ToolCall[],
   options: ToolExecutorExecuteOptions,
@@ -748,7 +813,7 @@ function buildBeforeExecuteContext(
     toolCall: call.toolCall,
     toolCalls: allCalls,
     tool: call.tool,
-    args: call.args,
+    args,
     execution,
   };
 }
