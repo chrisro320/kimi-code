@@ -910,6 +910,26 @@ describe('AcpService', () => {
     expect(assistant?.toolCalls.map((entry) => entry.id)).toEqual(['call_1']);
   });
 
+  // acp-kernel 0.0.32 answers an all-stale batch with its own fix — run
+  // acp_status, then re-issue in the same turn. The tail this service appends
+  // used to prescribe a different one (widen the range), which does nothing
+  // when the refs themselves no longer resolve.
+  it('does not prescribe widening when the kernel reports every ref stale', async () => {
+    const setup = createService();
+    owned.push(setup.disposables);
+    const messages = bigMessages(10);
+    setup.env.history = messages;
+    await transform(setup.requester.manager(), messages);
+
+    const result = await setup.service.compress({
+      ranges: [{ startRef: 'm09001', endRef: 'm09002', summary: SUMMARY }],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('acp_status');
+    expect(result.message).not.toContain('widen the range(s) to cover more messages');
+  });
+
   it('reports ACP status with health and usage', async () => {
     const setup = createService();
     owned.push(setup.disposables);
@@ -1321,18 +1341,20 @@ describe('AcpService', () => {
 
     const unfolded = await shallow.service.decompress({ blockId: 'b1' });
     expect(unfolded.ok).toBe(true);
-    // Fully unwound: every folded body is back in the view. The compress
-    // call/result pair stays hidden — with no active block referencing it,
-    // the kernel treats the pair as consumed metadata, not content.
+    // Fully unwound: every folded body is back in the view, and so is the
+    // compress call/result pair — acp-kernel 0.0.32 keeps the newest two
+    // orphaned pairs visible on purpose (a hidden failed compress let a
+    // deterministic model re-issue the identical call at a fixed point).
+    // Nothing is left to fold, so the view is byte-identical to the input.
     const unwound = await transform(shallow.requester.manager(), messages);
-    expect(unwound.accounting).toBe('transformed');
-    expect(unwound.messages).toHaveLength(messages.length - 1);
+    expect(unwound.accounting).toBe('raw-equivalent');
+    expect(unwound.messages).toHaveLength(messages.length);
     const unwoundBody = unwound.messages.map(messageText).join('\n');
     expect(unwoundBody).toContain('foldneedle');
     expect(unwoundBody).toContain('MARKER-9');
-    expect(unwound.messages.some((message) => message.role === 'tool')).toBe(false);
+    expect(unwound.messages.some((message) => message.role === 'tool')).toBe(true);
     const unwoundAssistant = unwound.messages.find((message) => message.role === 'assistant');
-    expect(unwoundAssistant?.toolCalls).toHaveLength(0);
+    expect(unwoundAssistant?.toolCalls).toHaveLength(1);
     expect(shallow.service.status().health).toBe('healthy');
 
     // (b) A full decompress of the tier-two block unwinds the whole chain.
@@ -1351,11 +1373,11 @@ describe('AcpService', () => {
     const afterFull = full.store.values.get(key) as AcpSidecar;
     expect((afterFull.compressionState as { blocks: unknown[] }).blocks).toHaveLength(0);
     const fullUnwound = await transform(full.requester.manager(), messages);
-    expect(fullUnwound.accounting).toBe('transformed');
+    expect(fullUnwound.accounting).toBe('raw-equivalent');
     const fullBody = fullUnwound.messages.map(messageText).join('\n');
     expect(fullBody).toContain('foldneedle');
     expect(fullBody).toContain('MARKER-9');
-    expect(fullUnwound.messages.some((message) => message.role === 'tool')).toBe(false);
+    expect(fullUnwound.messages.some((message) => message.role === 'tool')).toBe(true);
   });
 
   it('emits the kernel-filtered compress arguments once a range is distilled away', async () => {

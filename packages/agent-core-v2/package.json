@@ -65,7 +65,7 @@
     "@moonshot-ai/protocol": "workspace:^",
     "@moonshot-ai/tree-sitter-bash": "workspace:^",
     "@mozilla/readability": "^0.6.0",
-    "acp-kernel": "0.0.29",
+    "acp-kernel": "0.0.32",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
     "billion-context-kit": "0.2.0",
